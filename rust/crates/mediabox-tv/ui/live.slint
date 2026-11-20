@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 
 // Live television, over the broadcast.
 //
@@ -219,6 +220,8 @@ component Keypad inherits Rectangle {
     drop-shadow-blur: 8 * dp;
     drop-shadow-color: #00000080;
 
+    PointerSwallow { }
+
     Thin {
         x: 16 * dp;
         y: 6 * dp;
@@ -231,6 +234,7 @@ component Keypad inherits Rectangle {
         width: parent.width;
         height: 48 * dp;
         background: i == root.selected ? #FFFFFF33 : transparent;
+        PointerTarget { zone: "live-keypad"; index: i; }
         HorizontalLayout {
             padding-left: 16 * dp;
             padding-right: 16 * dp;
@@ -276,13 +280,23 @@ component Menu inherits Rectangle {
             : root.height - 124 * dp + 16 * dp + (r - root.at-row - 1) * 36 * dp;
         animate y { duration: 250ms; easing: ease-out; }
 
-        Text {
+        menu-title := Text {
             x: 0;
             y: r == root.at-row ? -40 * dp : 0;
             text: menu-row.title;
             color: r == root.at-row ? #EEEEEE : #EEEEEE99;
             font-size: r == root.at-row ? 20 * dp : 16 * dp;
             font-weight: 500;
+        }
+        // A row's title brings the row forward on a click; passing over it
+        // does not, or the rows would move under a still arrow.
+        PointerTarget {
+            x: 0;
+            y: menu-title.y;
+            width: menu-title.preferred-width + 16 * dp;
+            height: menu-title.preferred-height;
+            zone: "live-menu";
+            index: r * 100 + 99;
         }
         if r == root.at-row: HorizontalLayout {
             y: 0;
@@ -296,6 +310,7 @@ component Menu inherits Rectangle {
                 background: c == root.at-col ? #455A64F2 : #263238E6;
                 border-width: c == root.at-col ? 2 * dp : 0;
                 border-color: #EEEEEE;
+                PointerTarget { zone: "live-menu"; index: r * 100 + c; }
                 VerticalLayout {
                     padding: 10 * dp;
                     spacing: 4 * dp;
@@ -373,11 +388,21 @@ component Guide inherits Rectangle {
         }
     }
 
+    // The channels are a window of rows Rust keeps: the hand and the wheel
+    // move it a channel at a time (`PointerHub.step`), the focus never.
+    PanState {
+        surface: "live-guide";
+        pitch: row-h;
+    }
+
     for row[i] in root.rows: Rectangle {
         x: left;
         y: rows-y + i * row-h;
         width: root.width - left;
         height: row-h;
+        // The channel's name is read, not chosen: a click on it is nothing,
+        // not the guide's Back; a drag on it moves the channels.
+        PointerPanArea { surface: "live-guide"; }
         // The channel column. Placed, not left to Slint, which centres an
         // element given only a width.
         Rectangle {
@@ -415,11 +440,12 @@ component Guide inherits Rectangle {
             height: 100%;
             background: #263238F2;
             clip: true;
-            for cell in row.cells: Rectangle {
+            for cell[c] in row.cells: Rectangle {
                 x: cell.x * grid-w;
                 width: cell.w * grid-w;
                 height: 100%;
                 background: cell.focused ? #0176BC : transparent;
+                PointerTarget { zone: "live-guide"; index: i * 100 + c; }
                 border-width: 0.5px;
                 border-color: #EEEEEE1A;
                 Text {
@@ -504,6 +530,19 @@ component Panel inherits Rectangle {
     drop-shadow-blur: 8 * dp;
     drop-shadow-color: #00000080;
 
+    PointerSwallow { }
+    // A window of rows Rust keeps: the hand and the wheel move it a row at
+    // a time (`PointerHub.step`), the focus never.
+    PanState {
+        surface: "live-panel";
+        pitch: 48 * dp;
+    }
+    PointerPanArea {
+        y: 76 * dp;
+        height: parent.height - self.y;
+        surface: "live-panel";
+    }
+
     Text {
         x: 24 * dp;
         y: 27 * dp;
@@ -526,6 +565,8 @@ component Panel inherits Rectangle {
         height: 48 * dp;
         border-radius: 2 * dp;
         background: i == root.at-row ? #0176BC : transparent;
+        // A row that cannot be chosen takes neither hover nor a click.
+        if row.enabled: PointerTarget { zone: "live-panel"; index: i; }
         Rectangle {
             x: 16 * dp;
             width: 14 * dp;
@@ -602,6 +643,7 @@ component Setup inherits Rectangle {
         border-radius: 2 * dp;
         drop-shadow-blur: 8 * dp;
         drop-shadow-color: #00000080;
+        PointerSwallow { }
         Text {
             x: 24 * dp;
             y: 18 * dp;
@@ -617,6 +659,7 @@ component Setup inherits Rectangle {
             height: 48 * dp;
             border-radius: 2 * dp;
             background: i == root.at-row ? #0176BC : transparent;
+            if row.enabled: PointerTarget { zone: "live-setup"; index: i; }
             Text {
                 x: 16 * dp;
                 width: parent.width * 0.6;
@@ -679,6 +722,7 @@ component Setup inherits Rectangle {
         border-radius: 2 * dp;
         drop-shadow-blur: 8 * dp;
         drop-shadow-color: #00000080;
+        PointerSwallow { }
         inner := HorizontalLayout {
             padding: 24 * dp;
             padding-left: 28 * dp;
@@ -755,6 +799,7 @@ component Setup inherits Rectangle {
                         height: 36 * dp;
                         border-radius: 2 * dp;
                         background: i == root.at-action ? #0176BC : #FFFFFF1A;
+                        PointerTarget { zone: "live-actions"; index: i; }
                         label := Text {
                             text: action;
                             color: #EEEEEE;
@@ -831,6 +876,26 @@ export component LiveTv inherits Rectangle {
     property <length> dp: Dp.dp;
 
     background: root.dark ? #000000 : transparent;
+
+    property <bool> overlaid: root.menu-shown || root.guide-shown || root.panel-shown
+        || root.keypad-shown || root.setup-shown;
+
+    // The ground over the picture, with nothing else up: a click on it is
+    // the remote's Ok there, which brings the menu (and the banner) up. The
+    // broadcast itself is on the video plane and is no target.
+    if !overlaid: PointerTarget {
+        width: root.width;
+        height: root.height;
+        zone: "live-surface";
+        index: 0;
+    }
+    // Under an overlay, nothing of the picture is pointed at; a click off
+    // the overlay is Back, which takes it away (or one step back in the
+    // setup), as the remote's does.
+    if overlaid: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
 
     // What is wrong with the channel, or that it is coming: in the middle of
     // the black where the picture would be.
@@ -915,6 +980,15 @@ export component LiveTv inherits Rectangle {
         progress: root.setup-progress;
         actions: root.setup-actions;
         at-action: root.setup-focus;
+    }
+
+    // The way back, for a pointer: the remote's Back -- an overlay goes,
+    // or with nothing up, live television is left. In the margin the
+    // reference's overlays leave free at the top left.
+    PointerClose {
+        x: 12 * dp;
+        y: 27 * dp;
+        mark: root.overlaid ? "close" : "back";
     }
 
     // The live monitor, over everything else on this screen: a small table

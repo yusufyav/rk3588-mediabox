@@ -90,6 +90,8 @@ export component Home inherits Rectangle {
         for tile[i] in apps: AppIcon {
             tile: tile;
             focused: i == focus-col;
+            pointer-zone: "home";
+            pointer-index: i;
         }
     }
 }

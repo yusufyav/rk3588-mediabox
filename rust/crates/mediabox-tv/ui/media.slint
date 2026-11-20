@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { Rail, RailModel } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -38,7 +39,15 @@ export component Media inherits Rectangle {
     property <length> head: root.height * 0.037 - Metrics.focus-room;
     property <length> viewport-h: root.height - rails-top;
     property <length> content-h: max(1px, rail-h * rails.length);
-    property <length> scroll: clamp(focus-row * rail-h, 0px, max(0px, content-h - viewport-h));
+    // Where the remote's focus scrolls the board, or a pointer's hand.
+    pan := PanState {
+        surface: "shelves";
+        item: rail-h;
+        remote: clamp(focus-row * rail-h, 0px, max(0px, content-h - viewport-h));
+        limit: max(0px, content-h - viewport-h);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     background: Theme.catalog-bg;
     clip: true;
@@ -56,13 +65,15 @@ export component Media inherits Rectangle {
         height: viewport-h + Metrics.focus-room;
         clip: true;
 
+        PointerPanArea { surface: "shelves"; }
+
         Rectangle {
             x: 0;
             y: Metrics.focus-room - scroll;
             width: 100%;
             height: content-h;
 
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for rail[r] in rails: Rail {
                 x: 0;
@@ -75,6 +86,8 @@ export component Media inherits Rectangle {
                 head: head;
                 focus-col: r < columns.length ? columns[r] : 0;
                 active: zone == 0 && focus-row == r;
+                pointer-zone: "shelves";
+                pointer-row: r;
             }
         }
     }
@@ -84,6 +97,12 @@ export component Media inherits Rectangle {
     // The reference's, measured off its board: just right of the focused
     // poster's name, 0.96 of a poster in from its left, 80% of one wide,
     // a line every 0.29 of its width, #0f0d20 with a faint violet edge.
+    // Under the menu, the board is not pointed at; a click on it is Back,
+    // which closes the menu.
+    if menu-line >= 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if menu-line >= 0 && rails.length > focus-row: Rectangle {
         property <length> step: Metrics.card-w + Metrics.rail-gap;
         property <length> x0: content-x - Metrics.focus-room;
@@ -106,6 +125,8 @@ export component Media inherits Rectangle {
         drop-shadow-blur: Metrics.card-w * 0.05;
         drop-shadow-color: #7b5bf533;
 
+        PointerSwallow { }
+
         for label[k] in menu: Rectangle {
             y: k * parent.line-h;
             height: parent.line-h;
@@ -118,6 +139,10 @@ export component Media inherits Rectangle {
                 color: Theme.text;
                 font-size: Metrics.card-w * 0.09;
                 vertical-alignment: center;
+            }
+            PointerTarget {
+                zone: "media-menu";
+                index: k;
             }
         }
     }

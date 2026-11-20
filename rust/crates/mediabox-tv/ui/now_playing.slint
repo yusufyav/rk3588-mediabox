@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { Reading, TechRow, NpControl } from "components.slint";
+import { PointerTarget } from "pointer.slint";
 
 // What is on the television right now.
 //
@@ -175,6 +176,7 @@ export component NowPlaying inherits Rectangle {
                         wrap: no-wrap;
                     }
                 }
+                PointerTarget { zone: "np-controls"; index: i; }
             }
         }
     }

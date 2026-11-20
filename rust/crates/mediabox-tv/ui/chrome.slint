@@ -1,5 +1,6 @@
 import { Theme, Metrics } from "theme.slint";
 import { Icon } from "kit.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerHub } from "pointer.slint";
 import { ReferenceIcon } from "reference-icons.slint";
 
 // The account, as the reference's profile mark at the top right shows it.
@@ -70,12 +71,18 @@ export component Chrome inherits Rectangle {
             size: parent.height * 0.44;
             ink: parent.focused ? #0a0c10 : #d9d8df;
         }
+        PointerTarget {
+            zone: "frame-search";
+            index: 0;
+        }
     }
 
     // ------------------------------------------------------ the places, left
     //
     // The product's own mark at the top rather than the reference's: a play
-    // mark in the accent.
+    // mark in the accent. While a pointer is in use it is the way back --
+    // the back arrow on the same mark -- and a click on it is Back, which
+    // leaves the catalogue's page as the remote's does.
     Rectangle {
         x: root.width * 0.0206 - self.width / 2;
         y: root.height * 0.0181;
@@ -83,8 +90,11 @@ export component Chrome inherits Rectangle {
         height: self.width;
         border-radius: self.width * 0.28;
         background: Theme.film;
+        // The arrow over it: a light edge, never the remote's white.
+        border-width: back-mark.lit ? max(1px, self.width * 0.06) : 0px;
+        border-color: #ffffffb3;
 
-        Path {
+        if !PointerHub.shown: Path {
             x: parent.width * 0.3;
             y: parent.height * 0.26;
             width: parent.width * 0.46;
@@ -93,6 +103,30 @@ export component Chrome inherits Rectangle {
             viewbox-height: 10;
             commands: "M1 0L10 5L1 10z";
             fill: #ffffff;
+        }
+        if PointerHub.shown: Path {
+            x: parent.width * 0.2;
+            y: parent.height * 0.2;
+            width: parent.width * 0.6;
+            height: parent.height * 0.6;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M15 5l-7 7 7 7";
+            fill: transparent;
+            stroke: #ffffff;
+            stroke-width: max(1.6px, parent.width * 0.09);
+            stroke-line-cap: round;
+            stroke-line-join: round;
+        }
+        back-mark := PointerTarget {
+            // A little more than the mark, so it is easy to land on.
+            x: -parent.width * 0.4;
+            y: -parent.height * 0.4;
+            width: PointerHub.shown ? parent.width * 1.8 : 0px;
+            height: parent.height * 1.8;
+            zone: "back";
+            index: 0;
+            veil: false;
         }
     }
 
@@ -142,6 +176,11 @@ export component Chrome inherits Rectangle {
             horizontal-alignment: center;
             wrap: no-wrap;
         }
+
+        PointerTarget {
+            zone: "frame-places";
+            index: i;
+        }
     }
 
     // ------------------------------------------------------ the account, right
@@ -157,6 +196,12 @@ export component Chrome inherits Rectangle {
     account-mark := Rectangle {
         visible: root.search;
         property <bool> focused: on-search && AccountChip.focus == 1;
+        // A click on the mark drops its menu, as Right and Ok from the
+        // search box do; passing over it does not.
+        PointerTarget {
+            zone: "frame-account";
+            index: 1;
+        }
         width: root.width * 0.0135;
         height: self.width;
         x: root.width * 0.967 - self.width / 2;
@@ -195,6 +240,12 @@ export component Chrome inherits Rectangle {
         fill: #ffffffb0;
     }
 
+    // While the account's menu is down, nothing under it is pointed at; a
+    // click off it is Back, which takes it up.
+    if root.search && on-search && AccountChip.focus > 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if root.search && on-search && AccountChip.focus > 0: Rectangle {
         width: chip-rem * 22;
         height: chip-rem * 7;
@@ -206,6 +257,8 @@ export component Chrome inherits Rectangle {
         border-color: #ffffff1f;
         drop-shadow-blur: chip-rem;
         drop-shadow-color: #00000080;
+
+        PointerSwallow { }
 
         HorizontalLayout {
             padding-top: chip-rem * 1.5;
@@ -262,6 +315,10 @@ export component Chrome inherits Rectangle {
                             font-weight: 500;
                             horizontal-alignment: center;
                             vertical-alignment: center;
+                        }
+                        PointerTarget {
+                            zone: "frame-account-menu";
+                            index: 0;
                         }
                     }
                 }

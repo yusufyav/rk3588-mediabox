@@ -119,7 +119,9 @@ fn letters() -> Vec<Vec<Cap>> {
 
 /// How many columns a grid is laid out at. Every row is exactly this wide,
 /// counting spans: the panel draws at a fixed column width and a row that came
-/// to more put a key off the edge of the television.
+/// to more put a key off the edge of the television. The grids' own rows are
+/// that width by construction; only the tests count it.
+#[cfg(test)]
 pub const COLUMNS: usize = 10;
 
 /// What pressing a key means to whatever is holding the text.
@@ -240,6 +242,17 @@ impl Grid {
         false
     }
 
+    /// Puts the remote on the key at `row`, `col`, as a pointer names it.
+    /// False when there is no such key, and nothing moves.
+    pub fn point(&mut self, row: usize, col: usize) -> bool {
+        if self.rows.get(row).is_none_or(|keys| col >= keys.len()) {
+            return false;
+        }
+        self.row = row;
+        self.col = col;
+        true
+    }
+
     pub fn at_top(&self) -> bool {
         self.row == 0
     }
@@ -278,6 +291,21 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pointer_names_a_key_that_is_there_or_nothing_moves() {
+        let mut grid = Grid::text();
+        assert!(grid.point(2, 3));
+        assert_eq!((grid.row(), grid.col()), (2, 3));
+        let last = grid.rows().len() - 1;
+        let wide = grid.rows()[last].len();
+        assert!(
+            !grid.point(last, wide),
+            "past the last key of a row of wide keys"
+        );
+        assert!(!grid.point(last + 1, 0));
+        assert_eq!((grid.row(), grid.col()), (2, 3));
+    }
 
     /// The grid is drawn at a fixed column width, so a row that is wider than
     /// the grid puts a key off the edge of the television.

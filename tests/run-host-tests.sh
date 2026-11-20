@@ -202,8 +202,11 @@ lacks "the C++ probes do not default to ScreenBridge" "$(cat "$here/CMakeLists.t
 # path, a pkg-config path, an install prefix or an rpath. Naming it in order to
 # check it — a guard, an ldd, a diff — is the whole point of some of these
 # files, so the rule is about what the line does, not about the word.
+# Cargo's build output is not source: rust/crates/*/target holds tens of
+# gigabytes of objects, and scanning them was nearly all of this script's
+# running time.
 uses_foreign_prefix() {
-  grep -rnE '(LD_LIBRARY_PATH|PKG_CONFIG_PATH|--prefix|-rpath|Environment)[^#]*/opt/rk3588-screenbridge' \
+  grep -rnE --exclude-dir=target '(LD_LIBRARY_PATH|PKG_CONFIG_PATH|--prefix|-rpath|Environment)[^#]*/opt/rk3588-screenbridge' \
     "$here/scripts" "$here/packaging" "$here/config" "$here/rust/crates" 2>/dev/null \
     | grep -v '^.*:#' || true
 }
@@ -393,6 +396,66 @@ for f in packaging/mediabox-display-guard packaging/mediabox-display-recover; do
     failures=$((failures + 1))
   fi
 done
+
+echo
+echo "-- a pointer goes at a key, and does nothing where it is disabled"
+
+# The arrow is up while a pointer is the thing in use and gone at the first
+# key: the remote's own road (infrared, a keyboard's remote keys), the
+# daemon's (CEC, the phone, injected), and a keyboard's typed keys. The rules
+# themselves are tested in src/pointer.rs; this is that each road calls them.
+tv_main="$here/rust/crates/mediabox-tv/src/main.rs"
+contains "a remote's key hides the pointer" \
+  "$(sed -n '/pub fn remote_key(/,/^    fn press(/p' "$tv_main")" 'self.hide_pointer();'
+contains "a key from the daemon hides the pointer" \
+  "$(sed -n '/fn bus_input(/,/^    fn open(/p' "$tv_main")" 'self.hide_pointer();'
+contains "a keyboard's key hides the pointer" \
+  "$(sed -n '/window.on_key_pressed(/,/});/p' "$tv_main")" 'app.hide_pointer()'
+# Where src/pointer.rs's table says Disabled, motion, the button and the
+# wheel stop at the door -- a click is never turned into Ok there.
+for entry in pointer_motion pointer_button pointer_scroll pointer_back; do
+  contains "$entry stops where the pointer is disabled" \
+    "$(sed -n "/pub fn $entry(/,/^    }/p" "$tv_main")" 'if !self.pointer_policy().enabled() {'
+done
+# Hover is a look, never the remote's focus: only a click moves the focus,
+# through the screen's own model. The gesture machine (src/pointer.rs) and
+# the real interface (src/hit.rs) test the rest; this is that the roads
+# call them.
+lacks "hover does not move the remote's focus" \
+  "$(sed -n '/pub fn pointer_hover(/,/^    }/p' "$tv_main")" 'pointer_point'
+contains "the button's release is the click, through the gesture" \
+  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'self.gesture.target_up(zone, index, context)'
+lacks "a press down is no Ok" \
+  "$(sed -n '/pub fn pointer_press(/,/^    }/p' "$tv_main")" 'self.press('
+# A click on a target that cannot take the focus (disabled, out of range,
+# under a modal) presses nothing -- never Ok on whatever had the focus.
+contains "a refused target is not pressed" \
+  "$(sed -n '/    fn pointer_click(/,/^    }/p' "$tv_main")" 'pointer::Aim::Refused => return,'
+contains "every paint settles the pointer's policy" \
+  "$(sed -n '/^    fn paint(&mut self) {/,/^    }/p' "$tv_main")" 'self.pointer_sync();'
+# Nothing is left held. A click is a press and its release at once, never a
+# held Ok; a press taken away fires nothing; a key, a hidden arrow or another
+# screen drops a drag along the film's bar without seeking, and ends any
+# drag or coast; the bar's drag is the player's alone (Full).
+contains "a click holds no Ok" \
+  "$(sed -n '/    fn pointer_click(/,/^    }/p' "$tv_main")" 'self.ok_hold = None;'
+contains "a cancelled press fires nothing" \
+  "$(sed -n '/pub fn pointer_cancel(/,/^    }/p' "$tv_main")" 'self.gesture.cancel();'
+contains "hiding the arrow drops a drag" \
+  "$(sed -n '/    fn hide_pointer(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "the remote brings the scrolled surfaces back to its focus" \
+  "$(sed -n '/    fn hide_pointer(/,/^    }/p' "$tv_main")" 'self.pointer_release_views();'
+contains "another screen drops a drag" \
+  "$(sed -n '/    fn pointer_sync(/,/^    }/p' "$tv_main")" 'self.pointer_drop_drag();'
+contains "another screen ends a gesture" \
+  "$(sed -n '/    fn pointer_sync(/,/^    }/p' "$tv_main")" 'self.pointer_end_gesture();'
+contains "the bar's drag is the player's only" \
+  "$(sed -n '/pub fn pointer_scrub(/,/^    }/p' "$tv_main")" 'self.pointer_policy() != pointer::Policy::Full'
+contains "a drag goes to the film by the remote's own seek" \
+  "$(sed -n '/pub fn pointer_scrub(/,/^    }/p' "$tv_main")" 'self.transport(Transport::SeekTo(seconds));'
+# A pointer's own Back -- its right or thumb button -- is the remote's Back.
+contains "a pointer's Back is the remote's Back" \
+  "$(sed -n '/pub fn pointer_back(/,/^    }/p' "$tv_main")" 'self.press(InputAction::Back, pressed, input::Origin::Keyboard);'
 
 echo
 echo "-- the television can sign in to a Stremio account, and cannot leak the password"
@@ -787,6 +850,19 @@ else
   "$here/tests/check-install-bootstrap.sh" | sed 's/^/     /'
   failures=$((failures + 1))
 fi
+# A scoped deploy's appliance half and its rollback, on a scratch prefix with
+# a stub systemctl: rollback first, rename, sums before a restart, the
+# running process by its full sha256, a stopped service never started.
+if "$here/tests/check-deploy-only.sh" >/dev/null 2>&1; then
+  echo "ok   DEPLOY_ONLY=PASS"
+else
+  echo "FAIL DEPLOY_ONLY:"
+  "$here/tests/check-deploy-only.sh" | sed 's/^/     /'
+  failures=$((failures + 1))
+fi
+contains "deploy --only ships that script and names each unit's binary" \
+  "$(sed -n '/^if \[ -n "\$only" \]; then/,/^fi$/p' "$here/scripts/deploy-mediabox-v3.sh")" \
+  'cp "$here/scripts/deploy-only-install.sh" "$stage/install.sh"'
 # The text, too, so a verifier that grows a readelf back is caught even if the
 # fixture ever stops exercising the line that would use it.
 if strip_sh "$here/packaging/mediabox-product-verify" |

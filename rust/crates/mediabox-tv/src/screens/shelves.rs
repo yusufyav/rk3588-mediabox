@@ -101,6 +101,11 @@ impl Shelves {
         self.shelves.get(self.row)?.items.get(self.column())
     }
 
+    /// The poster at `row`, `column`, wherever the remote is.
+    pub fn item_at(&self, row: usize, column: usize) -> Option<&Item> {
+        self.shelves.get(row)?.items.get(column)
+    }
+
     /// The first shelf with anything on it.
     pub fn first_filled(&self) -> Option<usize> {
         (0..self.len()).find(|row| self.row_len(*row) > 0)
@@ -167,6 +172,24 @@ impl Shelves {
         }
     }
 
+    /// The remote onto a poster a pointer is over -- or "Tümünü Gör", one
+    /// past the shelf's last poster -- as Up, Down, Left and Right would put
+    /// it there.
+    pub fn point(&mut self, row: usize, column: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if column >= self.stops(row) {
+            return Aim::Refused;
+        }
+        if self.columns.len() <= row {
+            self.columns.resize(row + 1, 0);
+        }
+        let mut place = (self.row, self.columns[row]);
+        let aim = Aim::set(&mut place, (row, column), true);
+        self.row = place.0;
+        self.columns[row] = place.1;
+        aim
+    }
+
     /// Up or down a shelf, stepping over the ones that arrived empty. False
     /// when there is no shelf that way, so the caller can decide what is past
     /// the edge.
@@ -203,8 +226,15 @@ impl Shelves {
     /// empty image, which is what keeps the whole catalogue off the GPU.
     ///
     /// `anchor` is the shelf the panel is centred on, which is the focused
-    /// one; -1 when the remote is above the first.
-    pub fn sync_artwork(&mut self, images: &mut ImageManager, anchor: i32) {
+    /// one; -1 when the remote is above the first. `shown` is the first
+    /// poster a shelf a pointer moved along shows: its window is around what
+    /// is on the panel rather than its remembered column.
+    pub fn sync_artwork(
+        &mut self,
+        images: &mut ImageManager,
+        anchor: i32,
+        shown: &dyn Fn(usize) -> Option<usize>,
+    ) {
         for (index, shelf) in self.shelves.iter().enumerate() {
             if shelf.items.is_empty() {
                 continue;
@@ -220,7 +250,10 @@ impl Shelves {
             // focused one is still in front of the viewer when its artwork is
             // taken away.
             let nearby = (index as i32 - anchor).abs() <= 2;
-            let centre = self.columns.get(index).copied().unwrap_or(0);
+            // Nine posters fit across: the middle of what is shown.
+            let centre = shown(index)
+                .map(|first| first + 4)
+                .unwrap_or_else(|| self.columns.get(index).copied().unwrap_or(0));
             let last = shelf.items.len() - 1;
             let from = centre.saturating_sub(BEHIND);
             let to = (centre + AHEAD).min(last);

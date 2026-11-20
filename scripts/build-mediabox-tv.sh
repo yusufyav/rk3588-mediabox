@@ -27,10 +27,14 @@ say "mediabox-tv ($triple, release, build image)"
 # image's PKG_CONFIG_LIBDIR is the arm64 /usr/lib/<triple>/pkgconfig and
 # /usr/share/pkgconfig, never an amd64 one.
 #
+# Warning-free or no binary: rustc's lints, the Slint compiler's and anything
+# else cargo calls a warning fail the build (scripts/cargo-no-warnings.sh).
+#
 # The appliance runs glibc 2.41, and so does the image; a binary that asks for
 # anything newer is still refused here rather than on the television.
 mediabox_build_run -w /work/rust/crates/mediabox-tv -- "
-  CARGO_TARGET_DIR=/work/build/cargo-arm64/mediabox-tv cargo build -q --release --target $triple
+  CARGO_TARGET_DIR=/work/build/cargo-arm64/mediabox-tv \\
+    /work/scripts/cargo-no-warnings.sh /work/rust/crates/mediabox-tv build --release --target $triple
   bin=/work/build/cargo-arm64/mediabox-tv/$triple/release/mediabox-tv
   max=\"\$(aarch64-linux-gnu-objdump -T \"\$bin\" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)\"
   echo \"glibc: highest referenced \$max\"

@@ -299,6 +299,17 @@ impl Discover {
         self.page()
     }
 
+    /// The next page, where what is shown is within `rows` rows of the end
+    /// of what is loaded: a pointer moved the grid there, and the focus
+    /// stayed behind.
+    pub fn more_near(&mut self, shown: usize, rows: usize) -> Option<Request> {
+        if shown + COLUMNS * rows >= self.items.len() {
+            self.page()
+        } else {
+            None
+        }
+    }
+
     /// The next page, if there is one and none is on its way.
     fn page(&mut self) -> Option<Request> {
         if self.loading || self.ended {
@@ -459,6 +470,90 @@ impl Discover {
 
     pub fn focused_button(&self) -> Option<Button> {
         (self.zone == Zone::Panel).then(|| BUTTONS.get(self.button).copied())?
+    }
+
+    /// The remote onto what a pointer is over: a poster of the grid, a
+    /// place, the search box. Nothing under an open dropdown.
+    pub fn point(&mut self, target: super::CatalogTarget) -> crate::pointer::Aim {
+        use super::CatalogTarget;
+        use crate::pointer::Aim;
+        if self.picker.is_some() {
+            return Aim::Refused;
+        }
+        let before = (self.zone.clone(), self.index, self.place);
+        let (zone, allowed) = match target {
+            CatalogTarget::Item(at) => {
+                let allowed = at < self.items.len();
+                if allowed {
+                    self.index = at;
+                }
+                (Zone::Grid, allowed)
+            }
+            CatalogTarget::Place(at) => {
+                let allowed = at < 4;
+                if allowed {
+                    self.place = at;
+                }
+                (Zone::Places, allowed)
+            }
+            CatalogTarget::SearchBox => (Zone::Search, true),
+            CatalogTarget::Shelf(..) => (Zone::Grid, false),
+        };
+        if !allowed {
+            return Aim::Refused;
+        }
+        if zone == Zone::Places && self.zone != Zone::Places {
+            self.returns_to = self.zone.clone();
+        }
+        self.zone = zone;
+        if before == (self.zone.clone(), self.index, self.place) {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// A dropdown along the top a pointer is over: the remote on it. Not
+    /// while one is open.
+    pub fn point_filter(&mut self, at: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if self.picker.is_some() || at >= self.filters().len() {
+            return Aim::Refused;
+        }
+        let mut place = (self.zone.clone(), self.filter);
+        let aim = Aim::set(&mut place, (Zone::Filters, at), true);
+        (self.zone, self.filter) = place;
+        aim
+    }
+
+    /// An option of the open dropdown.
+    pub fn point_option(&mut self, at: usize) -> crate::pointer::Aim {
+        let count = self
+            .filters()
+            .get(self.filter)
+            .map_or(0, |filter| filter.options.len());
+        match self.picker.as_mut() {
+            Some(open) => crate::pointer::Aim::set(open, at, at < count),
+            None => crate::pointer::Aim::Refused,
+        }
+    }
+
+    /// A button under the focused title's record: only while there is a
+    /// title for it to be about.
+    pub fn point_button(&mut self, at: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if self.picker.is_some() || at >= BUTTONS.len() || self.items.get(self.index).is_none() {
+            return Aim::Refused;
+        }
+        let mut place = (self.zone.clone(), self.button);
+        let aim = Aim::set(&mut place, (Zone::Panel, at), true);
+        (self.zone, self.button) = place;
+        aim
+    }
+
+    /// A dropdown is open over the page.
+    pub fn modal(&self) -> bool {
+        self.picker.is_some()
     }
 
     fn to_places(&mut self) -> bool {
@@ -661,6 +756,69 @@ mod tests {
             ])
             .expect("a first page");
         (discover, request)
+    }
+
+    /// A pointer on a poster of the grid, a place or the search box is the
+    /// remote on it; past the grid is nothing; under an open dropdown
+    /// nothing moves.
+    /// A dropdown, its options while it is down, and the buttons under the
+    /// record while there is a title.
+    #[test]
+    fn discover_s_dropdowns_and_buttons_take_the_pointer_in_turn() {
+        use crate::pointer::Aim;
+        let (mut discover, first) = opened();
+        assert_eq!(discover.point_button(0), Aim::Refused, "no title yet");
+        discover.take_page(first.generation, items("g", 3));
+        let filters = discover.filters().len();
+        assert_eq!(discover.point_filter(filters - 1), Aim::Moved);
+        assert_eq!(
+            (discover.zone.clone(), discover.filter),
+            (Zone::Filters, filters - 1)
+        );
+        assert_eq!(discover.point_filter(filters), Aim::Refused);
+        assert_eq!(discover.point_option(0), Aim::Refused, "nothing is down");
+        discover.picker = Some(0);
+        assert_eq!(
+            discover.point_filter(0),
+            Aim::Refused,
+            "under the open list"
+        );
+        assert_eq!(
+            discover.point_button(0),
+            Aim::Refused,
+            "under the open list"
+        );
+        let options = discover.filters()[discover.filter].options.len();
+        assert_eq!(discover.point_option(options), Aim::Refused);
+        discover.picker = None;
+        assert_eq!(discover.point_button(3), Aim::Moved);
+        assert_eq!(discover.focused_button(), Some(Button::Show));
+        assert_eq!(discover.point_button(BUTTONS.len()), Aim::Refused);
+    }
+
+    #[test]
+    fn a_pointer_walks_discover() {
+        use crate::pointer::Aim;
+        use crate::screens::CatalogTarget;
+        let (mut discover, first) = opened();
+        discover.take_page(first.generation, items("g", 5));
+        assert_eq!(discover.point(CatalogTarget::Item(3)), Aim::Moved);
+        assert_eq!((discover.zone.clone(), discover.index), (Zone::Grid, 3));
+        assert_eq!(discover.point(CatalogTarget::Item(3)), Aim::Here);
+        assert_eq!(discover.point(CatalogTarget::Item(5)), Aim::Refused);
+        assert_eq!(discover.point(CatalogTarget::Place(0)), Aim::Moved);
+        assert_eq!(discover.zone, Zone::Places);
+        // Right off the places goes back where the pointer left.
+        assert!(discover.step(1, 0).0);
+        assert_eq!(discover.zone, Zone::Grid);
+        assert_eq!(discover.point(CatalogTarget::SearchBox), Aim::Moved);
+        discover.picker = Some(0);
+        assert!(discover.modal());
+        assert_eq!(
+            discover.point(CatalogTarget::Item(0)),
+            Aim::Refused,
+            "under the dropdown"
+        );
     }
 
     #[test]

@@ -1,4 +1,5 @@
 import { Theme, Metrics, Icons } from "theme.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerHub, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 
 // The pieces the settings screens are built from, and the screens they open.
 //
@@ -219,6 +220,9 @@ export component SettingCard inherits Rectangle {
     // Ends something — the machine, the session. Its name is red, as a word
     // on a card rather than a colour alone.
     in property <bool> danger;
+    // Pointed at, where a screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     height: hint == "" ? Metrics.set-h-flat : Metrics.set-h;
     border-radius: Metrics.s-radius;
@@ -307,6 +311,14 @@ export component SettingCard inherits Rectangle {
         height: 100%;
         on: focused;
     }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // A reading: a name and what it is. Not focusable, and drawn so it does not
@@ -369,6 +381,9 @@ export component ActionButton inherits Rectangle {
     in property <bool> primary;
     // A destructive answer: red when the remote is on it.
     in property <bool> danger;
+    // Pointed at, where a screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <bool> lit: primary && enabled;
 
     height: Metrics.button-h;
@@ -397,6 +412,14 @@ export component ActionButton inherits Rectangle {
         radius: parent.height / 2;
         on: focused;
     }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // One option in a list of choices: a dot for the one chosen, a name and a line
@@ -410,6 +433,9 @@ export component ChoiceRow inherits Rectangle {
     in property <string> badge;
     in property <string> badge-tone;
     in property <bool> now;
+    // Pointed at, where a screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     height: sub == "" ? Metrics.set-h-flat * 0.92 : Metrics.set-h * 0.9;
     border-radius: Metrics.s-radius * 0.8;
@@ -475,6 +501,14 @@ export component ChoiceRow inherits Rectangle {
         height: 100%;
         radius: parent.border-radius;
         on: focused;
+    }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && root.enabled: PointerTarget {
+        radius: root.border-radius;
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -629,6 +663,9 @@ export component Dialog inherits Rectangle {
     height: 100%;
     background: #04050ad0;
 
+    // Nothing under a modal is pointed at through it.
+    PointerShield { }
+
     panel := Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
@@ -640,11 +677,20 @@ export component Dialog inherits Rectangle {
         border-color: Theme.s-line;
         clip: true;
 
+        PointerSwallow { }
+
         inner := VerticalLayout {
             padding: Metrics.dialog-pad;
             spacing: Metrics.row-gap * 1.4;
             alignment: start;
             @children
+        }
+
+        // Its close, for a pointer: the remote's Back, which closes the list
+        // or answers the question "no" -- whatever Back does to this one.
+        PointerClose {
+            x: parent.width - self.width - Metrics.dialog-pad * 0.5;
+            y: Metrics.dialog-pad * 0.5;
         }
     }
 }
@@ -670,11 +716,21 @@ export component ChoiceSheet inherits Dialog {
     in property <[ChoiceItem]> items;
     in property <int> focus-at;
     in property <string> note;
+    // Its rows' zone, where the screen makes them pointer-ready.
+    in property <string> pointer-zone;
     property <length> pitch: Metrics.set-h * 0.9 + Metrics.row-gap * 0.4;
     property <int> shown: min(items.length, 6);
     property <length> viewport: shown * pitch + Metrics.glow-w * 4;
     property <length> total: items.length * pitch + Metrics.glow-w * 4;
-    property <length> scroll: clamp(focus-at * pitch - (viewport - pitch) / 2, 0px, max(0px, total - viewport));
+    // The remote keeps the focused option in the middle; a pointer's hand
+    // and wheel move the list on their own.
+    pan := PanState {
+        surface: root.pointer-zone;
+        remote: clamp(focus-at * pitch - (viewport - pitch) / 2, 0px, self.limit);
+        limit: max(0px, total - viewport);
+        remote-duration: Theme.t-row;
+    }
+    property <length> scroll: pan.value;
 
     Text {
         text: root.title;
@@ -685,14 +741,15 @@ export component ChoiceSheet inherits Dialog {
     Rectangle {
         height: viewport;
         clip: true;
+        if root.pointer-zone != "": PointerPanArea { surface: root.pointer-zone; }
         VerticalLayout {
             x: Metrics.glow-w * 2;
             y: Metrics.glow-w * 2 - scroll;
             width: parent.width - Metrics.glow-w * 4;
             spacing: Metrics.row-gap * 0.4;
             alignment: start;
-            animate y { duration: Theme.t-row; easing: Theme.ease; }
-            for c in items: ChoiceRow {
+            animate y { duration: pan.duration; easing: Theme.ease; }
+            for c[i] in items: ChoiceRow {
                 height: Metrics.set-h * 0.9;
                 title: c.title;
                 sub: c.sub;
@@ -702,6 +759,8 @@ export component ChoiceSheet inherits Dialog {
                 badge: c.badge;
                 badge-tone: c.badge-tone;
                 now: c.now;
+                pointer-zone: root.pointer-zone;
+                pointer-index: i;
             }
         }
     }
@@ -728,6 +787,8 @@ export component TrialSheet inherits Dialog {
     in property <string> arc;
     in property <bool> ready;
     in property <int> focus-at;
+    // Its two answers' zone, where the screen makes them pointer-ready.
+    in property <string> pointer-zone;
     in property <string> message;
     // A live line about what the change did, "" for none.
     in property <string> status-line;
@@ -832,11 +893,15 @@ export component TrialSheet inherits Dialog {
             label: "Koru";
             enabled: root.ready;
             focused: root.focus-at == 0;
+            pointer-zone: root.pointer-zone;
+            pointer-index: 0;
             primary: true;
         }
         ActionButton {
             label: "Geri dön";
             focused: root.focus-at == 1;
+            pointer-zone: root.pointer-zone;
+            pointer-index: 1;
         }
     }
 }
@@ -989,9 +1054,17 @@ export component SideNav inherits Rectangle {
     // from them.
     in property <string> heading: "Ayarlar";
     in property <string> heading-icon: "gear";
+    // The categories' zone, where the screen makes them pointer-ready.
+    in property <string> pointer-zone;
+    // And the way back out of a page, at the top of the column -- and, on
+    // the column's own level, its heading: while a pointer is in use the
+    // heading's mark turns into the back arrow and a click on it is Back,
+    // which leaves the settings (or the diagnostics) as the remote's does.
+    in property <string> back-zone;
 
     property <length> item-h: Metrics.nav-item-h;
     property <length> head-h: Metrics.t-nav-head * 2.6;
+    property <bool> heading-back: back-zone != "" && page-label == "" && PointerHub.shown;
 
     background: Theme.s-nav;
 
@@ -1010,15 +1083,27 @@ export component SideNav inherits Rectangle {
         alignment: start;
         VerticalLayout {
             alignment: center;
-            Icon { name: heading-icon; size: Metrics.t-nav-head * 1.1; ink: Theme.text; }
+            Icon {
+                name: heading-back ? "back" : heading-icon;
+                size: Metrics.t-nav-head * 1.1;
+                ink: heading-back && heading-target.lit ? Theme.focus : Theme.text;
+            }
         }
         Text {
             text: heading;
-            color: Theme.text;
+            color: heading-back && heading-target.lit ? Theme.focus : Theme.text;
             font-size: Metrics.t-nav-head;
             font-weight: 700;
             vertical-alignment: center;
         }
+    }
+    heading-target := PointerTarget {
+        x: Metrics.safe-x;
+        y: Metrics.safe-y;
+        width: heading-back ? Metrics.nav-w : 0px;
+        height: head-h;
+        zone: root.back-zone;
+        index: 0;
     }
 
     if page-label == "": VerticalLayout {
@@ -1077,6 +1162,11 @@ export component SideNav inherits Rectangle {
                 height: 100%;
                 on: lit;
             }
+
+            if pointer-zone != "": PointerTarget {
+                zone: root.pointer-zone;
+                index: i;
+            }
         }
     }
 
@@ -1087,23 +1177,31 @@ export component SideNav inherits Rectangle {
         spacing: Metrics.row-gap * 0.55;
         alignment: start;
 
-        HorizontalLayout {
+        Rectangle {
             height: item-h;
-            padding-left: Metrics.nav-pad;
-            spacing: Metrics.nav-pad * 0.8;
-            VerticalLayout {
-                alignment: center;
-                Icon { name: "back"; size: Metrics.icon-small; ink: Theme.muted; }
+            HorizontalLayout {
+                padding-left: Metrics.nav-pad;
+                spacing: Metrics.nav-pad * 0.8;
+                VerticalLayout {
+                    alignment: center;
+                    Icon { name: "back"; size: Metrics.icon-small; ink: back-row.lit ? Theme.focus : Theme.muted; }
+                }
+                Text {
+                    text: parent-label;
+                    color: back-row.lit ? Theme.focus : Theme.muted;
+                    font-size: Metrics.t-secondary;
+                    font-weight: 520;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
             }
-            Text {
-                text: parent-label;
-                color: Theme.muted;
-                font-size: Metrics.t-secondary;
-                font-weight: 520;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
-                overflow: elide;
-                wrap: no-wrap;
+            // The way back out of the page: a click on it is Back.
+            back-row := PointerTarget {
+                enabled: back-zone != "";
+                zone: root.back-zone;
+                index: 0;
             }
         }
         Rectangle {

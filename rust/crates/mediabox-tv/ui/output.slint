@@ -1,3 +1,4 @@
+import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import {
     Icon, FocusRing, ValueBadge, StatusChip, SettingCard, ActionButton, ChoiceRow,
@@ -189,6 +190,9 @@ component Reading inherits Rectangle {
 component ListRow inherits Rectangle {
     in property <OutRow> item;
     in property <bool> active;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <bool> lit: item.focused && active;
     border-radius: Metrics.s-radius * 0.75;
     background: lit ? Theme.s-card-hi : (item.open ? Theme.s-current : transparent);
@@ -248,6 +252,14 @@ component ListRow inherits Rectangle {
         radius: parent.border-radius;
         on: lit;
     }
+
+    // Not while it cannot be pressed: hover, focus and a click are refused
+    // as the remote's are.
+    if pointer-zone != "" && !root.item.refused: PointerTarget {
+        radius: root.border-radius;
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+    }
 }
 
 // One colour cell: what it is to the draft, what it costs, and a bar of that
@@ -255,6 +267,9 @@ component ListRow inherits Rectangle {
 component ColourCellBox inherits Rectangle {
     in property <OutCell> cell;
     in property <bool> active;
+    // Pointed at, where the page gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     property <bool> lit: cell.focused && active;
     border-radius: Metrics.s-radius * 0.7;
     background: lit ? Theme.s-card-hi : (cell.ok ? Theme.s-card : transparent);
@@ -324,6 +339,12 @@ component ColourCellBox inherits Rectangle {
         height: 100%;
         radius: parent.border-radius;
         on: lit;
+    }
+
+    if pointer-zone != "": PointerTarget {
+        radius: root.border-radius;
+        zone: root.pointer-zone;
+        index: root.pointer-index;
     }
 }
 
@@ -396,6 +417,8 @@ component SimpleFace inherits Rectangle {
                 value: card.value;
                 kind: card.kind;
                 focused: active-pane && card.focused;
+                pointer-zone: "editor-cards";
+                pointer-index: i;
             }
         }
 
@@ -408,6 +431,8 @@ component SimpleFace inherits Rectangle {
                 enabled: act.enabled;
                 focused: active-pane && act.focused;
                 primary: i == 0;
+                pointer-zone: "editor-actions";
+                pointer-index: i;
             }
             if view.state != "": VerticalLayout {
                 alignment: center;
@@ -511,19 +536,32 @@ component AdvancedFace inherits Rectangle {
             property <length> focus-bottom: (view.resolution-focus + 1) * pitch
                 + (view.divider-at >= 0 && view.resolution-focus >= view.divider-at ? divider-h : 0px)
                 + Metrics.glow-w * 2;
+            property <length> last-bottom: view.resolutions.length * pitch
+                + (view.divider-at >= 0 ? divider-h : 0px)
+                + Metrics.glow-w * 2;
+            property <length> view-h: self.height;
+            // The remote's focus scrolls it by whole rows; a pointer's hand
+            // and wheel move it on their own.
+            pan := PanState {
+                surface: "output-resolutions";
+                remote: max(0px, focus-bottom - view-h + Metrics.glow-w);
+                limit: max(0px, last-bottom - view-h + Metrics.glow-w);
+                remote-duration: Theme.t-row;
+            }
             x: pad;
             y: parent.head-h;
             width: parent.width - pad * 2;
             height: parent.height - self.y - pad;
             clip: true;
+            PointerPanArea { surface: "output-resolutions"; }
             VerticalLayout {
-                y: min(Metrics.glow-w, parent.height - focus-bottom);
+                y: Metrics.glow-w - pan.value;
                 x: Metrics.glow-w;
                 width: parent.width - Metrics.glow-w * 2;
                 spacing: row-gap;
                 alignment: start;
-                animate y { duration: Theme.t-row; easing: Theme.ease; }
-                for row in view.resolutions: VerticalLayout {
+                animate y { duration: pan.duration; easing: Theme.ease; }
+                for row[i] in view.resolutions: VerticalLayout {
                     spacing: 0px;
                     if row.divider: Text {
                         height: divider-h - row-gap;
@@ -534,7 +572,7 @@ component AdvancedFace inherits Rectangle {
                         letter-spacing: Metrics.t-meta * 0.06;
                         vertical-alignment: bottom;
                     }
-                    ListRow { height: row-h; item: row; active: active-pane; }
+                    ListRow { height: row-h; item: row; active: active-pane; pointer-zone: "output-resolutions"; pointer-index: i; }
                 }
             }
         }
@@ -557,7 +595,7 @@ component AdvancedFace inherits Rectangle {
             width: parent.width - pad * 2 - Metrics.glow-w * 2;
             spacing: row-gap;
             alignment: start;
-            for row in view.rates: ListRow { height: row-h; item: row; active: active-pane; }
+            for row[i] in view.rates: ListRow { height: row-h; item: row; active: active-pane; pointer-zone: "output-rates"; pointer-index: i; }
         }
     }
 
@@ -635,6 +673,10 @@ component AdvancedFace inherits Rectangle {
                 radius: parent.border-radius;
                 on: auto-chip.lit;
             }
+            PointerTarget {
+                zone: "output-colours";
+                index: 0;
+            }
         }
 
         // The grid: a format per row, a depth per column.
@@ -670,13 +712,15 @@ component AdvancedFace inherits Rectangle {
             vertical-alignment: center;
             overflow: elide;
         }
-        for cell in view.cells: ColourCellBox {
+        for cell[i] in view.cells: ColourCellBox {
             x: inner-x + label-w + col-gap + (cell.span ? 0 : cell.col * (col-w + col-gap));
             y: grid-y + cell.row * (cell-h + cell-gap);
             width: cell.span ? col-w * 2 + col-gap : col-w;
             height: cell-h;
             cell: cell;
             active: active-pane;
+            pointer-zone: "output-colours";
+            pointer-index: i + 1;
         }
 
         // What is under the focus.
@@ -718,6 +762,8 @@ component AdvancedFace inherits Rectangle {
                 enabled: act.enabled;
                 focused: active-pane && act.focused;
                 primary: i == 0;
+                pointer-zone: "editor-actions";
+                pointer-index: i;
             }
         }
         Text {
@@ -778,7 +824,7 @@ component EdidDialog inherits Dialog {
     }
     HorizontalLayout {
         alignment: start;
-        ActionButton { label: "Kapat"; focused: true; }
+        ActionButton { label: "Kapat"; focused: true; pointer-zone: "editor-confirm"; pointer-index: 0; }
     }
 }
 
@@ -822,6 +868,7 @@ export component OutputPane inherits Rectangle {
         items: view.picker;
         focus-at: view.picker-focus;
         note: view.picker-note;
+        pointer-zone: "editor-picker";
     }
 
     if view.sheet == 1: TrialSheet {
@@ -838,6 +885,7 @@ export component OutputPane inherits Rectangle {
         arc: view.arc;
         ready: view.confirm-ready;
         focus-at: view.confirm-focus;
+        pointer-zone: "editor-confirm";
         message: "Yanıt verilmezse " + view.seconds + " saniye sonra önceki moda dönülür. Süreyi denetim düzlemi tutar; ekran görüntü alamasa ya da arayüz kapansa bile geri dönülür.";
     }
 

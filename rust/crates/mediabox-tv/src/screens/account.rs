@@ -164,6 +164,15 @@ impl Entry {
     }
 }
 
+/// What a pointer can be over on the account form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountTarget {
+    Field(Field),
+    Show,
+    Submit,
+    Key(usize, usize),
+}
+
 pub struct Account {
     pub session: Session,
     pub focus: Focus,
@@ -376,6 +385,36 @@ impl Account {
                 }
                 false
             }
+        }
+    }
+
+    /// The remote's focus onto what a pointer is over, as Up, Down and Ok
+    /// would bring it there: a field is also the field the letters type
+    /// into, as walking onto it makes it.
+    pub fn point(&mut self, target: AccountTarget) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        let before = (self.focus, self.field, self.keys.row(), self.keys.col());
+        match target {
+            AccountTarget::Field(field) => {
+                self.focus = Focus::Field(field);
+                self.field = field;
+            }
+            AccountTarget::Show => self.focus = Focus::Show,
+            // While a sign-in runs the button is "Bağlanıyor…" and takes
+            // nothing, as it is drawn.
+            AccountTarget::Submit if self.busy => return Aim::Refused,
+            AccountTarget::Submit => self.focus = Focus::Submit,
+            AccountTarget::Key(row, col) => {
+                if !self.keys.point(row, col) {
+                    return Aim::Refused;
+                }
+                self.focus = Focus::Keys;
+            }
+        }
+        if before == (self.focus, self.field, self.keys.row(), self.keys.col()) {
+            Aim::Here
+        } else {
+            Aim::Moved
         }
     }
 
@@ -633,6 +672,68 @@ pub enum Press {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_pointer_on_the_form_is_the_remote_on_it_and_ok_is_its_ok() {
+        use crate::pointer::Aim;
+        let mut account = Account::new();
+        // The password field: the focus and the field the letters type into.
+        assert_eq!(
+            account.point(AccountTarget::Field(Field::Password)),
+            Aim::Moved
+        );
+        assert_eq!(
+            (account.focus, account.field),
+            (Focus::Field(Field::Password), Field::Password)
+        );
+        assert_eq!(
+            account.point(AccountTarget::Field(Field::Password)),
+            Aim::Here
+        );
+        // Its Ok: onto the letters.
+        assert_eq!(account.press(), Press::Changed);
+        assert_eq!(account.focus, Focus::Keys);
+        // A letter, and its Ok types it into the password.
+        let (row, col) = account
+            .keys
+            .rows()
+            .iter()
+            .enumerate()
+            .find_map(|(r, keys)| {
+                keys.iter()
+                    .position(|cap| *cap == crate::keyboard::Cap::Letter('k'))
+                    .map(|c| (r, c))
+            })
+            .expect("k");
+        assert_eq!(account.point(AccountTarget::Key(row, col)), Aim::Moved);
+        assert_eq!(account.press(), Press::Changed);
+        assert_eq!(account.password(), "k");
+        assert_eq!(
+            account.point(AccountTarget::Key(99, 0)),
+            Aim::Refused,
+            "no such key"
+        );
+        // "Göster", and its Ok shows the password.
+        assert_eq!(account.point(AccountTarget::Show), Aim::Moved);
+        assert_eq!(account.press(), Press::Changed);
+        assert!(account.showing());
+        // The button: with no address, Ok says why -- as the remote's does.
+        assert_eq!(account.point(AccountTarget::Submit), Aim::Moved);
+        assert_eq!(account.press(), Press::Changed);
+        assert_eq!(account.notice, "E-posta girin");
+        // Back from the button is the field, then the screen's to leave.
+        assert!(account.dismiss());
+        assert_eq!(account.focus, Focus::Field(Field::Password));
+        assert!(!account.dismiss());
+        // While a sign-in runs the button takes nothing.
+        account.busy = true;
+        assert_eq!(account.point(AccountTarget::Submit), Aim::Refused);
+        assert_eq!(
+            account.focus,
+            Focus::Field(Field::Password),
+            "nothing moved"
+        );
+    }
 
     fn connected() -> Value {
         json!({"media": {"provider": {

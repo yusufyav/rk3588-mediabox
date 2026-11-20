@@ -23,6 +23,7 @@ use mediabox_core::{
 use serde_json::Value;
 
 use crate::model::DisplayStatus;
+use crate::pointer::Aim;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -345,6 +346,23 @@ pub struct Group {
 }
 
 /// Where the remote is.
+/// What a pointer is over on an editor page, as the page draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorTarget {
+    Card(usize),
+    Action(usize),
+    Resolution(usize),
+    Rate(usize),
+    Colour(usize),
+    Chip(usize),
+    Cell(usize, usize),
+    Picker(usize),
+    Pad(usize, usize),
+    Confirm(usize),
+    /// The sound page's volume bar.
+    Volume,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
     /// The category column.
@@ -542,6 +560,74 @@ impl Settings {
                 }
             }
         }
+    }
+
+    /// The category a pointer is over: the remote on it in the column, as
+    /// Up and Down would put it there. Only while the column lists the
+    /// categories -- not inside a page, nor under an open list.
+    pub fn point_section(&mut self, index: usize) -> Aim {
+        if self.choice.is_some() || self.pane == Pane::Page || index >= self.groups.len() {
+            return Aim::Refused;
+        }
+        let mut place = (self.pane, self.section);
+        let aim = Aim::set(&mut place, (Pane::Sections, index), true);
+        (self.pane, self.section) = place;
+        aim
+    }
+
+    /// The card a pointer is over: the remote on it, as Right and Down would
+    /// put it there. A line that cannot be pressed, an editor's page and the
+    /// rows under an open list take nothing.
+    pub fn point_row(&mut self, index: usize) -> Aim {
+        if self.choice.is_some()
+            || (self.pane == Pane::Page && !self.in_list_page())
+            || !self.rows().get(index).is_some_and(Row::selectable)
+        {
+            return Aim::Refused;
+        }
+        let before = (self.pane, self.row_index());
+        if self.pane == Pane::Sections {
+            self.pane = Pane::Rows;
+        }
+        self.set_row_index(index);
+        if before == (self.pane, self.row_index()) {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// The option of an open list a pointer is over.
+    pub fn point_choice(&mut self, index: usize) -> Aim {
+        let count = self.choice_len();
+        match self.choice.as_mut() {
+            Some(at) => Aim::set(at, index, index < count),
+            None => Aim::Refused,
+        }
+    }
+
+    /// The open editor page's own focus onto what a pointer is over.
+    pub fn point_editor(&mut self, target: EditorTarget) -> Aim {
+        match self.page() {
+            Some(Page::Audio) => self.audio.point(target),
+            Some(Page::Ethernet) => self.ethernet.point(target),
+            Some(Page::Output) => self.output.point(target),
+            Some(Page::Cooling) => self.cooling.point(target),
+            _ => Aim::Refused,
+        }
+    }
+
+    /// Whether something is over the page -- a list opened from a card, or
+    /// an editor's own list, pad or question -- and is all a pointer reaches.
+    pub fn modal(&self) -> bool {
+        self.choice.is_some()
+            || match self.page() {
+                Some(Page::Audio) => self.audio.modal(),
+                Some(Page::Ethernet) => self.ethernet.modal(),
+                Some(Page::Output) => self.output.modal(),
+                Some(Page::Cooling) => self.cooling.modal(),
+                _ => false,
+            }
     }
 
     /// Whether a list opened from a card holds the remote.
@@ -1700,6 +1786,24 @@ mod tests {
         (actions, pages)
     }
 
+    /// Back -- the right button, or a modal's ground -- goes up one level at
+    /// a time: an open list, a page, the cards, and on the column it is not
+    /// the settings' (`false`): the application takes it out to the home
+    /// screen, as it does the remote's.
+    #[test]
+    fn back_from_anywhere_in_the_settings_goes_up_one_level_at_a_time() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&live_status("full_init")), None, None);
+        open_live_tv(&mut settings);
+        assert!(settings.open_live_startup());
+        assert!(settings.back(), "the list closes");
+        assert!(!settings.modal());
+        assert_eq!(settings.pane, Pane::Rows);
+        assert!(settings.back(), "the cards to the column");
+        assert_eq!(settings.pane, Pane::Sections);
+        assert!(!settings.back(), "out of the settings is the application's");
+    }
+
     #[test]
     fn focus_lands_on_something_that_can_be_pressed() {
         let mut settings = Settings::new();
@@ -1709,6 +1813,65 @@ mod tests {
                 .focused()
                 .map(|row| row.selectable())
                 .unwrap_or(false)
+        );
+    }
+
+    /// A pointer moves the same focus the remote does: over a category it
+    /// is on that category in the column, over a card on that card, and a
+    /// line that cannot be pressed takes nothing.
+    #[test]
+    fn a_pointer_moves_the_remote_s_focus_through_the_settings() {
+        let mut settings = Settings::new();
+        let last = settings.groups.len() - 1;
+        assert_eq!(settings.point_section(last), Aim::Moved);
+        assert_eq!((settings.pane, settings.section), (Pane::Sections, last));
+        assert_eq!(settings.point_section(last), Aim::Here);
+        assert_eq!(settings.point_section(last + 1), Aim::Refused);
+        let card = settings
+            .rows()
+            .iter()
+            .position(Row::selectable)
+            .expect("a card");
+        assert_eq!(settings.point_row(card), Aim::Moved);
+        assert_eq!((settings.pane, settings.row_index()), (Pane::Rows, card));
+        if let Some(line) = settings.rows().iter().position(|row| !row.selectable()) {
+            assert_eq!(
+                settings.point_row(line),
+                Aim::Refused,
+                "a heading or a reading"
+            );
+            assert_eq!(settings.row_index(), card);
+        }
+        // And back on the column, from the cards.
+        assert_eq!(settings.point_section(0), Aim::Moved);
+        assert_eq!(settings.pane, Pane::Sections);
+        // No editor is open: nothing on an editor's page is there to point at.
+        assert_eq!(settings.point_editor(EditorTarget::Card(0)), Aim::Refused);
+        assert!(!settings.modal());
+    }
+
+    /// An open list is the only thing a pointer reaches; the cards and the
+    /// column under it are not moved.
+    #[test]
+    fn under_an_open_list_only_the_list_takes_the_pointer() {
+        let mut settings = Settings::new();
+        settings.compose(Some(&live_status("full_init")), None, None);
+        open_live_tv(&mut settings);
+        let (section, row) = (settings.section, settings.row_index());
+        assert_eq!(settings.point_choice(1), Aim::Refused, "no list open");
+        assert!(settings.open_live_startup());
+        assert!(settings.modal());
+        assert_eq!(settings.point_choice(1), Aim::Moved);
+        assert_eq!(settings.point_choice(1), Aim::Here);
+        assert_eq!(settings.point_choice(9), Aim::Refused);
+        assert_eq!(settings.point_section(0), Aim::Refused);
+        assert_eq!(settings.point_row(0), Aim::Refused);
+        assert_eq!((settings.section, settings.row_index()), (section, row));
+        assert_eq!(
+            settings.choose(),
+            Some(Action::SetLiveStartup(
+                LiveReceiverStartupPolicy::ResumeIfValid
+            ))
         );
     }
 

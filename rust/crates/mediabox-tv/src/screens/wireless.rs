@@ -72,6 +72,22 @@ pub enum Face {
     Password,
 }
 
+/// What a pointer can be over on the Wi-Fi screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiTarget {
+    /// A row the remote stops on, by its place among them; on "Kayıtlı
+    /// ağlar", a saved network.
+    Row(usize),
+    /// A network's (i).
+    Info(usize),
+    /// A network page's button.
+    Button(usize),
+    /// A row of the password face.
+    Form(PasswordFocus),
+    /// A letter of its grid.
+    Key(usize, usize),
+}
+
 /// Where the remote is while the password face is up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PasswordFocus {
@@ -657,6 +673,78 @@ impl Wifi {
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    /// The remote's focus onto what a pointer is over. A row is named by its
+    /// place among the rows the remote stops on (`focusable`), as the list
+    /// draws it; the switch of a radio the board does not have, a row of
+    /// another face, a field the face does not show -- none takes it.
+    pub fn point(&mut self, target: WifiTarget) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        let before = (
+            self.index,
+            self.info,
+            self.saved_index,
+            self.button,
+            self.focus,
+            self.keys.row(),
+            self.keys.col(),
+        );
+        let allowed = match (self.face, target) {
+            (Face::List, WifiTarget::Row(slot)) => match self.focusable().get(slot) {
+                Some(Row::Toggle) => !self.known || self.present,
+                Some(_) => true,
+                None => false,
+            },
+            (Face::List, WifiTarget::Info(slot)) => {
+                matches!(self.focusable().get(slot), Some(Row::Network(_)))
+            }
+            (Face::Saved, WifiTarget::Row(slot)) => slot < self.saved().len(),
+            (Face::Details, WifiTarget::Button(at)) => at < self.details_buttons().len(),
+            (Face::Password, WifiTarget::Form(field)) => {
+                let rows = self.password_rows();
+                rows.contains(&field)
+                    || (field == PasswordFocus::Show && rows.contains(&PasswordFocus::Field))
+            }
+            (Face::Password, WifiTarget::Key(row, col)) => {
+                row < self.keys.rows().len() && col < self.keys.rows()[row].len()
+            }
+            _ => false,
+        };
+        if !allowed {
+            return Aim::Refused;
+        }
+        match target {
+            WifiTarget::Row(slot) if self.face == Face::Saved => self.saved_index = slot,
+            WifiTarget::Row(slot) => {
+                self.index = slot;
+                self.info = false;
+            }
+            WifiTarget::Info(slot) => {
+                self.index = slot;
+                self.info = true;
+            }
+            WifiTarget::Button(at) => self.button = at,
+            WifiTarget::Form(field) => self.focus = field,
+            WifiTarget::Key(row, col) => {
+                self.keys.point(row, col);
+                self.focus = PasswordFocus::Keys;
+            }
+        }
+        let after = (
+            self.index,
+            self.info,
+            self.saved_index,
+            self.button,
+            self.focus,
+            self.keys.row(),
+            self.keys.col(),
+        );
+        if before == after {
+            Aim::Here
+        } else {
+            Aim::Moved
         }
     }
 
@@ -1298,6 +1386,18 @@ impl Bluetooth {
         }
     }
 
+    /// The remote's focus onto a row a pointer is over, by its place among
+    /// the rows the remote stops on. The switch of a radio the board does
+    /// not have takes nothing, as it is drawn disabled.
+    pub fn point(&mut self, slot: usize) -> crate::pointer::Aim {
+        let allowed = match self.focusable().get(slot) {
+            Some(BtLine::Toggle) => !self.known || self.present,
+            Some(_) => true,
+            None => false,
+        };
+        crate::pointer::Aim::set(&mut self.index, slot, allowed)
+    }
+
     pub fn step(&mut self, dy: i32) {
         let last = self.focusable().len().saturating_sub(1);
         let next = self.index as i32 + dy;
@@ -1400,6 +1500,97 @@ mod tests {
 
     fn ops(menu: &[PeerChoice]) -> Vec<Option<PeerOp>> {
         menu.iter().map(|choice| choice.op.clone()).collect()
+    }
+
+    /// A pointer on the Wi-Fi screen is the remote on what is under it, and
+    /// a click its Ok: a stranger asks for its key, the (i) opens a page,
+    /// the page's buttons are its own; Back walks the faces back.
+    #[test]
+    fn a_pointer_walks_the_wifi_screen_as_the_remote_does() {
+        use crate::pointer::Aim;
+        let mut wifi = home();
+        let slot = |wifi: &Wifi, row: Row| {
+            wifi.focusable()
+                .iter()
+                .position(|r| *r == row)
+                .expect("listed")
+        };
+        let komsu = slot(&wifi, Row::Network("Komşu".into()));
+        assert_eq!(wifi.point(WifiTarget::Row(komsu)), Aim::Moved);
+        assert_eq!(wifi.focused_row(), Some(Row::Network("Komşu".into())));
+        assert!(!wifi.info);
+        // A secured stranger: Ok asks for its key.
+        assert_eq!(wifi.press(), Press::None);
+        assert_eq!(wifi.face, Face::Password);
+        // On the password face a list row is no target.
+        assert_eq!(wifi.point(WifiTarget::Row(0)), Aim::Refused);
+        assert_eq!(
+            wifi.point(WifiTarget::Form(PasswordFocus::Ssid)),
+            Aim::Refused,
+            "not adding: no name row"
+        );
+        assert_eq!(
+            wifi.point(WifiTarget::Form(PasswordFocus::Show)),
+            Aim::Moved
+        );
+        assert_eq!(wifi.press(), Press::None);
+        assert!(wifi.show);
+        assert_eq!(wifi.point(WifiTarget::Key(0, 0)), Aim::Moved);
+        assert_eq!(wifi.focus, PasswordFocus::Keys);
+        assert_eq!(wifi.press(), Press::None);
+        assert_eq!(wifi.password().chars().count(), 1, "the key typed");
+        assert_eq!(
+            wifi.point(WifiTarget::Form(PasswordFocus::Join)),
+            Aim::Moved
+        );
+        assert_eq!(
+            wifi.press(),
+            Press::None,
+            "too short: refused before the radio tries"
+        );
+        assert!(!wifi.notice.is_empty());
+        // Back: the dialog goes, the list is there.
+        assert!(wifi.back());
+        assert_eq!(wifi.face, Face::List);
+        // The (i) of a network opens its page; its buttons are targets.
+        let yuhome = slot(&wifi, Row::Network("YuHome".into()));
+        assert_eq!(wifi.point(WifiTarget::Info(yuhome)), Aim::Moved);
+        assert!(wifi.info);
+        assert_eq!(wifi.press(), Press::None);
+        assert_eq!(wifi.face, Face::Details);
+        let buttons = wifi.details_buttons().len();
+        assert_eq!(wifi.point(WifiTarget::Button(buttons - 1)), Aim::Moved);
+        assert_eq!(wifi.point(WifiTarget::Button(buttons)), Aim::Refused);
+        assert!(matches!(wifi.press(), Press::Do(_)));
+        assert!(wifi.back());
+        assert_eq!(wifi.face, Face::List);
+        // The (i) is only a network's.
+        assert_eq!(
+            wifi.point(WifiTarget::Info(0)),
+            Aim::Refused,
+            "the switch has none"
+        );
+        assert!(!wifi.back(), "from the list Back leaves the screen");
+    }
+
+    /// The switch of a radio the board does not have is drawn disabled, and
+    /// a pointer takes it as nothing; on a board with one it is the switch.
+    #[test]
+    fn a_pointer_refuses_the_switch_of_a_missing_radio() {
+        use crate::pointer::Aim;
+        let mut wifi = Wifi::new();
+        wifi.take_status(&json!({"present": false}));
+        assert_eq!(wifi.point(WifiTarget::Row(0)), Aim::Refused);
+        let mut bt = Bluetooth::new();
+        bt.take_status(&json!({"present": false}));
+        assert_eq!(bt.point(0), Aim::Refused);
+        let mut bt = plus();
+        assert_eq!(bt.point(0), Aim::Here, "on the switch already");
+        assert!(matches!(bt.press(), BtPress::Power(false)));
+        let last = bt.focusable().len() - 1;
+        assert_eq!(bt.point(last), Aim::Moved);
+        assert_eq!(bt.index, last);
+        assert_eq!(bt.point(last + 1), Aim::Refused);
     }
 
     /// The board on YuHome, YuHome5 saved and heard, OnePlus saved and out of

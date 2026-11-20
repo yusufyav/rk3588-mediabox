@@ -66,6 +66,22 @@ pub struct Source {
     pub parsed: Stream,
 }
 
+/// What a pointer is over on the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailTarget {
+    Action(usize),
+    Source(usize),
+    Episode(usize),
+    /// The provider filter above the sources, and an option of its list (0
+    /// is "Tümü").
+    Filter,
+    Provider(usize),
+    /// The season bar's "Önceki" (0) and "Sonraki" (1).
+    Season(usize),
+    /// An episode's watched button, at the end of its row.
+    Mark(usize),
+}
+
 pub struct Detail {
     pub kind: String,
     pub id: String,
@@ -385,6 +401,96 @@ impl Detail {
             return true;
         }
         false
+    }
+
+    /// The remote onto what a pointer is over: a button of the action row
+    /// that can be pressed, a source of the list shown, an episode of the
+    /// season shown. Nothing while the provider list is down over the column.
+    pub fn point(&mut self, target: DetailTarget) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if self.filter_open {
+            let count = self.providers().len() + 1;
+            return match target {
+                DetailTarget::Provider(at) => Aim::set(&mut self.filter_focus, at, at < count),
+                _ => Aim::Refused,
+            };
+        }
+        let before = (
+            self.pane,
+            self.action,
+            self.source_focus,
+            self.on_filter,
+            self.episode_focus,
+            self.on_seasons,
+            self.on_mark,
+        );
+        let season_at = self
+            .season()
+            .and_then(|current| self.seasons().iter().position(|s| *s == current));
+        let seasons = self.seasons().len();
+        match target {
+            DetailTarget::Filter if !self.providers().is_empty() => {
+                self.pane = Pane::Sources;
+                self.on_filter = true;
+            }
+            // Only a way there is: "Önceki" on the first season would be Left
+            // off the bar, out of the column.
+            // "Önceki" while there is a season before, "Sonraki" while there
+            // is one after, and the season's own name (2), where the remote
+            // stands on the bar, while there is a season at all.
+            DetailTarget::Season(way)
+                if season_at.is_some_and(|at| match way {
+                    0 => at > 0,
+                    1 => at + 1 < seasons,
+                    _ => way == 2,
+                }) =>
+            {
+                self.pane = Pane::Episodes;
+                self.on_seasons = true;
+                self.on_mark = false;
+                self.episodes_touched = true;
+            }
+            DetailTarget::Mark(at) if self.watch.is_some() && at < self.episodes().len() => {
+                self.pane = Pane::Episodes;
+                self.on_seasons = false;
+                self.on_mark = true;
+                self.episode_focus = at;
+                self.episodes_touched = true;
+            }
+            DetailTarget::Action(at) if self.enabled().get(at).copied().unwrap_or(false) => {
+                self.pane = Pane::Record;
+                self.action = at;
+            }
+            DetailTarget::Source(at) if at < self.shown().len() => {
+                self.pane = Pane::Sources;
+                self.on_filter = false;
+                self.source_focus = at;
+            }
+            DetailTarget::Episode(at) if at < self.episodes().len() => {
+                self.pane = Pane::Episodes;
+                self.on_seasons = false;
+                self.on_mark = false;
+                self.episode_focus = at;
+                self.episodes_touched = true;
+            }
+            _ => return Aim::Refused,
+        }
+        self.touched = true;
+        if before
+            == (
+                self.pane,
+                self.action,
+                self.source_focus,
+                self.on_filter,
+                self.episode_focus,
+                self.on_seasons,
+                self.on_mark,
+            )
+        {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
     }
 
     /// Ok on the closed filter: the list comes down on the provider it is
@@ -1311,6 +1417,44 @@ mod filter_tests {
         }
     }
 
+    /// The provider filter: a click on it is the remote on it (Ok drops the
+    /// list); while the list is down only its options take the pointer;
+    /// Back (the list's ground) closes it unchanged.
+    #[test]
+    fn the_provider_filter_and_its_list_take_the_pointer_in_turn() {
+        use crate::pointer::Aim;
+        let raws = vec![release("x", "a", 1, true), release("y", "b", 2, true)];
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listed(&raws, &[]), raws.clone());
+        assert!(!film.providers().is_empty());
+        assert_eq!(film.point(DetailTarget::Filter), Aim::Moved);
+        assert!(film.on_filter && film.pane == Pane::Sources);
+        assert!(film.open_filter(), "Ok on it");
+        assert_eq!(
+            film.point(DetailTarget::Source(0)),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(
+            film.point(DetailTarget::Filter),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(film.point(DetailTarget::Provider(1)), Aim::Moved);
+        assert_eq!(
+            film.point(DetailTarget::Provider(film.providers().len() + 1)),
+            Aim::Refused
+        );
+        let provider = film.provider;
+        assert!(film.close_filter(), "Back");
+        assert_eq!(film.provider, provider, "closed unchanged");
+        assert_eq!(
+            film.point(DetailTarget::Provider(0)),
+            Aim::Refused,
+            "no list, no options"
+        );
+    }
+
     #[test]
     fn a_film_opens_on_its_first_playable_source_unless_the_viewer_has_moved() {
         let raws = vec![
@@ -1331,6 +1475,51 @@ mod filter_tests {
         moved.step(1, 0);
         moved.take_streams(listing(), raws.clone());
         assert_eq!(moved.pane, Pane::Record);
+    }
+
+    /// A pointer on a source is the remote on it; past the list, a button
+    /// that cannot be pressed, or anything while the provider list is down,
+    /// is refused.
+    #[test]
+    fn a_pointer_walks_the_film_s_page() {
+        use crate::pointer::Aim;
+        let raws = vec![
+            json!({"addonName": "a", "name": "one", "playable": true}),
+            json!({"addonName": "b", "name": "two", "playable": true}),
+        ];
+        let listing: StreamListing =
+            serde_json::from_value(json!({"streams": raws.clone()})).expect("a listing");
+        let mut film = Detail::seeded(&crate::state::Item::stub("tt1"));
+        film.take_streams(listing, raws);
+        let shown = film.shown().len();
+        assert_eq!(film.point(DetailTarget::Source(shown - 1)), Aim::Moved);
+        assert_eq!(
+            (film.pane, film.source_focus, film.on_filter),
+            (Pane::Sources, shown - 1, false)
+        );
+        assert_eq!(film.point(DetailTarget::Source(shown)), Aim::Refused);
+        assert_eq!(
+            film.point(DetailTarget::Episode(0)),
+            Aim::Refused,
+            "a film has no episodes"
+        );
+        if let Some(button) = film.enabled().iter().position(|ok| *ok) {
+            assert_eq!(film.point(DetailTarget::Action(button)), Aim::Moved);
+            assert_eq!(film.pane, Pane::Record);
+        }
+        if let Some(off) = film.enabled().iter().position(|ok| !*ok) {
+            assert_eq!(
+                film.point(DetailTarget::Action(off)),
+                Aim::Refused,
+                "a button that cannot be pressed"
+            );
+        }
+        film.filter_open = true;
+        assert_eq!(
+            film.point(DetailTarget::Source(0)),
+            Aim::Refused,
+            "under the provider list"
+        );
     }
 
     fn listed(raws: &[Value], loading: &[&str]) -> StreamListing {
@@ -1630,6 +1819,51 @@ mod series_tests {
             video("tt:4:1", 4, 1, "2011-07-17T00:00:00.000Z"),
             video("tt:2:3", 2, 3, "2009-03-22T00:00:00.000Z"),
         ])
+    }
+
+    /// On a series: the season bar's ends only where there is a season that
+    /// way; an episode's watched button is a target of its own, leaving the
+    /// remote on that button -- where Ok marks it -- and not on the row,
+    /// where Ok opens its sources.
+    #[test]
+    fn the_season_bar_and_the_watched_button_take_the_pointer() {
+        use crate::pointer::Aim;
+        let mut detail = breaking_bad();
+        let seasons = detail.seasons().len();
+        assert!(seasons > 1);
+        detail.chosen_season = detail.seasons().first().copied();
+        assert_eq!(
+            detail.point(DetailTarget::Season(0)),
+            Aim::Refused,
+            "no season before the first"
+        );
+        assert_ne!(detail.point(DetailTarget::Season(1)), Aim::Refused);
+        assert!(detail.on_seasons && detail.pane == Pane::Episodes);
+        detail.chosen_season = detail.seasons().last().copied();
+        assert_eq!(
+            detail.point(DetailTarget::Season(1)),
+            Aim::Refused,
+            "no season after the last"
+        );
+        // The season's own name is where the remote stands on the bar.
+        detail.on_seasons = false;
+        assert_eq!(detail.point(DetailTarget::Season(2)), Aim::Moved);
+        assert!(detail.on_seasons);
+        assert_eq!(detail.point(DetailTarget::Season(2)), Aim::Here);
+        assert_eq!(detail.point(DetailTarget::Season(3)), Aim::Refused);
+        // Without the account's word there is no watched button.
+        detail.watch = None;
+        assert_eq!(detail.point(DetailTarget::Mark(0)), Aim::Refused);
+        detail.watch = Some(crate::model::TitleState::default());
+        assert_eq!(detail.point(DetailTarget::Mark(0)), Aim::Moved);
+        assert!(detail.on_mark && !detail.on_seasons);
+        // The row itself is the row, not the button.
+        assert_eq!(detail.point(DetailTarget::Episode(0)), Aim::Moved);
+        assert!(!detail.on_mark);
+        assert_eq!(
+            detail.point(DetailTarget::Mark(detail.episodes().len())),
+            Aim::Refused
+        );
     }
 
     #[test]

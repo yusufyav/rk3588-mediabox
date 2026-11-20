@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { PointerPanArea, PanState } from "pointer.slint";
 import { SettingRow, VitalsModel } from "components.slint";
 import { CoolingPane, CoolingView } from "cooling.slint";
 import { OutputPane, OutputView } from "output.slint";
@@ -74,6 +75,8 @@ export component Settings inherits Rectangle {
         parent-label: page == "" ? "" : sections[section].label;
         page-label: page;
         page-icon: page-icon;
+        pointer-zone: "settings-sections";
+        back-zone: "back";
     }
 
     StatusCorner {
@@ -137,7 +140,16 @@ export component Settings inherits Rectangle {
         property <length> pad: Metrics.glow-w * 3;
         property <length> focus-y: rows.length == 0 ? 0px : y-of(rows[row-index]);
         property <length> focus-h: rows.length == 0 ? 0px : h-of(rows[row-index]);
-        property <length> scroll: max(0px, focus-y + focus-h + pad * 2 - self.height);
+        property <length> content-h: rows.length == 0 ? 0px : y-of(rows[rows.length - 1]) + h-of(rows[rows.length - 1]);
+        property <length> view-h: self.height;
+        // The remote's focus scrolls it; a pointer's hand and wheel too.
+        pan := PanState {
+            surface: "settings-rows";
+            remote: max(0px, focus-y + focus-h + pad * 2 - view-h);
+            limit: max(0px, content-h + pad * 2 - view-h);
+            remote-duration: Theme.t-row;
+        }
+        property <length> scroll: pan.value;
 
         x: Metrics.pane-x - pad;
         y: top - pad;
@@ -156,11 +168,13 @@ export component Settings inherits Rectangle {
                 : Metrics.set-h-flat;
         }
 
+        PointerPanArea { surface: "settings-rows"; }
+
         Rectangle {
             x: pad;
             y: pad - scroll;
             width: Metrics.list-w;
-            animate y { duration: Theme.t-row; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for entry[i] in rows: Rectangle {
                 x: 0;
@@ -187,6 +201,8 @@ export component Settings inherits Rectangle {
                     enabled: entry.enabled;
                     toggle: entry.toggle;
                     focused: entry.enabled && !on-sections && !choice-open && i == row-index;
+                    pointer-zone: entry.enabled ? "settings-rows" : "";
+                    pointer-index: i;
                 }
             }
         }
@@ -202,5 +218,6 @@ export component Settings inherits Rectangle {
         items: choice;
         focus-at: choice-focus;
         note: choice-note;
+        pointer-zone: "settings-choice";
     }
 }

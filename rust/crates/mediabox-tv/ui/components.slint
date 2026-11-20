@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { PointerTarget, PointerClose, PointerHub, PointerPanArea, PanState } from "pointer.slint";
 import { Dialog, ActionButton, SettingCard } from "kit.slint";
 import { ReferenceIcon } from "reference-icons.slint";
 
@@ -157,6 +158,9 @@ export component Keyboard inherits VerticalLayout {
     /// Whether the remote is on the grid at all. A grid nobody is standing on
     /// draws no focus, rather than a stale one on a screen that has moved on.
     in property <bool> active;
+    // The keys' zone, where the screen makes them pointer-ready; a key is
+    // row * 100 + column.
+    in property <string> pointer-zone;
 
     spacing: Metrics.key-gap;
 
@@ -203,6 +207,11 @@ export component Keyboard inherits VerticalLayout {
                 font-weight: wide ? 700 : 600;
                 horizontal-alignment: center;
                 vertical-alignment: center;
+            }
+
+            if pointer-zone != "": PointerTarget {
+                zone: root.pointer-zone;
+                index: r * 100 + c;
             }
         }
     }
@@ -446,6 +455,9 @@ export component Art inherits Rectangle {
 export component Poster inherits Rectangle {
     in property <PosterItem> item;
     in property <bool> focused;
+    // Pointed at, where the screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     width: Metrics.card-w;
     // The artwork plus the room the name appears in when focused. Reserved
@@ -478,10 +490,27 @@ export component Poster inherits Rectangle {
         overflow: elide;
     }
 
+    // The arrow over the poster: a light veil on its artwork, never the
+    // remote's ring.
+    // Placed, not left to Slint, which centres an element given only a
+    // size: the poster is taller than its artwork by its name.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: Metrics.card-w;
+        height: Metrics.card-h;
+        border-radius: Metrics.poster-radius;
+        background: main.lit && !focused ? Theme.hover-veil : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+
     // On "İzlemeye devam edin", as the reference's focused poster: a cross in
     // its top-left corner and the menu's mark just right of the name, both
-    // measured off its board.
-    if focused && item.dismissable: Path {
+    // measured off its board. A pointer finds them on the poster it is over
+    // as well, without moving the remote's focus there.
+    property <bool> pointed: main.lit || dismiss.lit || menu-mark.lit;
+    property <bool> marked: item.dismissable && (focused || (pointer-zone != "" && pointed));
+    if marked: Path {
         x: Metrics.card-w * 0.085;
         y: Metrics.card-w * 0.085;
         width: Metrics.card-w * 0.058;
@@ -489,11 +518,11 @@ export component Poster inherits Rectangle {
         viewbox-width: 10;
         viewbox-height: 10;
         commands: "M1 1L9 9M9 1L1 9";
-        stroke: #ffffffd0;
+        stroke: dismiss.lit ? #ffffff : #ffffffd0;
         stroke-width: max(1.5px, Metrics.card-w * 0.009);
         stroke-line-cap: round;
     }
-    if focused && item.dismissable: VerticalLayout {
+    if marked: VerticalLayout {
         x: Metrics.card-w * 1.0;
         y: Metrics.card-h + Metrics.vh * 0.016 + (Metrics.text-card * 1.3 - self.height) / 2;
         width: Metrics.card-w * 0.03;
@@ -503,8 +532,39 @@ export component Poster inherits Rectangle {
             height: self.width;
             width: Metrics.card-w * 0.022;
             border-radius: self.width / 2;
-            background: #9291a0;
+            background: menu-mark.lit ? #ffffff : #9291a0;
         }
+    }
+
+    main := PointerTarget {
+        enabled: pointer-zone != "";
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+        veil: false;
+    }
+
+    // The cross and the menu mark are targets of their own, over the
+    // poster's: a click on them is the cross or the mark, never the poster
+    // opening.
+    dismiss := PointerTarget {
+        enabled: pointer-zone != "" && marked;
+        x: Metrics.card-w * 0.04;
+        y: Metrics.card-w * 0.04;
+        width: Metrics.card-w * 0.15;
+        height: self.width;
+        zone: "poster-dismiss";
+        index: root.pointer-index;
+        radius: self.width / 2;
+    }
+    menu-mark := PointerTarget {
+        enabled: pointer-zone != "" && marked;
+        x: Metrics.card-w * 0.94;
+        y: Metrics.card-h + Metrics.vh * 0.016 - Metrics.card-w * 0.03;
+        width: Metrics.card-w * 0.14;
+        height: Metrics.card-w * 0.16;
+        zone: "poster-menu";
+        index: root.pointer-index;
+        radius: self.width / 2;
     }
 }
 
@@ -513,10 +573,18 @@ export component Poster inherits Rectangle {
 export component GridPoster inherits Rectangle {
     in property <PosterItem> item;
     in property <bool> focused;
+    // Pointed at, where the screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
     // The poster's width: the shelves' by default, the grid's own where it
     // has one (the reference's Discover is seven to a row).
     in property <length> art-w: Metrics.card-w;
     in property <length> name-size: Metrics.text-card;
+    // The poster's menu mark, where the screen has a menu for it: the
+    // remote reaches the menu with a held Ok, a pointer with this -- three
+    // dots in the poster's corner, on the focused poster while a pointer is
+    // in use.
+    in property <string> menu-zone;
 
     width: art-w;
     height: art-w * 1.461 + name-size * 3.4;
@@ -544,12 +612,74 @@ export component GridPoster inherits Rectangle {
         wrap: word-wrap;
         overflow: elide;
     }
+
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: art-w;
+        height: art-w * 1.461;
+        border-radius: art-w * 0.055;
+        background: main.lit && !focused ? Theme.hover-veil : transparent;
+        animate background { duration: Theme.focus-in; easing: Theme.ease; }
+    }
+
+    main := PointerTarget {
+        enabled: pointer-zone != "";
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+        veil: false;
+    }
+
+    // Over the poster's own target, so a click on it is the mark's: on the
+    // focused poster, or the one the arrow is over.
+    property <bool> pointed: main.lit || mark.lit;
+    property <bool> marked: menu-zone != "" && PointerHub.shown && (focused || pointed);
+    Rectangle {
+        x: art-w - self.width - art-w * 0.05;
+        y: art-w * 0.05;
+        width: art-w * 0.2;
+        height: self.width;
+        visible: marked;
+        border-radius: self.width / 2;
+        background: mark.lit ? #000000d9 : #000000a6;
+        border-width: 1px;
+        border-color: mark.lit ? #ffffff73 : transparent;
+        animate background, border-color { duration: Theme.focus-in; easing: Theme.ease; }
+        HorizontalLayout {
+            alignment: center;
+            VerticalLayout {
+                alignment: center;
+                spacing: parent.height * 0.08;
+                for dot in [0, 1, 2]: Rectangle {
+                    width: root.art-w * 0.022;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: #ffffff;
+                }
+            }
+        }
+    }
+    mark := PointerTarget {
+        enabled: marked;
+        x: art-w - self.width - art-w * 0.05;
+        y: art-w * 0.05;
+        width: art-w * 0.2;
+        height: self.width;
+        zone: root.menu-zone;
+        index: root.pointer-index;
+        veil: false;
+    }
 }
 
 export component Rail inherits Rectangle {
     in property <RailModel> rail;
     in property <int> focus-col;
     in property <bool> active;
+    // Its posters' zone, where the screen makes them pointer-ready, and
+    // which shelf this is: a poster is row * 100 + column, "Tümünü Gör" one
+    // past the last.
+    in property <string> pointer-zone;
+    in property <int> pointer-row;
     // Where the first poster starts and how far in from the right the heading's
     // "Tümünü Gör" ends: the screen's gutter, unless the screen says otherwise.
     in property <length> inset: Metrics.gutter;
@@ -592,6 +722,11 @@ export component Rail inherits Rectangle {
             font-size: Metrics.title-rail * 0.72;
             font-weight: 500;
         }
+
+        if root.pointer-zone != "": PointerTarget {
+            zone: root.pointer-zone;
+            index: root.pointer-row * 100 + rail.items.length;
+        }
     }
 
     if rail.items.length == 0 && rail.note != "": Text {
@@ -611,31 +746,47 @@ export component Rail inherits Rectangle {
         clip: true;
         background: transparent;
 
+        // Where the strip is: the remote's focus parks the focused poster at
+        // the left and the shelf slides under it, which is what makes a long
+        // shelf feel like one row rather than a page. A shelf the remote has
+        // left stays where it was, as the reference's rows do: rolled back
+        // to its start it showed posters whose pictures were not loaded --
+        // they are loaded around where the shelf was left. A pointer's hand
+        // slides it along instead, and the focus stays.
+        pan := PanState {
+            surface: root.pointer-zone;
+            lane: root.pointer-row;
+            horizontal: true;
+            item: strip.step;
+            remote: clamp(focus-col * strip.step, 0px, self.limit);
+            limit: max(0px, strip.span - track.width + inset + right-inset);
+            remote-duration: Theme.glide;
+        }
+
+        if root.pointer-zone != "": PointerPanArea {
+            surface: root.pointer-zone;
+            lane: root.pointer-row;
+        }
+
         strip := Rectangle {
             property <length> step: Metrics.card-w + Metrics.rail-gap;
             property <length> span: step * rail.items.length;
-            // The focused poster parks at the left and the shelf slides under
-            // it, which is what makes a long shelf feel like one row rather
-            // than a page. A shelf the remote has left stays where it was, as
-            // the reference's rows do: rolled back to its start it showed
-            // posters whose pictures were not loaded -- they are loaded
-            // around where the shelf was left.
-            property <length> wanted: clamp(focus-col * step, 0px,
-                max(0px, span - track.width + inset + right-inset));
 
-            x: inset - wanted;
+            x: inset - pan.value;
             y: 0;
             width: span;
             height: 100%;
             background: transparent;
 
-            animate x { duration: Theme.glide; easing: Theme.ease; }
+            animate x { duration: pan.duration; easing: Theme.ease; }
 
             for item[i] in rail.items: Poster {
                 x: i * parent.step;
                 y: Metrics.focus-room;
                 item: item;
                 focused: active && i == focus-col;
+                pointer-zone: root.pointer-zone;
+                pointer-index: root.pointer-row * 100 + i;
             }
         }
     }
@@ -647,6 +798,9 @@ export component Rail inherits Rectangle {
 export component AppIcon inherits Rectangle {
     in property <AppTile> tile;
     in property <bool> focused;
+    // Pointed at, where a screen gives it a zone (ui/pointer.slint).
+    in property <string> pointer-zone;
+    in property <int> pointer-index;
 
     // Two lines of room for the name, always. "Filmler ve Diziler" does not fit
     // on one at any width this tile is drawn at, and an elided application name
@@ -678,6 +832,14 @@ export component AppIcon inherits Rectangle {
                 border-color: focused ? Theme.focus-ring : #ffffff1a;
 
                 animate width { duration: Theme.focus-in; easing: Theme.ease; }
+
+                // The arrow over the tile: a light veil on its face, never
+                // the remote's ring.
+                Rectangle {
+                    border-radius: parent.border-radius;
+                    background: tile-target.lit && !focused ? Theme.hover-veil : transparent;
+                    animate background { duration: Theme.focus-in; easing: Theme.ease; }
+                }
 
                 Path {
                     x: parent.width * 0.27;
@@ -718,6 +880,13 @@ export component AppIcon inherits Rectangle {
             wrap: no-wrap;
             min-width: 0px;
         }
+    }
+
+    tile-target := PointerTarget {
+        enabled: pointer-zone != "";
+        zone: root.pointer-zone;
+        index: root.pointer-index;
+        veil: false;
     }
 }
 
@@ -1031,6 +1200,9 @@ export component TopBar inherits Rectangle {
     in property <VitalsModel> vitals;
     // The screen's own name, for everything that is not the home screen.
     in property <string> heading;
+    // A screen with somewhere to go back to: while a pointer is in use a
+    // way back stands before its name, and a click on it is Back.
+    in property <bool> back;
 
     height: Metrics.topbar * 1.9;
     // Taller than the bar itself and transparent past it: a panel would cut the
@@ -1049,6 +1221,14 @@ export component TopBar inherits Rectangle {
         height: Metrics.topbar;
         spacing: Metrics.gutter * 0.4;
         alignment: start;
+
+        if back && PointerHub.shown: VerticalLayout {
+            alignment: center;
+            PointerClose {
+                mark: "back";
+                size: Metrics.root-font * 2.0;
+            }
+        }
 
         if heading != "": Text {
             text: heading;
@@ -1207,6 +1387,8 @@ export component Sheet inherits Dialog {
             label: row.label;
             focused: i == index;
             danger: row.tone == "bad";
+            pointer-zone: "sheet";
+            pointer-index: i;
         }
     }
 
@@ -1219,6 +1401,8 @@ export component Sheet inherits Dialog {
             kind: "action";
             danger: row.tone == "bad";
             focused: i == index;
+            pointer-zone: "sheet";
+            pointer-index: i;
         }
     }
 }

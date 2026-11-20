@@ -1,4 +1,5 @@
 import { Theme, Metrics } from "theme.slint";
+import { PointerTarget, PointerShield, PointerSwallow, PointerScrub, PointerClose, PointerPanArea, PanState } from "pointer.slint";
 // The subtitle face: Stremio's own (stremio-core `subtitles_font: "Roboto"`),
 // carried in the binary so a board draws it whatever fonts it has, in the four
 // styles a subtitle file can ask for. Apache 2.0, ui/fonts/Roboto-LICENSE.txt.
@@ -137,6 +138,7 @@ component FilmButton inherits Rectangle {
     in property <string> fill;
     in property <string> line;
     in property <bool> focused;
+    in property <int> pointer-index;
 
     property <length> size: Metrics.vh * 0.030;
 
@@ -171,6 +173,7 @@ component FilmButton inherits Rectangle {
         stroke: focused ? #05070c : #ffffff;
         stroke-width: size / 11;
     }
+    PointerTarget { zone: "player-buttons"; index: root.pointer-index; radius: root.border-radius; }
 }
 
 // The line along the bottom of a film.
@@ -423,6 +426,17 @@ export component Player inherits Rectangle {
             animate width { duration: Theme.focus-in; easing: Theme.ease; }
         }
 
+        // A pointer on the line: a click is a place to go, a drag a scrub
+        // that goes there when the button comes up. Taller than the line,
+        // so it can be landed on.
+        PointerScrub {
+            x: line.x;
+            y: line.y + line.height / 2 - self.height / 2;
+            width: line.width;
+            height: Metrics.vh * 0.045;
+            zone: "player-bar";
+        }
+
         // --------------------------------------------------------- the marks
         for mark[i] in marks: FilmButton {
             x: pad - self.width / 2 + i * mark-gap;
@@ -430,6 +444,17 @@ export component Player inherits Rectangle {
             fill: mark;
             line: lines[i];
             focused: !root.on-line && i == focus-index;
+            pointer-index: i;
+        }
+
+        // Out of the film, for a pointer: the remote's Stop, which leaves it
+        // for the page it was started from. The reference's own way back is
+        // the chevron in this corner.
+        PointerClose {
+            x: pad - Metrics.vh * 0.01;
+            y: Metrics.vh * 0.04;
+            mark: "back";
+            zone: "player-exit";
         }
 
         // The hairlines between the groups.
@@ -515,6 +540,13 @@ export component Player inherits Rectangle {
     // One shape for all four, the reference's own: a dark rounded sheet over
     // the picture with its name in the corner, the list down it, and — on the
     // two panels that have one — the delay beside the list.
+    // While a panel is down nothing under it is pointed at; a click off it
+    // is Back, which closes it (or takes a group's settings back to the
+    // groups).
+    if menu != "": PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if menu != "": Rectangle {
         x: menu == "speed" ? (root.width - self.width) / 2 : root.width * 0.15;
         y: (root.height - self.height) / 2;
@@ -525,6 +557,8 @@ export component Player inherits Rectangle {
         border-radius: Metrics.vh * 0.016;
         background: #10121be8;
         clip: true;
+
+        PointerSwallow { }
 
         Text {
             x: Metrics.vh * 0.03;
@@ -567,6 +601,32 @@ export component Player inherits Rectangle {
             stroke-width: 2px;
         }
 
+        // Each column is a window of its rows Rust keeps: the hand and the
+        // wheel move it a row at a time (`PointerHub.step`), the remote's
+        // focus never.
+        PanState {
+            surface: "player-menu";
+            pitch: Metrics.vh * 0.058;
+        }
+        PanState {
+            surface: "player-tracks";
+            pitch: Metrics.vh * 0.058;
+        }
+        PointerPanArea {
+            x: Metrics.vh * 0.03;
+            y: Metrics.vh * 0.085;
+            width: grouped ? parent.width * 0.28 : parent.width - Metrics.vh * 0.06;
+            height: parent.height - self.y;
+            surface: "player-menu";
+        }
+        if grouped: PointerPanArea {
+            x: parent.width * 0.32;
+            y: Metrics.vh * 0.085;
+            width: sectioned ? parent.width * 0.68 - Metrics.vh * 0.03 : parent.width * 0.32;
+            height: parent.height - self.y;
+            surface: "player-tracks";
+        }
+
         // The languages.
         VerticalLayout {
             x: Metrics.vh * 0.03;
@@ -579,6 +639,7 @@ export component Player inherits Rectangle {
                 height: Metrics.vh * 0.058;
                 border-radius: Metrics.vh * 0.008;
                 background: (menu-column == 0 && i == menu-focus) ? #ffffff1f : transparent;
+                PointerTarget { zone: "player-menu"; index: i; }
 
                 HorizontalLayout {
                     x: 0;
@@ -644,6 +705,7 @@ export component Player inherits Rectangle {
                 height: Metrics.vh * 0.058;
                 border-radius: Metrics.vh * 0.008;
                 background: (menu-column == 1 && i == menu-track-focus) ? #ffffff1f : transparent;
+                PointerTarget { zone: "player-tracks"; index: i; }
 
                 HorizontalLayout {
                     x: 0;
@@ -714,6 +776,9 @@ export component Player inherits Rectangle {
             height: Metrics.vh * 0.058;
             border-radius: Metrics.vh * 0.008;
             background: menu-column == 2 ? #ffffff1f : transparent;
+            // The delay: a click puts the remote on it, the wheel (Up and
+            // Down) moves it.
+            PointerTarget { zone: "player-side"; index: 0; }
 
             HorizontalLayout {
                 x: 0;
@@ -742,6 +807,12 @@ export component Player inherits Rectangle {
                     wrap: no-wrap;
                 }
             }
+        }
+
+        PointerClose {
+            x: parent.width - self.width - Metrics.vh * 0.02;
+            y: Metrics.vh * 0.02;
+            size: Metrics.vh * 0.04;
         }
     }
 }

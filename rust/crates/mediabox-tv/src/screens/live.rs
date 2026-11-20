@@ -373,6 +373,25 @@ pub struct TrackRow {
     pub selected: bool,
 }
 
+/// What a pointer can be over on live television.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveTarget {
+    /// The ground over the picture, with nothing else up.
+    Surface,
+    /// A menu card (row, column), or a row's title (`pointer::ROW_TITLE`).
+    Menu(usize, usize),
+    /// A programme of the guide: the drawn row, and the cell in it.
+    Guide(usize, usize),
+    /// A drawn row of a side panel.
+    Panel(usize),
+    /// A channel the number entry offers.
+    Keypad(usize),
+    /// A row of the setup's list.
+    Setup(usize),
+    /// A button of the setup's card.
+    Action(usize),
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Keypad {
     pub typed: String,
@@ -1832,6 +1851,142 @@ impl Live {
         }
     }
 
+    /// The remote's focus onto what a pointer is over, on the overlay that
+    /// is up -- a target of another is refused, as is a row drawn disabled.
+    /// A pointer that reaches an overlay keeps it up for its life again, as
+    /// a key does. Nothing here tunes or chooses: a click is the remote's Ok
+    /// after it, through `key`.
+    /// A pointer's hand or wheel moving the guide's channels or a side
+    /// panel's rows by whole rows: the view only, kept in range, never the
+    /// focus. The overlay stays up for it, as for a key. Returns whether
+    /// the view moved.
+    pub fn scroll_view(&mut self, rows: i32, at: Instant, now: i64) -> bool {
+        let shift =
+            |top: usize, last: usize| (top as i64 + rows as i64).clamp(0, last as i64) as usize;
+        let moved = match self.layer {
+            Layer::Guide => {
+                let count = self.channels.len();
+                let top = shift(
+                    self.guide_focus.top,
+                    count.saturating_sub(GUIDE_ROWS.min(count)),
+                );
+                std::mem::replace(&mut self.guide_focus.top, top) != top
+            }
+            Layer::Panel(panel) => {
+                let count = self.panel_rows(panel, now).len();
+                let top = shift(self.panel.top, count.saturating_sub(PANEL_ROWS));
+                std::mem::replace(&mut self.panel.top, top) != top
+            }
+            _ => false,
+        };
+        if self.layer != Layer::None {
+            self.extend_layer(at);
+        }
+        moved
+    }
+
+    /// The remote picked up again: the guide and a side panel are drawn
+    /// around their focus, as the remote's own keys keep them.
+    pub fn reveal_focus(&mut self) {
+        match self.layer {
+            Layer::Guide => self.park_guide_row(),
+            Layer::Panel(panel) => self.scroll_panel(panel),
+            _ => {}
+        }
+    }
+
+    pub fn point(&mut self, target: LiveTarget, at: Instant, now: i64) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        let aim = match (self.layer, target) {
+            (Layer::None, LiveTarget::Surface) => Aim::Here,
+            (Layer::Menu, LiveTarget::Menu(row, col)) => {
+                let rows = self.menu_rows();
+                let Some((_, cards)) = rows.get(row) else {
+                    return Aim::Refused;
+                };
+                let want = if col == crate::pointer::ROW_TITLE {
+                    // The row comes forward on its first card, as Up and
+                    // Down bring it.
+                    if self.menu.row == row {
+                        self.menu.col
+                    } else {
+                        0
+                    }
+                } else if col < cards.len() {
+                    col
+                } else {
+                    return Aim::Refused;
+                };
+                let before = (self.menu.row, self.menu.col);
+                self.menu = MenuFocus { row, col: want };
+                if before == (row, want) {
+                    Aim::Here
+                } else {
+                    Aim::Moved
+                }
+            }
+            (Layer::Guide, LiveTarget::Guide(row, cell)) => {
+                let g = self.guide_focus;
+                let index = g.top + row;
+                if row >= GUIDE_ROWS || index >= self.channels.len() {
+                    return Aim::Refused;
+                }
+                let sid = self.channels[index].service_id;
+                let Some(entry) = self
+                    .entries(sid, g.start, g.start + GUIDE_VIEW)
+                    .into_iter()
+                    .nth(cell)
+                else {
+                    return Aim::Refused;
+                };
+                // The list is not scrolled under the arrow: the row is one
+                // already drawn, and the time one the view shows.
+                let want = (index, entry.start.max(g.start));
+                let before = (g.row, g.at);
+                self.guide_focus.row = want.0;
+                self.guide_focus.at = want.1;
+                if before == want {
+                    Aim::Here
+                } else {
+                    Aim::Moved
+                }
+            }
+            (Layer::Panel(panel), LiveTarget::Panel(row)) => {
+                let index = self.panel.top + row;
+                let enabled = self
+                    .panel_rows(panel, now)
+                    .get(index)
+                    .is_some_and(|row| row.enabled);
+                Aim::set(&mut self.panel.focus, index, enabled)
+            }
+            (Layer::Keypad, LiveTarget::Keypad(row)) => {
+                let allowed = row < self.keypad.candidates.len();
+                Aim::set(&mut self.keypad.selected, row, allowed)
+            }
+            (Layer::Setup, LiveTarget::Setup(row)) => {
+                let rows = self.setup_rows();
+                let allowed = rows.get(row).is_some_and(|&r| self.setup_row_enabled(r));
+                let aim = Aim::set(&mut self.setup.focus, row, allowed);
+                if aim == Aim::Moved {
+                    // As Up and Down leave a row.
+                    self.setup.manual.fresh = true;
+                    self.setup.confirm_clear = false;
+                    self.setup.cleared = None;
+                }
+                aim
+            }
+            (Layer::Setup, LiveTarget::Action(at)) => {
+                let allowed = self.setup_rows().is_empty() && at < self.setup.actions().len();
+                Aim::set(&mut self.setup.focus, at, allowed)
+            }
+            _ => Aim::Refused,
+        };
+        if aim.taken() && self.layer != Layer::None {
+            self.extend_layer(at);
+        }
+        aim
+    }
+
     /// The overlays' lifetimes. The number entry's end tunes to what it
     /// had selected.
     pub fn tick(&mut self, at: Instant) -> Effect {
@@ -1979,6 +2134,169 @@ mod tests {
     }
 
     const NOW: i64 = 1_800_000_000 + 600; // ten past a half hour
+
+    /// A pointer on live television reaches the overlay that is up and
+    /// nothing else; a click after it is the remote's own key: the
+    /// picture's ground opens the menu, a card opens what it is, Back
+    /// closes it.
+    #[test]
+    fn a_pointer_reaches_the_overlay_that_is_up_and_its_ok_is_the_remote_s() {
+        use crate::pointer::{Aim, ROW_TITLE};
+        let at = Instant::now();
+        let mut live = live(4);
+        live.tuning(10_800, at);
+        // Nothing up: the ground, and its Ok is the menu.
+        assert_eq!(live.point(LiveTarget::Surface, at, NOW), Aim::Here);
+        assert_eq!(
+            live.point(LiveTarget::Menu(0, 0), at, NOW),
+            Aim::Refused,
+            "no menu yet"
+        );
+        assert_eq!(live.key(InputAction::Ok, at, NOW), Effect::Paint);
+        assert_eq!(live.layer, Layer::Menu);
+        assert_eq!(
+            live.point(LiveTarget::Surface, at, NOW),
+            Aim::Refused,
+            "the picture is under the menu"
+        );
+        // A card, and the next row's title (which brings that row forward
+        // on its first card, choosing nothing).
+        assert_eq!(live.point(LiveTarget::Menu(0, 1), at, NOW), Aim::Moved);
+        assert_eq!((live.menu.row, live.menu.col), (0, 1));
+        assert_eq!(
+            live.point(LiveTarget::Menu(1, ROW_TITLE), at, NOW),
+            Aim::Moved
+        );
+        assert_eq!((live.menu.row, live.menu.col), (1, 0));
+        assert_eq!(
+            live.point(LiveTarget::Menu(1, 9), at, NOW),
+            Aim::Refused,
+            "no such card"
+        );
+        assert_eq!(
+            live.point(LiveTarget::Menu(5, 0), at, NOW),
+            Aim::Refused,
+            "no such row"
+        );
+        // "Kanal listesi", and Ok opens it.
+        assert_eq!(live.point(LiveTarget::Menu(0, 1), at, NOW), Aim::Moved);
+        assert_eq!(live.key(InputAction::Ok, at, NOW), Effect::Paint);
+        assert_eq!(live.layer, Layer::Panel(Panel::Channels));
+        // The list: its row 2 is the second channel; Ok tunes it.
+        assert_eq!(live.point(LiveTarget::Panel(2), at, NOW), Aim::Moved);
+        assert_eq!(live.key(InputAction::Ok, at, NOW), Effect::Tune(10_801));
+        // Back closes what is up; with nothing up it leaves.
+        live.open_panel(Panel::Settings, at);
+        assert_eq!(live.key(InputAction::Back, at, NOW), Effect::Paint);
+        assert_eq!(live.layer, Layer::None);
+        live.banner_until = None;
+        assert_eq!(live.key(InputAction::Back, at, NOW), Effect::Exit);
+    }
+
+    /// A panel row drawn disabled takes neither hover nor a click; a
+    /// pointer that reaches an overlay keeps it up for its life again.
+    #[test]
+    fn a_pointer_refuses_a_disabled_row_and_keeps_the_overlay_up() {
+        use crate::pointer::Aim;
+        let at = Instant::now();
+        let mut live = live(2);
+        live.open_panel(Panel::Settings, at);
+        // "Kaynak" and "Kanal sayısı" are readings.
+        assert_eq!(live.point(LiveTarget::Panel(0), at, NOW), Aim::Refused);
+        assert_eq!(live.point(LiveTarget::Panel(1), at, NOW), Aim::Refused);
+        let later = at + PANEL_SHOW - Duration::from_millis(1);
+        assert_eq!(live.point(LiveTarget::Panel(2), later, NOW), Aim::Moved);
+        assert_eq!(
+            live.layer_until,
+            Some(later + PANEL_SHOW),
+            "kept up as a key keeps it"
+        );
+        assert_eq!(live.tick(at + PANEL_SHOW), Effect::Nothing, "still up");
+        // The number entry: its candidates.
+        let mut live = live_with_keypad();
+        assert_eq!(live.point(LiveTarget::Keypad(1), at, NOW), Aim::Moved);
+        assert_eq!(live.keypad.selected, 1);
+        assert_eq!(live.point(LiveTarget::Keypad(9), at, NOW), Aim::Refused);
+    }
+
+    fn live_with_keypad() -> Live {
+        let at = Instant::now();
+        let mut live = live(12);
+        assert_eq!(
+            live.key(InputAction::of_digit(1).expect("1"), at, NOW),
+            Effect::Paint
+        );
+        assert_eq!(live.layer, Layer::Keypad);
+        assert!(live.keypad.candidates.len() > 1);
+        live
+    }
+
+    /// The guide: a programme drawn is the focus, without the list moving
+    /// under the arrow; a row past the drawn ones is nothing.
+    #[test]
+    fn a_pointer_on_the_guide_does_not_scroll_it() {
+        use crate::pointer::Aim;
+        let at = Instant::now();
+        let mut live = live(8);
+        let sid = live.channels[1].service_id;
+        live.guide.insert(
+            sid,
+            vec![event(NOW - 600, 30, "Haber"), event(NOW + 1200, 60, "Film")],
+        );
+        assert_eq!(live.key(InputAction::Guide, at, NOW), Effect::Paint);
+        let top = live.guide_focus.top;
+        let start = live.guide_focus.start;
+        let cells = live.entries(sid, start, start + GUIDE_VIEW);
+        let film = cells
+            .iter()
+            .position(|e| e.event.as_ref().is_some_and(|e| e.title == "Film"))
+            .expect("drawn");
+        assert_eq!(
+            live.point(LiveTarget::Guide(1 - top, film), at, NOW),
+            Aim::Moved
+        );
+        assert_eq!(live.guide_focus.row, 1);
+        assert_eq!(live.guide_focus.top, top, "not scrolled");
+        assert_eq!(
+            live.focused_entry().and_then(|e| e.event).map(|e| e.title),
+            Some("Film".into())
+        );
+        // Not on now: Ok only reads it.
+        assert_eq!(live.key(InputAction::Ok, at, NOW), Effect::Nothing);
+        assert_eq!(
+            live.point(LiveTarget::Guide(GUIDE_ROWS, 0), at, NOW),
+            Aim::Refused
+        );
+        assert_eq!(
+            live.point(LiveTarget::Guide(1 - top, 99), at, NOW),
+            Aim::Refused
+        );
+    }
+
+    /// The setup: a list row drawn disabled is refused; its card's buttons
+    /// are targets only on the card.
+    #[test]
+    fn a_pointer_in_the_setup_takes_what_is_enabled() {
+        use crate::pointer::Aim;
+        let at = Instant::now();
+        let mut live = live(2);
+        live.open_setup();
+        let rows = live.setup_rows();
+        assert!(!rows.is_empty());
+        for (at_row, row) in rows.iter().enumerate() {
+            let aim = live.point(LiveTarget::Setup(at_row), at, NOW);
+            assert_eq!(aim.taken(), live.setup_row_enabled(*row), "{row:?}");
+        }
+        assert_eq!(
+            live.point(LiveTarget::Action(0), at, NOW),
+            Aim::Refused,
+            "a list has no buttons"
+        );
+        assert_eq!(
+            live.point(LiveTarget::Setup(rows.len()), at, NOW),
+            Aim::Refused
+        );
+    }
 
     #[test]
     fn with_nothing_up_up_and_down_change_channel_and_wrap() {

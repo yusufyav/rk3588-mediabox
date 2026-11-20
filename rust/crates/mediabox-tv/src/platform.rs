@@ -630,7 +630,8 @@ fn read_display_events(kms: &SharedKms, crtc: control::crtc::Handle, s: &mut Sta
     let read = READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let events = match kms.receive_events() {
         Ok(events) if fail_every > 0 && read % fail_every == 0 => {
-            drop(events.count());
+            // The events read are thrown away, as a failed read would lose them.
+            events.for_each(|_| ());
             Err(std::io::Error::other("injected (MEDIABOX_TV_FAULT=readerr)"))
         }
         result => result,
@@ -1025,13 +1026,13 @@ thread_local! {
     static MODE: Cell<(u32, u32, u32)> = const { Cell::new((0, 0, 0)) };
 }
 
-/// Where to write the next frame, when something has asked for one.
-///
-/// Taken by the swap that follows, so a snapshot is a real frame off the panel
-/// rather than a re-render into a different surface: what lands in the file is
-/// the image the display controller is about to scan out, at the panel's own
-/// resolution.
 thread_local! {
+    /// Where to write the next frame, when something has asked for one.
+    ///
+    /// Taken by the swap that follows, so a snapshot is a real frame off the
+    /// panel rather than a re-render into a different surface: what lands in
+    /// the file is the image the display controller is about to scan out, at
+    /// the panel's own resolution.
     static SNAPSHOT: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
 }
 
@@ -3141,6 +3142,43 @@ impl SplitWindow {
 
 thread_local! {
     static DRAW_UNTIL: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// Pointer events for Slint, in order; see `SplitPlatform::drain_pointer`.
+    static TO_SLINT: RefCell<std::collections::VecDeque<WindowEvent>> = RefCell::new(std::collections::VecDeque::new());
+}
+
+/// A pointer event for Slint's own hit testing, handed over by the loop
+/// once nothing holds the application (`SplitPlatform::drain_pointer`).
+pub fn to_slint(event: WindowEvent) {
+    TO_SLINT.with(|queue| queue.borrow_mut().push_back(event));
+}
+
+/// Hands `window` the pointer events the interface queued (`to_slint`),
+/// outside every borrow of the application: what they reach -- a target's
+/// press and release, which Slint says at once, and its hover, which is a
+/// change handler Slint runs afterwards -- calls back into it. Once all of
+/// it has been said, the application settles what nothing answered
+/// (`App::pointer_settle`).
+pub fn deliver_pointer(window: &slint::Window) {
+    let mut delivered = false;
+    while let Some(event) = TO_SLINT.with(|queue| queue.borrow_mut().pop_front()) {
+        window.dispatch_event(event);
+        delivered = true;
+    }
+    if delivered {
+        slint::platform::update_timers_and_animations();
+        crate::with_app(|app| app.pointer_settle());
+    }
+}
+
+/// A scroll, in order: the arrow back where it was if a key had put it
+/// away, Slint told and its answer heard -- the surface under the arrow --
+/// and only then the scroll, which goes to that surface. Handed over in one
+/// call, the scroll was decided before Slint had said anything, and the
+/// first turn after a key moved the remote's focus instead.
+pub fn hand_scroll(window: &slint::Window, scroll: crate::pointer::Scroll) {
+    crate::with_app(|app| app.pointer_wake());
+    deliver_pointer(window);
+    crate::with_app(|app| app.pointer_scroll(scroll));
 }
 
 /// Draw every frame for `span`: for a transition the loop must not wait on
@@ -3493,10 +3531,134 @@ impl SplitPlatform {
         libinput
             .dispatch()
             .map_err(|e| format!("libinput dispatch: {e}"))?;
+        // -- pointer: by the event, never by the device --
+        //
+        // Anything libinput reports pointer events for is a pointer: a mouse,
+        // a touchpad, a trackball, an air-mouse remote, an absolute tablet.
+        // A remote that is a keyboard and a pointer at once is a remote for
+        // its keys and a pointer for its motion and its buttons, whichever it
+        // sends. What a pointer may do where is `crate::pointer`'s, not this
+        // loop's: everything is handed over and the policy decides.
+        //
+        // A mouse reports up to a thousand times a second, and libinput hands
+        // over everything since the last pass at once. Its motion is added up
+        // and given to the interface once -- before whatever came after it,
+        // so a move and then a click is still that order -- and the interface
+        // draws at most once per pass for it, never once per report.
+        let mut motion: Option<crate::pointer::Motion> = None;
+        let hand_over =
+            |motion: crate::pointer::Motion| crate::with_app(|app| app.pointer_motion(motion));
+        let flush = |pending: &mut Option<crate::pointer::Motion>| {
+            if let Some(motion) = pending.take() {
+                hand_over(motion);
+            }
+        };
         for event in libinput {
+            if let input::Event::Pointer(pointer) = &event {
+                let next = match pointer {
+                    input::event::PointerEvent::Motion(moved) => Some(
+                        crate::pointer::Motion::Relative(moved.dx() as f32, moved.dy() as f32),
+                    ),
+                    input::event::PointerEvent::MotionAbsolute(placed) => {
+                        Some(crate::pointer::Motion::Absolute(
+                            placed.absolute_x_transformed(1) as f32,
+                            placed.absolute_y_transformed(1) as f32,
+                        ))
+                    }
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    let (first, pending) = crate::pointer::Motion::coalesce(motion.take(), next);
+                    if let Some(first) = first {
+                        hand_over(first);
+                    }
+                    motion = Some(pending);
+                    continue;
+                }
+                flush(&mut motion);
+                match pointer {
+                    // The main button: handed to Slint's hit testing at the
+                    // arrow (`App::pointer_button`). The middle does nothing.
+                    input::event::PointerEvent::Button(button) if button.button() == BTN_LEFT => {
+                        let pressed = matches!(
+                            button.button_state(),
+                            input::event::pointer::ButtonState::Pressed
+                        );
+                        crate::with_app(|app| app.pointer_button(pressed));
+                    }
+                    // The right button, and the thumb button a mouse calls
+                    // back: the remote's Back, wherever a pointer is allowed.
+                    // A touchpad's two-finger tap is the right button.
+                    input::event::PointerEvent::Button(button)
+                        if matches!(button.button(), BTN_RIGHT | BTN_SIDE | BTN_BACK) =>
+                    {
+                        let pressed = matches!(
+                            button.button_state(),
+                            input::event::pointer::ButtonState::Pressed
+                        );
+                        crate::with_app(|app| app.pointer_back(pressed));
+                    }
+                    // A wheel's detents, a touchpad's fingers and a
+                    // continuous scroll (a trackball's, a button held while
+                    // moving): one scroll, normalised in `pointer::Scroller`.
+                    // The values are libinput's, natural scrolling and all,
+                    // positive down and right; an axis it does not report
+                    // in this event is no movement on it.
+                    input::event::PointerEvent::ScrollWheel(wheel) => {
+                        use input::event::pointer::{Axis, PointerScrollEvent};
+                        let value = |axis| {
+                            if wheel.has_axis(axis) {
+                                wheel.scroll_value_v120(axis)
+                            } else {
+                                0.0
+                            }
+                        };
+                        let scroll = crate::pointer::Scroll::Wheel(
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        hand_scroll(&self.window.window, scroll);
+                    }
+                    input::event::PointerEvent::ScrollFinger(fingers) => {
+                        use input::event::pointer::{Axis, PointerScrollEvent};
+                        // Each axis the event has, or none: a 0 on every one
+                        // it has is the sequence's end (`Scroll::of_axes`).
+                        let value = |axis| fingers.has_axis(axis).then(|| fingers.scroll_value(axis));
+                        let scroll = crate::pointer::Scroll::of_axes(
+                            true,
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        hand_scroll(&self.window.window, scroll);
+                    }
+                    input::event::PointerEvent::ScrollContinuous(continuous) => {
+                        use input::event::pointer::{Axis, PointerScrollEvent};
+                        // Each axis the event has, or none: a 0 on every one
+                        // it has is the sequence's end (`Scroll::of_axes`).
+                        let value = |axis| continuous.has_axis(axis).then(|| continuous.scroll_value(axis));
+                        let scroll = crate::pointer::Scroll::of_axes(
+                            false,
+                            value(Axis::Horizontal),
+                            value(Axis::Vertical),
+                        );
+                        hand_scroll(&self.window.window, scroll);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            flush(&mut motion);
+            // -- pointer: end --
             match &event {
                 input::Event::Device(input::event::DeviceEvent::Added(added)) => {
-                    self.device_added(&added.device());
+                    let mut device = added.device();
+                    // A touchpad clicks by tapping, as on every laptop; libinput
+                    // leaves that off. Asked of what the device can do, not of
+                    // what it is.
+                    if device.config_tap_finger_count() > 0 {
+                        let _ = device.config_tap_set_enabled(true);
+                    }
+                    self.device_added(&device);
                     continue;
                 }
                 input::Event::Device(input::event::DeviceEvent::Removed(removed)) => {
@@ -3504,17 +3666,6 @@ impl SplitPlatform {
                     continue;
                 }
                 _ => {}
-            }
-            // A remote in its pointer mode -- the UR-02's, with the gyroscope
-            // -- clicks where it would otherwise press Ok. There is no pointer
-            // on this interface, so the click is the press of what has focus,
-            // as Android takes it. Moving the pointer means nothing here.
-            if let input::Event::Pointer(input::event::PointerEvent::Button(button)) = &event {
-                if button.button() == BTN_LEFT {
-                    let pressed = matches!(button.button_state(), input::event::pointer::ButtonState::Pressed);
-                    crate::with_app(|app| app.remote_key(mediabox_core::InputAction::Ok, pressed, crate::input::Origin::Keyboard));
-                }
-                continue;
             }
             let input::Event::Keyboard(input::event::KeyboardEvent::Key(key)) = event else {
                 continue;
@@ -3575,7 +3726,12 @@ impl SplitPlatform {
             };
             self.window.window.dispatch_event(event);
         }
+        flush(&mut motion);
         Ok(())
+    }
+
+    fn drain_pointer(&self) {
+        deliver_pointer(&self.window.window);
     }
 
     /// Start repeating a press after its device's delay.
@@ -3655,6 +3811,7 @@ impl Platform for SplitPlatform {
             if self.drain_messages() {
                 break;
             }
+            self.drain_pointer();
             if let Some((setting, trial)) = OUTPUT_WANTED.with(|wanted| wanted.borrow_mut().take()) {
                 self.window.switch_output(setting, trial);
             }
@@ -3730,6 +3887,7 @@ impl Platform for SplitPlatform {
             }
             if pollfds[1].revents & libc::POLLIN != 0 {
                 self.dispatch_input(&mut libinput)?;
+                self.drain_pointer();
             }
             if mediabox_core::timeline::enabled() {
                 let done = mediabox_core::timeline::now_ns();
@@ -3778,6 +3936,9 @@ impl Platform for SplitPlatform {
 /// The two shift keys, by the kernel's code.
 const KEY_LEFTSHIFT: u32 = 42;
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+const BTN_SIDE: u32 = 0x113;
+const BTN_BACK: u32 = 0x116;
 const KEY_RIGHTSHIFT: u32 = 54;
 
 fn key_text(code: u32, shift: bool) -> Option<slint::SharedString> {

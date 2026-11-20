@@ -117,6 +117,7 @@ component EntrySheet inherits Dialog {
             key-row: view.key-row;
             key-col: view.key-col;
             active: true;
+            pointer-zone: "editor-pad";
         }
     }
 }
@@ -156,6 +157,8 @@ export component EthernetPane inherits Rectangle {
                 kind: card.kind;
                 focused: active-pane && card.focused && view.sheet == 0
                     && !view.picker-open && !view.entry-open;
+                pointer-zone: "editor-cards";
+                pointer-index: i;
             }
         }
 
@@ -168,6 +171,8 @@ export component EthernetPane inherits Rectangle {
                 enabled: act.enabled;
                 focused: active-pane && act.focused;
                 primary: i == 0;
+                pointer-zone: "editor-actions";
+                pointer-index: i;
             }
             VerticalLayout {
                 alignment: center;
@@ -208,6 +213,7 @@ export component EthernetPane inherits Rectangle {
         title: view.picker-title;
         items: view.picker;
         focus-at: view.picker-focus;
+        pointer-zone: "editor-picker";
     }
 
     if view.entry-open && view.sheet == 0: EntrySheet {
@@ -232,6 +238,7 @@ export component EthernetPane inherits Rectangle {
         arc: view.arc;
         ready: view.confirm-ready;
         focus-at: view.confirm-focus;
+        pointer-zone: "editor-confirm";
         status-line: view.trial-now;
         message: "Yanıt verilmezse " + view.seconds + " saniye sonra önceki ayara dönülür. Süreyi denetim düzlemi tutar; arayüz kapansa ya da cihaz yeniden başlasa bile ayar geri alınır.";
     }

@@ -28,6 +28,7 @@
 //! options with every one of them in view, where Up and Down move, Ok takes
 //! the one under the remote and Back or Left closes the list unchanged.
 
+use crate::pointer::Aim;
 use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioSetting, AudioStatus, Cadence, OutputStatus};
 
 use crate::prefs::{
@@ -532,6 +533,15 @@ pub struct MediaSettings {
     pub picker: Option<Picker>,
 }
 
+/// What a pointer is over on this screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsTarget {
+    Place(usize),
+    Category(usize),
+    Control(usize),
+    Option(usize),
+}
+
 /// The options of one control, open: which control, and the option the
 /// remote is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,6 +636,60 @@ impl MediaSettings {
                 None => self.zone = Zone::Categories,
             }
         }
+    }
+
+    /// The remote onto what a pointer is over: a place, a category, a
+    /// control that can be changed, or -- only while a list is open -- one
+    /// of its options. `rows` are the controls of the category the remote is
+    /// on.
+    pub fn point(&mut self, target: MsTarget, rows: &[Row]) -> Aim {
+        if let Some(picker) = self.picker.as_mut() {
+            let total = rows
+                .get(self.rows[self.category])
+                .map_or(0, |row| row.choices.len());
+            return match target {
+                MsTarget::Option(at) => Aim::set(&mut picker.focus, at, at < total),
+                _ => Aim::Refused,
+            };
+        }
+        let before = (
+            self.zone,
+            self.place,
+            self.category,
+            self.rows[self.category],
+        );
+        match target {
+            MsTarget::Place(at) if at < PLACES => {
+                self.zone = Zone::Places;
+                self.place = at;
+            }
+            MsTarget::Category(at) if at < CATEGORIES.len() => {
+                self.zone = Zone::Categories;
+                self.category = at;
+            }
+            MsTarget::Control(at) if rows.get(at).is_some_and(|row| row.enabled) => {
+                self.zone = Zone::Controls;
+                self.rows[self.category] = at;
+            }
+            _ => return Aim::Refused,
+        }
+        if before
+            == (
+                self.zone,
+                self.place,
+                self.category,
+                self.rows[self.category],
+            )
+        {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// A control's list is open over the page.
+    pub fn modal(&self) -> bool {
+        self.picker.is_some()
     }
 
     /// `rows` are the controls of the category the remote is on.
@@ -1163,6 +1227,78 @@ mod tests {
 
     /// The contract the remote is held to: up and down inside a column,
     /// right or Ok into the path's category, left and Back out one layer.
+    /// A pointer on a category, a control that can be changed or a place is
+    /// the remote on it; a control that cannot be changed refuses it; an
+    /// open list is all it reaches.
+    /// Back: an open list closes unchanged, the controls go back to the
+    /// path, and from the path it is the application's (out to the board).
+    #[test]
+    fn back_from_the_catalogue_s_settings_goes_up_one_level_at_a_time() {
+        let prefs = MediaPreferences::default();
+        let session = session(false);
+        let rows = rows(Category::Player, &ctx(&prefs, &session));
+        let mut screen = MediaSettings::new();
+        screen.enter();
+        let with_choices = rows
+            .iter()
+            .position(|row| row.enabled && !row.choices.is_empty())
+            .expect("a list");
+        screen.point(MsTarget::Control(with_choices), &rows);
+        screen.picker = Some(Picker {
+            control: rows[with_choices].control,
+            focus: 0,
+        });
+        assert!(screen.back(), "the list closes");
+        assert!(!screen.modal());
+        assert_eq!(screen.zone, Zone::Controls);
+        assert!(screen.back(), "the controls to the path");
+        assert_eq!(screen.zone, Zone::Categories);
+        assert!(!screen.back(), "out is the application's");
+    }
+
+    #[test]
+    fn a_pointer_walks_the_catalogue_s_settings() {
+        use crate::pointer::Aim;
+        let prefs = MediaPreferences::default();
+        let session = session(false);
+        let rows = rows(Category::Player, &ctx(&prefs, &session));
+        let mut screen = MediaSettings::new();
+        screen.enter();
+        assert_eq!(screen.point(MsTarget::Category(0), &rows), Aim::Here);
+        assert_eq!(screen.point(MsTarget::Control(1), &rows), Aim::Moved);
+        assert_eq!((screen.zone, screen.row()), (Zone::Controls, 1));
+        assert_eq!(
+            screen.point(MsTarget::Control(rows.len()), &rows),
+            Aim::Refused
+        );
+        assert_eq!(screen.point(MsTarget::Place(0), &rows), Aim::Moved);
+        assert_eq!(screen.zone, Zone::Places);
+        assert_eq!(screen.point(MsTarget::Place(PLACES), &rows), Aim::Refused);
+        assert_eq!(
+            screen.point(MsTarget::Option(0), &rows),
+            Aim::Refused,
+            "no list open"
+        );
+        // A list open over a control.
+        let with_choices = rows
+            .iter()
+            .position(|row| row.enabled && !row.choices.is_empty())
+            .expect("a list");
+        screen.point(MsTarget::Control(with_choices), &rows);
+        screen.picker = Some(Picker {
+            control: rows[with_choices].control,
+            focus: 0,
+        });
+        assert!(screen.modal());
+        assert_eq!(
+            screen.point(MsTarget::Category(1), &rows),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(screen.point(MsTarget::Option(1), &rows), Aim::Moved);
+        assert_eq!(screen.point(MsTarget::Option(99), &rows), Aim::Refused);
+    }
+
     #[test]
     fn the_remote_goes_in_and_out_one_column_at_a_time() {
         let prefs = MediaPreferences::default();

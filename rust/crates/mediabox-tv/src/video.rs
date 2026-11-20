@@ -763,6 +763,11 @@ impl VideoPlane {
         if let Some(alpha) = props.alpha {
             request.add_property(self.plane, alpha, Value::UnsignedRange(ALPHA_OPAQUE));
         }
+        // The plane told which matrix and which range the frame uses, and its
+        // curve. Left alone, the display controller converts every film as
+        // BT.601 limited -- measured on the appliance with a 4K film on the
+        // plane: `Esmart0-win0 color-encoding[BT.601] color-range[Limited]`
+        // under an HD picture, a visible shift in greens and reds.
         if self.applied.get() != Some(frame.colour) {
             for (property, value) in [
                 (self.encoding, frame.colour.encoding),
@@ -844,57 +849,6 @@ impl VideoPlane {
         self.applied.set(Some(colour));
         if self.depth.is_some() {
             self.sunk.set(true);
-        }
-    }
-
-    /// The bottom of the stack, so the interface is drawn over the film.
-    ///
-    /// The other half of `raise_interface`; done here because a plane only has
-    /// a stacking order while it is being used.
-    fn sink_below_the_interface<D: ControlDevice>(&self, device: &D) {
-        if self.sunk.get() {
-            return;
-        }
-        let Some(property) = self.depth else { return };
-        match device.set_property(self.plane, property, 0) {
-            Ok(()) => self.sunk.set(true),
-            Err(e) => eprintln!("mediabox-tv.video zpos: {e}"),
-        }
-    }
-
-    /// Tell the plane which matrix and which range the frame uses.
-    ///
-    /// Without this the display controller converts every film as BT.601
-    /// limited. Measured on the appliance while a 4K film was on the plane:
-    /// `Esmart0-win0 color-encoding[BT.601] color-range[Limited]` under an
-    /// HD picture, which is a visible shift in greens and reds.
-    fn apply_colour<D: ControlDevice>(&self, device: &D, colour: Colour) {
-        if self.applied.get() == Some(colour) {
-            return;
-        }
-        let mut done = true;
-        if let Some(property) = self.encoding
-            && let Err(e) = device.set_property(self.plane, property, colour.encoding)
-        {
-            eprintln!("mediabox-tv.video COLOR_ENCODING: {e}");
-            done = false;
-        }
-        if let Some(property) = self.range
-            && let Err(e) = device.set_property(self.plane, property, colour.range)
-        {
-            eprintln!("mediabox-tv.video COLOR_RANGE: {e}");
-            done = false;
-        }
-        // Written even when it is zero. A film that is not HDR has to say so,
-        // or it is shown through the curve the last film left behind.
-        if let Some(property) = self.eotf
-            && let Err(e) = device.set_property(self.plane, property, colour.eotf)
-        {
-            eprintln!("mediabox-tv.video EOTF: {e}");
-            done = false;
-        }
-        if done {
-            self.applied.set(Some(colour));
         }
     }
 
@@ -1675,10 +1629,6 @@ impl<D: ControlDevice + Clone> Sink<D> {
     /// When the last frame of the film arrived.
     pub fn last_arrival(&self) -> Option<std::time::Instant> {
         self.arrived
-    }
-
-    pub fn frames(&self) -> u64 {
-        self.frames
     }
 
     /// The connected player's process id, for the timeline.

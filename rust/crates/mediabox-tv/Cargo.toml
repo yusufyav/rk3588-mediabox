@@ -65,6 +65,13 @@ glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
 raw-window-handle = "0.6.2"
 input = "0.10.0"
 
+[dev-dependencies]
+# Tests only: a window that needs no GPU, so a test can open the real
+# interface and let Slint's own hit testing say what a pointer is over
+# (src/hit.rs). The appliance's build is untouched -- dev-dependencies are
+# not in it.
+slint = { version = "1.17.1", default-features = false, features = ["renderer-software"] }
+
 [build-dependencies]
 slint-build = "1.17.1"
 

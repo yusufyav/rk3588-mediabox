@@ -142,6 +142,19 @@ impl Search {
         self.pane = Pane::Keys;
     }
 
+    /// Back, one press one step: the list back to the letters, the panel
+    /// closed onto what it found, the places back to the box. False when
+    /// Back is the screen's to leave.
+    pub fn dismiss(&mut self) -> bool {
+        match self.pane {
+            Pane::List => self.pane = Pane::Keys,
+            Pane::Keys if self.showing_results() => self.close_editing(),
+            Pane::Places => self.pane = Pane::Box,
+            _ => return false,
+        }
+        true
+    }
+
     /// Closes it, onto the results if there are any and the box otherwise.
     pub fn close_editing(&mut self) {
         self.editing = false;
@@ -278,6 +291,73 @@ impl Search {
             return true;
         }
         false
+    }
+
+    /// The remote onto what a pointer is over: a letter or a line of the
+    /// panel while it is open, a poster of the results, the search box, a
+    /// place. The panel's letters are row * 100 + column.
+    pub fn point(
+        &mut self,
+        target: super::CatalogTarget,
+        key: Option<(usize, usize)>,
+        line: Option<usize>,
+    ) -> crate::pointer::Aim {
+        use super::CatalogTarget;
+        use crate::pointer::Aim;
+        let before = (
+            self.pane,
+            self.key_row,
+            self.key_col,
+            self.list_index,
+            self.place,
+            self.results.row,
+            self.results.column(),
+        );
+        if let Some((row, col)) = key {
+            if !self.editing || self.keys.get(row).is_none_or(|keys| col >= keys.len()) {
+                return Aim::Refused;
+            }
+            self.pane = Pane::Keys;
+            self.key_row = row;
+            self.key_col = col;
+        } else if let Some(at) = line {
+            if !self.editing || at >= self.entries().len() {
+                return Aim::Refused;
+            }
+            self.pane = Pane::List;
+            self.list_index = at;
+        } else {
+            match target {
+                CatalogTarget::Shelf(row, column) => {
+                    if !self.results.point(row, column).taken() {
+                        return Aim::Refused;
+                    }
+                    self.pane = Pane::Results;
+                }
+                CatalogTarget::Place(at) if at < 4 => {
+                    self.pane = Pane::Places;
+                    self.place = at;
+                }
+                CatalogTarget::SearchBox => self.pane = Pane::Box,
+                _ => return Aim::Refused,
+            }
+        }
+        if before
+            == (
+                self.pane,
+                self.key_row,
+                self.key_col,
+                self.list_index,
+                self.place,
+                self.results.row,
+                self.results.column(),
+            )
+        {
+            Aim::Here
+        } else {
+            self.typing = false;
+            Aim::Moved
+        }
     }
 
     fn step_list(&mut self, dx: i32, dy: i32) -> bool {
@@ -522,6 +602,57 @@ mod tests {
     }
 
     /// A key that does nothing is a key the remote has to walk past.
+    /// A pointer on a letter or a line is the remote on it only while the
+    /// panel is open; a poster of the results, the box and a place always.
+    #[test]
+    fn a_pointer_walks_the_search() {
+        use crate::pointer::Aim;
+        use crate::screens::CatalogTarget;
+        let mut search = with_results(2, 3);
+        search.editing = false;
+        assert_eq!(
+            search.point(CatalogTarget::SearchBox, Some((0, 0)), None),
+            Aim::Refused,
+            "the letters are not up"
+        );
+        assert_eq!(
+            search.point(CatalogTarget::Shelf(1, 2), None, None),
+            Aim::Moved
+        );
+        assert_eq!(search.pane, Pane::Results);
+        assert_eq!(
+            search.point(CatalogTarget::Shelf(1, 9), None, None),
+            Aim::Refused
+        );
+        assert_eq!(
+            search.point(CatalogTarget::SearchBox, None, None),
+            Aim::Moved
+        );
+        assert_eq!(search.pane, Pane::Box);
+        assert_eq!(
+            search.point(CatalogTarget::Place(1), None, None),
+            Aim::Moved
+        );
+        assert_eq!(search.pane, Pane::Places);
+        search.editing = true;
+        assert_eq!(
+            search.point(CatalogTarget::SearchBox, Some((1, 2)), None),
+            Aim::Moved
+        );
+        assert_eq!(
+            (search.pane, search.key_row, search.key_col),
+            (Pane::Keys, 1, 2)
+        );
+        assert_eq!(
+            search.point(CatalogTarget::SearchBox, Some((99, 0)), None),
+            Aim::Refused
+        );
+        assert_eq!(
+            search.point(CatalogTarget::SearchBox, None, Some(search.entries().len())),
+            Aim::Refused
+        );
+    }
+
     #[test]
     fn the_grid_here_has_no_shift_and_has_ara() {
         let caps: Vec<Cap> = Search::new().keys().iter().flatten().copied().collect();
@@ -656,6 +787,41 @@ mod tests {
         assert_eq!((search.pane, search.editing), (Pane::Keys, true));
         search.close_editing();
         assert_eq!(search.pane, Pane::Results, "Back closes it onto the results");
+    }
+
+    /// Back, step by step, through the search -- by the remote's Back or a
+    /// pointer's (its right button, the panel's ground, the frame's way
+    /// back), which all come here: the list to the letters, the panel
+    /// closed onto the results, then the screen's to leave.
+    #[test]
+    fn back_walks_out_of_the_search_one_step_at_a_time() {
+        let mut search = with_results(2, 3);
+        search.open_editing();
+        search.pane = Pane::List;
+        assert!(search.dismiss());
+        assert_eq!((search.pane, search.editing), (Pane::Keys, true));
+        assert!(search.dismiss());
+        assert_eq!(
+            (search.pane, search.editing),
+            (Pane::Results, false),
+            "closed onto what it found"
+        );
+        assert!(!search.dismiss(), "from the results Back leaves the screen");
+        search.pane = Pane::Places;
+        assert!(search.dismiss());
+        assert_eq!(search.pane, Pane::Box);
+        assert!(!search.dismiss(), "from the box Back leaves the screen");
+        // With nothing found for what the box says, the letters are the
+        // screen's first step: Back leaves.
+        let mut fresh = Search::new();
+        fresh.open_editing();
+        assert!(!fresh.showing_results());
+        assert!(!fresh.dismiss());
+        assert_eq!(
+            (fresh.pane, fresh.editing),
+            (Pane::Keys, true),
+            "nothing changed on the way out"
+        );
     }
 
     #[test]

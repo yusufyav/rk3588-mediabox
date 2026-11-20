@@ -12,6 +12,8 @@
 //! The same rules drive the film's own panel ([`player_rows`]), so a format
 //! turned off during a film is the one the settings show off afterwards.
 
+use super::settings::EditorTarget;
+use crate::pointer::Aim;
 use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioSetting, AudioStatus};
 
 /// The cards, top to bottom.
@@ -263,6 +265,37 @@ impl Audio {
         };
         self.picker = Some(Picker { kind, focus });
         Press::Changed
+    }
+
+    /// The focus onto what a pointer is over: a card that can be chosen on
+    /// this device, or an option of the open list -- only the list while it
+    /// is open.
+    pub fn point(&mut self, target: EditorTarget) -> Aim {
+        let rows = self.picker.map(|picker| self.rows_of(picker.kind));
+        match (target, self.picker.as_mut(), rows) {
+            (EditorTarget::Picker(at), Some(picker), Some(rows)) => {
+                Aim::set(&mut picker.focus, at, at < rows)
+            }
+            (EditorTarget::Card(at), None, _) => {
+                let allowed = at < CARDS.len() && self.enabled(CARDS[at]);
+                Aim::set(&mut self.focus, at, allowed)
+            }
+            // The bar under the volume card is that card: Left and Right on
+            // it step the volume.
+            (EditorTarget::Volume, None, _) => {
+                let at = CARDS
+                    .iter()
+                    .position(|card| *card == Card::Volume)
+                    .expect("a volume card");
+                Aim::set(&mut self.focus, at, true)
+            }
+            _ => Aim::Refused,
+        }
+    }
+
+    /// Whether the list is open over the page.
+    pub fn modal(&self) -> bool {
+        self.picker.is_some()
     }
 
     /// Back: a list closes; the page itself is the settings screen's.
@@ -755,6 +788,65 @@ pub struct View {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
+    /// A pointer on a card is the remote on it, but a card this device
+    /// cannot use refuses it -- as the remote steps over it; the list over
+    /// the page is all it reaches while it is open.
+    /// The volume bar is the volume card: a pointer on it is the remote on
+    /// that card, and its halves are the card's Left and Right -- a step
+    /// each way, sent as the remote's are.
+    #[test]
+    fn the_volume_bar_steps_the_volume_as_left_and_right_do() {
+        use super::{Audio, CARDS, Card, Nav, Press, VOLUME_STEP};
+        use crate::pointer::Aim;
+        use crate::screens::settings::EditorTarget;
+        let mut audio = Audio::new();
+        audio.load(Some(mediabox_core::AudioStatus::default()));
+        audio.enter();
+        assert_eq!(audio.point(EditorTarget::Volume), Aim::Moved);
+        assert_eq!(audio.focused(), Card::Volume);
+        assert_eq!(audio.point(EditorTarget::Volume), Aim::Here);
+        assert_eq!(audio.step(-1, 0), Nav::Send(Press::Step(-VOLUME_STEP)));
+        assert_eq!(audio.step(1, 0), Nav::Send(Press::Step(VOLUME_STEP)));
+        // Under the list, the bar is not reached.
+        audio.point(EditorTarget::Card(0));
+        audio.press();
+        assert_eq!(audio.point(EditorTarget::Volume), Aim::Refused);
+        // Back -- the list's ground -- closes it.
+        assert!(audio.back());
+        assert!(!audio.modal());
+        let _ = CARDS;
+    }
+
+    #[test]
+    fn a_pointer_walks_the_sound_page_and_its_list() {
+        use super::{Audio, CARDS, Card};
+        use crate::pointer::Aim;
+        use crate::screens::settings::EditorTarget;
+        let mut audio = Audio::new();
+        audio.load(Some(mediabox_core::AudioStatus::default()));
+        audio.enter();
+        assert_eq!(audio.point(EditorTarget::Card(0)), Aim::Here);
+        let mode = CARDS.iter().position(|card| *card == Card::Mode).unwrap();
+        assert_eq!(
+            audio.point(EditorTarget::Card(mode)),
+            Aim::Refused,
+            "PCM only: no form to choose"
+        );
+        let mute = CARDS.iter().position(|card| *card == Card::Mute).unwrap();
+        assert_eq!(audio.point(EditorTarget::Card(mute)), Aim::Moved);
+        assert_eq!(audio.point(EditorTarget::Card(CARDS.len())), Aim::Refused);
+        assert_eq!(audio.point(EditorTarget::Card(0)), Aim::Moved);
+        audio.press();
+        assert!(audio.modal());
+        assert_eq!(
+            audio.point(EditorTarget::Card(mute)),
+            Aim::Refused,
+            "under the list"
+        );
+        assert_eq!(audio.point(EditorTarget::Picker(0)), Aim::Here, "Otomatik");
+        assert_eq!(audio.point(EditorTarget::Picker(9)), Aim::Refused);
+    }
 
     #[test]
     fn the_film_settings_are_grouped_by_what_they_are_about() {

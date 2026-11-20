@@ -41,6 +41,12 @@ impl Diagnostics {
         }
     }
 
+    /// The group a pointer is over in the column.
+    pub fn point(&mut self, at: usize) -> crate::pointer::Aim {
+        let count = self.groups.len();
+        crate::pointer::Aim::set(&mut self.group, at, at < count)
+    }
+
     pub fn step(&mut self, _dx: i32, dy: i32) -> bool {
         if dy == 0 || self.groups.is_empty() {
             return false;
@@ -419,6 +425,18 @@ fn compose(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_pointer_on_a_group_is_the_remote_on_it() {
+        use crate::pointer::Aim;
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.compose(None, None, None);
+        let last = diagnostics.groups.len() - 1;
+        assert_eq!(diagnostics.point(0), Aim::Here);
+        assert_eq!(diagnostics.point(last), Aim::Moved);
+        assert_eq!(diagnostics.group, last);
+        assert_eq!(diagnostics.point(last + 1), Aim::Refused);
+    }
 
     #[test]
     fn every_group_has_rows_even_with_no_answer() {

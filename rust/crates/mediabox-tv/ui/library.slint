@@ -1,3 +1,4 @@
+import { PointerTarget, PointerShield, PointerSwallow, PointerPanArea, PanState } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { GridPoster, PosterItem } from "components.slint";
 import { Chrome } from "chrome.slint";
@@ -52,9 +53,14 @@ export component Library inherits Rectangle {
     // Kept on the row the remote was last on whichever zone it is in, as
     // the reference's page does not scroll when the focus leaves the grid;
     // the posters are loaded around that same row.
-    property <length> scroll: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1,
-                0px,
-                max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h));
+    pan := PanState {
+        surface: "grid";
+        item: cell-h;
+        remote: clamp(Math.floor(index / columns) * cell-h - cell-h * 0.1, 0px, self.limit);
+        limit: max(0px, Math.ceil(items.length / columns) * cell-h - viewport-h);
+        remote-duration: Theme.glide;
+    }
+    property <length> scroll: pan.value;
 
     background: Theme.catalog-bg;
     clip: true;
@@ -66,6 +72,8 @@ export component Library inherits Rectangle {
         width: root.width - self.x;
         height: viewport-h + Metrics.focus-room;
         clip: true;
+
+        PointerPanArea { surface: "grid"; }
 
         if items.length == 0: Text {
             x: Metrics.focus-room;
@@ -83,7 +91,7 @@ export component Library inherits Rectangle {
             width: columns * cell-w;
             height: max(1px, Math.ceil(items.length / columns) * cell-h);
 
-            animate y { duration: Theme.glide; easing: Theme.ease; }
+            animate y { duration: pan.duration; easing: Theme.ease; }
 
             for item[i] in items: GridPoster {
                 x: Math.mod(i, columns) * cell-w;
@@ -92,6 +100,9 @@ export component Library inherits Rectangle {
                 name-size: root.width * 0.0078;
                 item: item;
                 focused: on-grid && i == index;
+                pointer-zone: "grid";
+                pointer-index: i;
+                menu-zone: "library-mark";
             }
         }
     }
@@ -100,6 +111,12 @@ export component Library inherits Rectangle {
     //
     // Over the focused poster's lower half, as the reference's menu opens
     // from the poster's corner; kept on the screen at the right edge.
+    // Under a poster's menu the page is not pointed at; a click on it is
+    // Back, which closes the menu.
+    if zone == 2 && actions.length > 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     if zone == 2 && actions.length > 0: Rectangle {
         property <length> line-h: rem * 3.2;
         property <length> poster-x: grid-x + Math.mod(index, columns) * cell-w;
@@ -134,6 +151,10 @@ export component Library inherits Rectangle {
                 overflow: elide;
                 wrap: no-wrap;
             }
+            PointerTarget {
+                zone: "library-menu";
+                index: k;
+            }
         }
     }
 
@@ -150,6 +171,11 @@ export component Library inherits Rectangle {
     // ------------------------------------------------------------ the filters
     //
     // Last in the file, so the dropdown's list is drawn over the grid.
+    // While it is down, nothing else is pointed at; a click off it is Back.
+    if type-open >= 0: PointerShield {
+        width: root.width;
+        height: root.height;
+    }
     HorizontalLayout {
         x: filters-x;
         y: filters-y;
@@ -193,6 +219,11 @@ export component Library inherits Rectangle {
                 fill: #ffffffb0;
             }
 
+            PointerTarget {
+                zone: "library-filters";
+                index: 0;
+            }
+
             // The list, right under the box and as wide, #0f0d20; the section
             // showing has the reference's green dot at its right.
             if open: Rectangle {
@@ -205,6 +236,8 @@ export component Library inherits Rectangle {
                 border-bottom-right-radius: types.height * 0.28;
                 background: #0f0d20;
                 clip: true;
+
+                PointerSwallow { }
 
                 for option[k] in tabs: Rectangle {
                     y: k * parent.line-h;
@@ -229,6 +262,10 @@ export component Library inherits Rectangle {
                         height: self.width;
                         border-radius: self.width / 2;
                         background: #22b365;
+                    }
+                    PointerTarget {
+                        zone: "library-options";
+                        index: k;
                     }
                 }
             }
@@ -258,6 +295,10 @@ export component Library inherits Rectangle {
                     vertical-alignment: center;
                     horizontal-alignment: center;
                     wrap: no-wrap;
+                }
+                PointerTarget {
+                    zone: "library-filters";
+                    index: k + 1;
                 }
             }
         }

@@ -116,6 +116,12 @@ impl Media {
         self.shelves.focused()
     }
 
+    /// The poster at `row`, `column` of the board, wherever the remote is:
+    /// what a pointer's long press is on before it moves any focus.
+    pub fn item_at(&self, row: usize, column: usize) -> Option<&Item> {
+        self.shelves.item_at(row, column)
+    }
+
     /// Where "Tümünü Gör" leads, when the remote is on it.
     pub fn focused_more(&self) -> Option<&More> {
         if self.zone != Zone::Shelves {
@@ -125,6 +131,58 @@ impl Media {
     }
 
     /// The place the remote is on, in the column down the left.
+    /// The remote onto what a pointer is over: a poster of a shelf, a place,
+    /// the search box. Nothing under a poster's open menu.
+    pub fn point(&mut self, target: super::CatalogTarget) -> crate::pointer::Aim {
+        use super::CatalogTarget;
+        use crate::pointer::Aim;
+        if self.menu.is_some() {
+            return Aim::Refused;
+        }
+        let zone = self.zone;
+        let aim = match target {
+            CatalogTarget::Shelf(row, column) => {
+                let aim = self.shelves.point(row, column);
+                if aim.taken() {
+                    self.zone = Zone::Shelves;
+                }
+                aim
+            }
+            CatalogTarget::Place(at) => {
+                let aim = Aim::set(&mut self.place, at, at < PLACES.len());
+                if aim.taken() {
+                    self.zone = Zone::Places;
+                }
+                aim
+            }
+            CatalogTarget::SearchBox => {
+                self.zone = Zone::Search;
+                Aim::Here
+            }
+            CatalogTarget::Item(_) => Aim::Refused,
+        };
+        if aim == Aim::Here && zone != self.zone {
+            return Aim::Moved;
+        }
+        if aim.taken() {
+            self.moved = true;
+        }
+        aim
+    }
+
+    /// A line of the open menu a pointer is over.
+    pub fn point_menu(&mut self, line: usize) -> crate::pointer::Aim {
+        match self.menu.as_mut() {
+            Some(at) => crate::pointer::Aim::set(at, line, line < MENU.len()),
+            None => crate::pointer::Aim::Refused,
+        }
+    }
+
+    /// A poster's menu is open over the board.
+    pub fn modal(&self) -> bool {
+        self.menu.is_some()
+    }
+
     pub fn focused_place(&self) -> Option<Place> {
         (self.zone == Zone::Places).then(|| PLACES.get(self.place).copied())?
     }
@@ -243,9 +301,21 @@ impl Media {
         }
     }
 
-    pub fn sync_artwork(&mut self, images: &mut ImageManager) {
-        let anchor = self.shelves.row as i32;
-        self.shelves.sync_artwork(images, anchor);
+    /// Artwork around what is on the panel: the focused shelf and its
+    /// column, or -- where a pointer moved the board or a shelf -- what it
+    /// shows (`crate::pointer::Views`).
+    pub fn sync_artwork(&mut self, images: &mut ImageManager, views: &crate::pointer::Views) {
+        use crate::pointer::Zone;
+        // Three shelves fit down the panel: the middle one of those shown.
+        let anchor = views
+            .first(Zone::Shelves, -1)
+            .map_or(self.shelves.row as i32, |first| first as i32 + 1);
+        let shown = |row: usize| {
+            i32::try_from(row)
+                .ok()
+                .and_then(|lane| views.first(Zone::Shelves, lane))
+        };
+        self.shelves.sync_artwork(images, anchor, &shown);
     }
 }
 
@@ -263,6 +333,86 @@ mod tests {
                 .map(|i| Item::stub(&format!("{name}-{i}")))
                 .collect(),
         }
+    }
+
+    /// A pointer on a poster is the remote on it, one past the last is
+    /// "Tümünü Gör" only where a shelf has one, and a place or the search
+    /// box is the frame's; under a poster's menu nothing moves.
+    /// The cross on a "İzlemeye devam edin" poster is the menu's "Vazgeç"
+    /// and nothing else; the menu mark opens the menu and nothing else --
+    /// what Ok on the poster would do (its details) is neither. Back (the
+    /// menu's ground) closes the menu.
+    #[test]
+    fn a_poster_s_cross_and_menu_mark_reach_its_menu_not_its_details() {
+        use crate::pointer::Aim;
+        use crate::screens::CatalogTarget;
+        let mut media = Media::new();
+        let mut continuing = shelf("c", 2);
+        continuing
+            .items
+            .iter_mut()
+            .for_each(|item| item.continuing = true);
+        media.set_shelves(vec![continuing, shelf("b", 3)]);
+        // The mark: onto the poster, then its menu, on "Ayrıntılar".
+        assert!(media.point(CatalogTarget::Shelf(0, 1)).taken());
+        assert!(media.open_menu());
+        assert_eq!(media.focused_menu_act(), Some(MenuAct::Details));
+        assert!(media.modal());
+        // The cross: the menu's "Vazgeç", under the focus for Ok.
+        let dismiss = MENU
+            .iter()
+            .position(|act| *act == MenuAct::Dismiss)
+            .unwrap();
+        assert_eq!(media.point_menu(dismiss), Aim::Moved);
+        assert_eq!(media.focused_menu_act(), Some(MenuAct::Dismiss));
+        assert_eq!(media.point_menu(MENU.len()), Aim::Refused);
+        assert_eq!(
+            media.point(CatalogTarget::Shelf(1, 0)),
+            Aim::Refused,
+            "the board is under the menu"
+        );
+        assert!(media.close_menu(), "Back closes it");
+        assert_eq!(media.point_menu(0), Aim::Refused, "no menu, no lines");
+        // A poster that is not carrying on has no menu to open.
+        assert!(media.point(CatalogTarget::Shelf(1, 0)).taken());
+        assert!(!media.open_menu());
+    }
+
+    #[test]
+    fn a_pointer_walks_the_board() {
+        use crate::pointer::Aim;
+        use crate::screens::CatalogTarget;
+        let mut media = Media::new();
+        media.set_shelves(vec![shelf("a", 4), shelf("b", 3)]);
+        assert_eq!(media.point(CatalogTarget::Shelf(1, 2)), Aim::Moved);
+        assert_eq!(
+            (media.zone, media.row(), media.column()),
+            (Zone::Shelves, 1, 2)
+        );
+        assert_eq!(media.point(CatalogTarget::Shelf(1, 2)), Aim::Here);
+        assert_eq!(
+            media.point(CatalogTarget::Shelf(1, 3)),
+            Aim::Refused,
+            "no Tümünü Gör on this shelf"
+        );
+        assert_eq!(media.point(CatalogTarget::Shelf(7, 0)), Aim::Refused);
+        assert_eq!(media.point(CatalogTarget::Place(2)), Aim::Moved);
+        assert_eq!(media.focused_place(), Some(Place::Library));
+        assert_eq!(media.point(CatalogTarget::Place(4)), Aim::Refused);
+        assert_eq!(media.point(CatalogTarget::SearchBox), Aim::Moved);
+        assert_eq!(media.zone, Zone::Search);
+        assert_eq!(
+            media.point(CatalogTarget::Item(0)),
+            Aim::Refused,
+            "the board has no grid"
+        );
+        media.menu = Some(0);
+        assert!(media.modal());
+        assert_eq!(
+            media.point(CatalogTarget::Shelf(0, 0)),
+            Aim::Refused,
+            "under the menu"
+        );
     }
 
     #[test]

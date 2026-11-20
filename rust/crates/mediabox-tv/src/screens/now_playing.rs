@@ -306,6 +306,19 @@ pub struct NowPlaying {
     /// far the next one moves.
     run: u32,
     last_scrub: Option<std::time::Instant>,
+    /// A pointer is dragging along the bar: the scrub follows the arrow and
+    /// is drawn, and nothing goes to the player until the button comes up
+    /// (`drag_end`). The remote's run (`scrub_to_send`) waits meanwhile.
+    pub dragging: bool,
+}
+
+/// Where a pointer is in the film's panel: the column of languages or
+/// groups, the column of tracks or settings, or the delay beside them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuTarget {
+    Row(usize),
+    Track(usize),
+    Delay,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -742,6 +755,122 @@ impl NowPlaying {
         true
     }
 
+    // ----------------------------------------------------------- a pointer
+
+    /// The remote's focus onto a button of the row a pointer is over.
+    pub fn point_control(&mut self, at: usize) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if at >= self.row_len() {
+            return Aim::Refused;
+        }
+        let before = (self.row, self.focus);
+        if self.row == Row::Bar {
+            // Off the bar, as Down takes it: an unconfirmed scrub is not
+            // carried where it cannot be seen.
+            self.scrub = None;
+        }
+        self.row = Row::Controls;
+        self.focus = at;
+        if before == (self.row, self.focus) {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// The remote's focus onto the bar, as Up takes it there.
+    pub fn point_bar(&mut self) -> crate::pointer::Aim {
+        crate::pointer::Aim::set(&mut self.row, Row::Bar, true)
+    }
+
+    /// The remote's focus onto a row of the open panel, as the arrows bring
+    /// it there. `Row` is the row's place in the whole column (the caller
+    /// adds the drawn window's first row).
+    pub fn point_menu(&mut self, target: MenuTarget) -> crate::pointer::Aim {
+        use crate::pointer::Aim;
+        if self.menu == Menu::None {
+            return Aim::Refused;
+        }
+        let before = (self.menu_column, self.menu_focus, self.menu_track_focus);
+        match target {
+            MenuTarget::Row(at) => {
+                if at >= self.menu_rows() {
+                    return Aim::Refused;
+                }
+                if self.menu_focus != at {
+                    // The column beside it is about the row this one is on.
+                    self.menu_track_focus = 0;
+                }
+                self.menu_column = 0;
+                self.menu_focus = at;
+            }
+            MenuTarget::Track(at) => {
+                let rows = if self.menu == Menu::Settings {
+                    self.settings_in_group()
+                } else {
+                    self.tracks_of_language().len()
+                };
+                if at >= rows {
+                    return Aim::Refused;
+                }
+                self.menu_column = 1;
+                self.menu_track_focus = at;
+            }
+            MenuTarget::Delay => {
+                if !self.menu_has_delay() {
+                    return Aim::Refused;
+                }
+                self.menu_column = 2;
+            }
+        }
+        if before == (self.menu_column, self.menu_focus, self.menu_track_focus) {
+            Aim::Here
+        } else {
+            Aim::Moved
+        }
+    }
+
+    /// A pointer on the bar, at `fraction` of its length: the scrub goes
+    /// there -- short of the end by `SCRUB_TAIL`, as the remote's does -- and
+    /// is drawn; the film goes there when the drag ends. A film whose length
+    /// is not known has no place on its bar to point at. Returns whether
+    /// anything changed.
+    pub fn drag_to(&mut self, fraction: f32) -> bool {
+        if !self.duration_known() || !fraction.is_finite() {
+            return false;
+        }
+        let last = self.duration_seconds.saturating_sub(SCRUB_TAIL);
+        let target = ((fraction.clamp(0.0, 1.0) as f64 * self.duration_seconds as f64).round()
+            as u64)
+            .min(last);
+        self.row = Row::Bar;
+        self.dragging = true;
+        // Any run of the remote's is over: this is the pointer's now.
+        self.run = 0;
+        self.last_scrub = None;
+        self.sent = None;
+        self.scrub.replace(target) != Some(target)
+    }
+
+    /// The button came up: where the drag got to, to go to. None when there
+    /// was no drag.
+    pub fn drag_end(&mut self) -> Option<u64> {
+        if !std::mem::take(&mut self.dragging) {
+            return None;
+        }
+        self.take_scrub()
+    }
+
+    /// The drag was taken away: nothing is gone to, and the bar is the
+    /// film's again. Returns whether there was one.
+    pub fn drag_cancel(&mut self) -> bool {
+        if !std::mem::take(&mut self.dragging) {
+            return false;
+        }
+        self.cancel_scrub();
+        true
+    }
+
     /// Where the bar should be drawn: the scrub if there is one, else the film.
     pub fn shown_seconds(&self) -> u64 {
         self.scrub.unwrap_or(self.elapsed_seconds)
@@ -769,6 +898,9 @@ impl NowPlaying {
     /// run's end once it has settled, so a key held down scrubs the bar and
     /// seeks once rather than on every repeat.
     pub fn scrub_to_send(&mut self, now: std::time::Instant) -> Option<u64> {
+        if self.dragging {
+            return None;
+        }
         let target = self.scrub?;
         if self.sent.is_none() {
             self.sent = Some(target);
@@ -980,12 +1112,6 @@ impl NowPlaying {
     pub fn set_technical(&mut self, rows: Vec<(String, String)>) {
         self.technical = rows;
     }
-
-    pub fn clear(&mut self) {
-        let focus = self.focus;
-        *self = Self::new();
-        self.focus = focus;
-    }
 }
 
 /// Kodi answers with `{hours, minutes, seconds, milliseconds}`.
@@ -1009,6 +1135,123 @@ pub fn timecode(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    fn film(seconds: u64) -> NowPlaying {
+        let mut now = NowPlaying::new();
+        now.film = true;
+        now.duration_seconds = seconds;
+        now.elapsed_seconds = 600;
+        now
+    }
+
+    /// A drag along the bar: drawn as it goes, sent once when the button
+    /// comes up, never past the tail the remote's scrub stops at; the
+    /// remote's own sending waits while it lasts.
+    #[test]
+    fn a_drag_goes_where_it_is_let_go_and_stops_short_of_the_end() {
+        let mut now = film(3600);
+        now.row = Row::Controls;
+        assert!(now.drag_to(0.5));
+        assert_eq!(
+            (now.row, now.scrub, now.dragging),
+            (Row::Bar, Some(1800), true)
+        );
+        assert_eq!(
+            now.scrub_to_send(std::time::Instant::now()),
+            None,
+            "nothing is sent mid-drag"
+        );
+        assert!(now.drag_to(1.0));
+        assert_eq!(now.scrub, Some(3600 - SCRUB_TAIL), "short of the end");
+        assert!(now.drag_to(-3.0));
+        assert_eq!(now.scrub, Some(0));
+        assert!(!now.drag_to(0.0), "the same place draws nothing new");
+        assert_eq!(now.drag_end(), Some(0));
+        assert!(!now.dragging && now.scrub.is_none(), "nothing is left held");
+        assert_eq!(now.drag_end(), None, "a second release is nothing");
+    }
+
+    /// A drag taken away goes nowhere and leaves no press behind; a film
+    /// whose length is unknown has no place on its bar to point at.
+    #[test]
+    fn a_cancelled_drag_goes_nowhere() {
+        let mut now = film(3600);
+        assert!(now.drag_to(0.25));
+        assert!(now.drag_cancel());
+        assert!(!now.dragging && now.scrub.is_none());
+        assert_eq!(now.shown_seconds(), 600, "the bar is the film's again");
+        assert!(!now.drag_cancel());
+        let mut unknown = film(0);
+        assert!(!unknown.drag_to(0.5));
+        assert!(!unknown.dragging && unknown.scrub.is_none());
+        assert!(!film(3600).drag_to(f32::NAN));
+    }
+
+    /// The remote's scrub is untouched by all this: Left and Right on the
+    /// bar move it, and the first press is sent at once.
+    #[test]
+    fn the_remote_s_scrub_is_what_it_was() {
+        let mut now = film(3600);
+        assert!(now.step(1, 0));
+        assert_eq!(now.scrub, Some(610));
+        assert_eq!(now.scrub_to_send(std::time::Instant::now()), Some(610));
+    }
+
+    /// A pointer on the row is the remote on a button, off the bar (taking
+    /// an unconfirmed scrub with it, as Down does); on the bar it is the bar.
+    #[test]
+    fn a_pointer_on_the_row_is_the_remote_on_its_button() {
+        use crate::pointer::Aim;
+        let mut now = film(3600);
+        now.scrub = Some(900);
+        assert_eq!(now.point_control(3), Aim::Moved);
+        assert_eq!((now.row, now.focus, now.scrub), (Row::Controls, 3, None));
+        assert_eq!(now.focused_film(), Film::Audio);
+        assert_eq!(now.point_control(FILM_CONTROLS.len()), Aim::Refused);
+        assert_eq!(now.point_bar(), Aim::Moved);
+        assert_eq!(now.row, Row::Bar);
+        // Kodi's row has four buttons.
+        let mut kodi = NowPlaying::new();
+        assert_eq!(kodi.point_control(3), Aim::Moved);
+        assert_eq!(kodi.focused(), Control::Stop);
+        assert_eq!(kodi.point_control(4), Aim::Refused);
+    }
+
+    /// A pointer in a panel: a row, a track beside it, the delay -- each
+    /// only where the panel has one; with no panel up, nothing.
+    #[test]
+    fn a_pointer_in_a_panel_is_the_remote_in_its_columns() {
+        use crate::pointer::Aim;
+        let mut now = film(3600);
+        assert_eq!(now.point_menu(MenuTarget::Row(0)), Aim::Refused, "no panel");
+        now.open_menu(Menu::Speed);
+        assert_eq!(
+            now.point_menu(MenuTarget::Row(SPEEDS.len() - 1)),
+            Aim::Moved
+        );
+        assert_eq!(now.menu_focus, SPEEDS.len() - 1);
+        assert_eq!(now.point_menu(MenuTarget::Row(SPEEDS.len())), Aim::Refused);
+        assert_eq!(
+            now.point_menu(MenuTarget::Delay),
+            Aim::Refused,
+            "speed has no delay"
+        );
+        assert_eq!(
+            now.point_menu(MenuTarget::Track(0)),
+            Aim::Refused,
+            "nor tracks"
+        );
+        now.close_menu();
+        now.open_menu(Menu::Subtitles);
+        assert_eq!(now.point_menu(MenuTarget::Delay), Aim::Moved);
+        assert_eq!(now.menu_column, 2);
+        assert_eq!(
+            now.point_menu(MenuTarget::Row(0)),
+            Aim::Moved,
+            "back to the first column"
+        );
+        assert_eq!(now.menu_column, 0);
+    }
 
     #[test]
     fn a_title_that_only_repeats_the_language_is_not_shown() {
