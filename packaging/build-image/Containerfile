@@ -1,0 +1,84 @@
+# The image every aarch64 binary of MediaBox is built in
+# (scripts/build-container.sh builds it and runs the builds).
+#
+# The compiler, the C library a binary links against, the libraries it is
+# linked with and Rust all come from here, pinned: nothing from the
+# developer's machine and nothing from an appliance. Debian's cross gcc 14
+# with glibc 2.41, the appliance's own, and its arm64 packages installed
+# beside the amd64 ones (multiarch), at one snapshot.debian.org date.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG SNAPSHOT
+ARG RUSTUP_VERSION
+ARG RUSTUP_SHA256
+ARG RUST_VERSION
+ARG RUST_COMPONENTS
+ARG RUST_TARGETS
+
+COPY arm64-packages.txt /usr/local/share/mediabox/arm64-packages.txt
+
+RUN set -eu; \
+    rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*; \
+    printf '%s\n' \
+      'Types: deb' \
+      "URIs: http://snapshot.debian.org/archive/debian/$SNAPSHOT" \
+      'Suites: trixie trixie-updates' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      'Check-Valid-Until: no' \
+      '' \
+      'Types: deb' \
+      "URIs: http://snapshot.debian.org/archive/debian-security/$SNAPSHOT" \
+      'Suites: trixie-security' \
+      'Components: main' \
+      'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+      'Check-Valid-Until: no' > /etc/apt/sources.list.d/debian.sources; \
+    dpkg --add-architecture arm64; \
+    apt-get -qq -o Acquire::Retries=5 update; \
+    # The image's own packages to the snapshot first: an arm64 and an amd64
+    # copy of one library must be the same version (Multi-Arch: same).
+    DEBIAN_FRONTEND=noninteractive apt-get -qq -o Acquire::Retries=5 -y --allow-downgrades dist-upgrade >/dev/null; \
+    arm64="$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' -e 's/[[:space:]]*$/:arm64/' /usr/local/share/mediabox/arm64-packages.txt)"; \
+    DEBIAN_FRONTEND=noninteractive apt-get -qq -o Acquire::Retries=5 install -y --no-install-recommends \
+      crossbuild-essential-arm64 pkgconf ca-certificates curl git xz-utils file $arm64 >/dev/null; \
+    rm -rf /var/lib/apt/lists/*; \
+    # What this image is, package by package: printed by every build.
+    dpkg-query -W -f '${Package}:${Architecture} ${Version}\n' | LC_ALL=C sort > /usr/local/share/mediabox/packages.manifest
+
+# The host's own C compiler: Cargo links build scripts and proc-macros for
+# the machine the build runs on, with cc.
+RUN set -eu; \
+    apt-get -qq -o Acquire::Retries=5 update; \
+    DEBIAN_FRONTEND=noninteractive apt-get -qq -o Acquire::Retries=5 install -y --no-install-recommends \
+      gcc libc6-dev >/dev/null; \
+    rm -rf /var/lib/apt/lists/*; \
+    dpkg-query -W -f '${Package}:${Architecture} ${Version}\n' | LC_ALL=C sort > /usr/local/share/mediabox/packages.manifest
+
+ENV RUSTUP_HOME=/opt/rustup
+RUN set -eu; \
+    curl -fsSL --retry 3 -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/x86_64-unknown-linux-gnu/rustup-init"; \
+    echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c --quiet -; \
+    chmod +x /tmp/rustup-init; \
+    components=""; for c in $RUST_COMPONENTS; do components="$components -c $c"; done; \
+    targets=""; for t in $RUST_TARGETS; do targets="$targets -t $t"; done; \
+    CARGO_HOME=/opt/cargo /tmp/rustup-init -y -q --no-modify-path --profile minimal \
+      --default-toolchain "$RUST_VERSION" $components $targets; \
+    rm -f /tmp/rustup-init; \
+    rm -rf /opt/cargo/registry /opt/rustup/downloads /opt/rustup/tmp; \
+    chmod -R a+rX /opt/rustup /opt/cargo; \
+    /opt/cargo/bin/rustc --version >> /usr/local/share/mediabox/packages.manifest
+
+# Builds run as the developer's own uid, with Cargo's registry on a volume at
+# /cargo: one fixed path, so the sources' paths in a binary are the same on
+# every machine.
+ENV PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    CARGO_HOME=/cargo \
+    HOME=/tmp \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ \
+    AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig

@@ -424,9 +424,9 @@ impl Meter {
         let mut mask = 0u16;
         let loud = (0..levels.channels).any(|c| levels.peak[c] >= linear(EXIT_DBFS));
         if loud {
-            for c in 0..levels.channels {
+            for (c, &peak) in levels.peak[..levels.channels].iter().enumerate() {
                 let limit = if self.channel_run.as_ref().is_some_and(|r| r.mask & (1 << c) != 0) { EXIT_DBFS } else { ENTER_DBFS };
-                if levels.peak[c] < linear(limit) {
+                if peak < linear(limit) {
                     mask |= 1 << c;
                 }
             }

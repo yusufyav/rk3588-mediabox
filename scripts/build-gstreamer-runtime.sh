@@ -29,10 +29,9 @@
 # x86-64 host with docker or podman. The result is a reproducible tarball
 # (sorted, fixed mtime, numeric owner 0).
 #
-# Usage: scripts/build-gstreamer-runtime.sh [--sysroot]
-#   --sysroot  also unpack it into the cross sysroot at $PREFIX: what
-#              mediabox-live links against, and what the ARM64 tests run on
-#              (scripts/test-mediabox-live-arm64.sh)
+# Usage: scripts/build-gstreamer-runtime.sh
+#   mediabox-live links against the tarball, and the ARM64 tests run on it,
+#   unpacked at $PREFIX in the build image (scripts/build-container.sh).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -50,8 +49,11 @@ declare -A GST_SHA256=(
 )
 MODULES=(gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav)
 # debian:trixie as pulled on 2026-11-02.
-IMAGE="debian@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1"
-SNAPSHOT="20261101T000000Z"
+# The image and the snapshot every aarch64 build is made from.
+# shellcheck source=../packaging/build-image/pins.env
+source "$here/packaging/build-image/pins.env"
+IMAGE="$MEDIABOX_BUILD_BASE_IMAGE"
+SNAPSHOT="$MEDIABOX_BUILD_SNAPSHOT"
 # The build's own clock: every timestamp it writes.
 SOURCE_DATE_EPOCH=1761955200 # 2025-11-01, after the 1.26.8 fix
 
@@ -156,10 +158,3 @@ chown $HOST_UID:$HOST_GID /out/gstreamer-$GST_VERSION-aarch64.tar.xz
 cat $PREFIX/BUILD-INFO
 '
 sha256sum "$tarball" | tee "$tarball.sha256"
-
-if [ "${1:-}" = "--sysroot" ]; then
-  sysroot="${MEDIABOX_SYSROOT:-$here/.sysroot/aarch64-trixie}"
-  rm -rf "$sysroot${PREFIX:?}"
-  tar -C "$sysroot" -xJf "$tarball"
-  echo "unpacked into $sysroot$PREFIX"
-fi

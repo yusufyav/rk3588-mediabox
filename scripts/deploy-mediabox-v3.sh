@@ -31,6 +31,9 @@ esac
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=env.sh
 source "$here/scripts/env.sh"
+# Every aarch64 binary is built in the pinned build image.
+# shellcheck source=build-container.sh
+source "$here/scripts/build-container.sh"
 prefix="$MEDIABOX_PREFIX"
 target_triple="aarch64-unknown-linux-gnu"
 ui_dist="${MEDIABOX_UI_DIST:-$here/rust/crates/mediabox-ui/dist}"
@@ -126,11 +129,12 @@ if [ -n "$only" ]; then
     if [ "$name" = mediabox-tv ]; then
       say "mediabox-tv (native, $target_triple)"
       "$here/scripts/build-mediabox-tv.sh"
-      cp "$here/rust/crates/mediabox-tv/target/$target_triple/release/mediabox-tv" "$stage/"
+      cp "$(mediabox_cargo_target mediabox-tv)/$target_triple/release/mediabox-tv" "$stage/"
     else
-      say "$name (cross-compile, $target_triple)"
-      ( cd "$here/rust" && cargo build --release --target "$target_triple" --bin "$name" )
-      cp "$here/rust/target/$target_triple/release/$name" "$stage/"
+      say "$name (cross-compile, $target_triple, build image)"
+      mediabox_build_run -w /work/rust -- \
+        "CARGO_TARGET_DIR=/work/build/cargo-arm64/rust cargo build -q --release --target $target_triple --bin $name"
+      cp "$(mediabox_cargo_target rust)/$target_triple/release/$name" "$stage/"
     fi
   done
   ( cd "$stage" && sha256sum "${names[@]}" > SHA256SUMS )
@@ -148,15 +152,15 @@ if [ -n "$only" ]; then
   exit 0
 fi
 
-say "control plane (cross-compile, $target_triple)"
-( cd "$here/rust" && cargo build --release --target "$target_triple" )
-bin="$here/rust/target/$target_triple/release"
+say "control plane (cross-compile, $target_triple, build image)"
+mediabox_build_run -w /work/rust -- \
+  "CARGO_TARGET_DIR=/work/build/cargo-arm64/rust cargo build -q --release --target $target_triple"
+bin="$(mediabox_cargo_target rust)/$target_triple/release"
 
 say "television interface (native, $target_triple)"
-# Cross-compiled against the appliance's own sysroot; see the script for why the
-# host's cross glibc is not good enough.
+# Cross-compiled in the build image, as the control plane (build-container.sh).
 "$here/scripts/build-mediabox-tv.sh"
-tv_bin="$here/rust/crates/mediabox-tv/target/$target_triple/release/mediabox-tv"
+tv_bin="$(mediabox_cargo_target mediabox-tv)/$target_triple/release/mediabox-tv"
 [ -x "$tv_bin" ] || { echo "the television interface did not build" >&2; exit 1; }
 
 say "product UI (wasm32)"

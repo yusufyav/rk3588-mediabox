@@ -1,0 +1,39 @@
+# The appliance's libraries an aarch64 build of MediaBox reads, as Debian
+# trixie arm64 packages at the snapshot in pins.env. Installed in the build
+# image beside its amd64 packages (multiarch); apt brings what each needs.
+#
+# Measured, not guessed: every .pc, header and library the builds of
+# mediabox-tv and mediabox-live opened (pkg-config, linker --trace, gcc -MD),
+# 2026-11-20. Add a package here when a build asks for one; never copy a
+# file in from an appliance.
+
+# C library and kernel headers, as the appliance has them (glibc 2.41).
+libc6-dev
+linux-libc-dev
+zlib1g-dev
+
+# mediabox-live: glib under the GStreamer runtime, and what
+# gstreamer-audio-1.0.pc requires (orc-0.4).
+libglib2.0-dev
+liborc-0.4-dev
+
+# The GStreamer runtime's own Debian libraries (its BUILD-INFO): linked
+# through by mediabox-live, loaded by its tests.
+libasound2t64
+libmpg123-0t64
+libavcodec61
+libavformat61
+libavfilter10
+libavutil59
+libswresample5
+
+# mediabox-tv: Slint's font handling, its EGL/GBM output and input.
+libfontconfig-dev
+libfreetype-dev
+libegl-dev
+libgbm-dev
+libinput-dev
+libudev-dev
+
+# Probed by mediabox-tv's TLS stack.
+libssl-dev

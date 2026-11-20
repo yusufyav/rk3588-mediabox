@@ -14,15 +14,18 @@
 # runtime, librockchip_mpp from MediaBox's MPP.
 #
 # MPP itself is built on the appliance (scripts/build-media-runtime.sh). Its
-# headers, pkg-config file and library are needed here to link against; they
-# are read off the appliance once, never written to it, into
-# build/media-runtime-sdk, and checked against the hash pinned below. A
-# different MPP on the appliance fails this build rather than linking against
-# something unseen.
+# headers, pkg-config file and library are needed here to link against. They
+# come from the golden archive releases/current.env pins (tag, size and
+# sha256), which carries the media runtime as the appliance has it -- never
+# from an appliance: a build that reads a board is a build of that board.
+# They are unpacked into build/media-runtime-sdk and checked against the MPP
+# hash pinned below; a golden with another MPP fails this build rather than
+# linking against something unseen.
 #
 # Usage: scripts/build-mppvideodec.sh
-#   MEDIABOX_HOST must name the appliance only when build/media-runtime-sdk
-#   is not there yet (a read: tar of the files, over ssh).
+#   The archive is taken from dist/ or build/release/ when a copy there has
+#   the pinned size and sha256, and downloaded into build/release/ otherwise
+#   (gh if signed in, GH_TOKEN/GITHUB_TOKEN, or the plain release URL).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,11 +41,13 @@ ROCKCHIP_REV="ebc758a13d425d34858a98dbcdb4a4bd702daa0f"
 # time) and 0003 (MPEG-2's first picture timed from its own PTS), as built and
 # installed on the appliance by scripts/build-media-runtime.sh on 2026-11-12.
 # A rebuild of the same sources is not the same bytes: the pin is that
-# artefact, read back off the appliance.
+# artefact, as the golden archive carries it.
 MPP_SHA256="bd86814b3d49f42ead97195097f27da237662075c922a179d420254667f9385b"
-# The runtime's own pins.
-IMAGE="debian@sha256:2dc419c6d7fe3dad0a2f9fd469c34cc90b0f9ba642d8fde837fe3d7d34a0e7f1"
-SNAPSHOT="20261101T000000Z"
+# The runtime's own pins (packaging/build-image/pins.env).
+# shellcheck source=../packaging/build-image/pins.env
+source "$here/packaging/build-image/pins.env"
+IMAGE="$MEDIABOX_BUILD_BASE_IMAGE"
+SNAPSHOT="$MEDIABOX_BUILD_SNAPSHOT"
 SOURCE_DATE_EPOCH=1761955200
 
 out="$here/build/gstreamer-rockchip"
@@ -59,26 +64,53 @@ engine="$(command -v docker || command -v podman || true)"
 ( cd "${runtime%/*}" && sha256sum -c --quiet "${runtime##*/}.sha256" )
 
 mpp_of() { sha256sum < "$1$MEDIA_PREFIX/lib/librockchip_mpp.so.0" 2>/dev/null | cut -c1-64; }
-# The SDK read before is used only while it is the pinned MPP: a cache of
-# another one (the appliance's before a rebuild of MPP) would build against
-# something no longer there and hide that it changed. It is read again from
-# the appliance, once, and that is checked against the pin too.
+# The SDK unpacked before is used only while it is the pinned MPP: a cache of
+# another one would build against something no longer pinned and hide that it
+# changed.
 if [ "$(mpp_of "$sdk")" != "$MPP_SHA256" ]; then
-  if [ -e "$sdk$MEDIA_PREFIX/lib/librockchip_mpp.so.0" ]; then
-    echo "build/media-runtime-sdk has MPP $(mpp_of "$sdk"), not the pinned $MPP_SHA256: read again from the appliance" >&2
+  # shellcheck source=../releases/current.env
+  source "$here/releases/current.env"
+  asset="$MEDIABOX_RELEASE_ASSET"
+  pinned() { [ -f "$1" ] && [ "$(stat -c %s "$1")" = "$MEDIABOX_RELEASE_SIZE" ] &&
+    [ "$(sha256sum < "$1" | cut -c1-64)" = "$MEDIABOX_RELEASE_SHA256" ]; }
+  golden=""
+  for f in "$here/dist/$asset" "$here/build/release/$asset"; do
+    if pinned "$f"; then golden="$f"; break; fi
+  done
+  if [ -z "$golden" ]; then
+    golden="$here/build/release/$asset"
+    mkdir -p "${golden%/*}"
+    rm -f "$golden.part"
+    echo "golden $MEDIABOX_RELEASE_TAG: $asset ($MEDIABOX_RELEASE_SIZE bytes) -> build/release/" >&2
+    token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+    if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then
+      timeout 1800 gh release download "$MEDIABOX_RELEASE_TAG" --repo "$MEDIABOX_RELEASE_REPO" \
+        --pattern "$asset" --output "$golden.part" --clobber
+    elif [ -n "$token" ]; then
+      asset_url="$(curl -fsSL -H "Authorization: Bearer $token" -H 'Accept: application/vnd.github+json' \
+          "https://api.github.com/repos/$MEDIABOX_RELEASE_REPO/releases/tags/$MEDIABOX_RELEASE_TAG" |
+        python3 -c 'import json,sys
+d = json.load(sys.stdin)
+print(next((a["url"] for a in d.get("assets", []) if a["name"] == sys.argv[1]), ""))' "$asset")"
+      timeout 1800 curl -fSL --retry 3 -H "Authorization: Bearer $token" -H 'Accept: application/octet-stream' \
+        -o "$golden.part" "$asset_url"
+    else
+      timeout 1800 curl -fSL --retry 3 -o "$golden.part" \
+        "https://github.com/$MEDIABOX_RELEASE_REPO/releases/download/$MEDIABOX_RELEASE_TAG/$asset"
+    fi
+    pinned "$golden.part" || { echo "$asset: not the size and sha256 releases/current.env pins" >&2; exit 1; }
+    mv "$golden.part" "$golden"
   fi
-  # shellcheck source=env.sh
-  source "$here/scripts/env.sh"
+  echo "media-runtime SDK <- $golden" >&2
+  m="rootfs${MEDIA_PREFIX}"
   rm -rf "$sdk.new" && mkdir -p "$sdk.new"
-  m="${MEDIA_PREFIX#/}"
-  timeout 120 ssh -F /dev/null -i "$MEDIABOX_SSH_KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
-    -o ConnectTimeout=10 "$MEDIABOX_TARGET" \
-    "tar -C / -cf - $m/include/rockchip $m/lib/librockchip_mpp.so $m/lib/librockchip_mpp.so.0 $m/lib/librockchip_mpp.so.1 $m/lib/pkgconfig/rockchip_mpp.pc" |
-    tar -C "$sdk.new" -xf -
+  tar -I zstd -C "$sdk.new" --transform='s,^rootfs/,,' -xf "$golden" \
+    "$m/include/rockchip" "$m/lib/librockchip_mpp.so" "$m/lib/librockchip_mpp.so.0" \
+    "$m/lib/librockchip_mpp.so.1" "$m/lib/pkgconfig/rockchip_mpp.pc"
   got="$(mpp_of "$sdk.new")"
   if [ "$got" != "$MPP_SHA256" ]; then
     rm -rf "$sdk.new"
-    echo "MPP on the appliance is ${got:-unreadable}, not the one this build is pinned to ($MPP_SHA256)" >&2
+    echo "MPP in $asset is ${got:-missing}, not the one this build is pinned to ($MPP_SHA256)" >&2
     exit 1
   fi
   rm -rf "$sdk" && mv "$sdk.new" "$sdk"
