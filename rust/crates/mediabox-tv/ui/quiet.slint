@@ -369,6 +369,9 @@ component FootItem inherits HorizontalLayout {
         font-weight: 530;
         vertical-alignment: center;
         overflow: elide;
+        wrap: no-wrap;
+        min-width: 0px;
+        horizontal-stretch: 1;
     }
 }
 
@@ -418,7 +421,7 @@ export component QuietHome inherits Rectangle {
         y: 150px * u;
         width: 650px * u;
         height: 650px * u;
-        opacity: 0.88;
+        opacity: count > 0 ? 0.88 : 0;
         globe: chosen.id == "browser";
         mark: chosen.mark;
         index: focus-col;
@@ -608,7 +611,9 @@ export component QuietHome inherits Rectangle {
     }
 
     // Set as large as the reference sets it, and smaller only for a name
-    // that would otherwise run into the orbits.
+    // that would otherwise run into the orbits -- down to about half, and
+    // past that on two lines rather than smaller still. What it is and what
+    // it says follow under it, however many lines the name took.
     measure := Text {
         visible: false;
         text: chosen.name;
@@ -616,37 +621,54 @@ export component QuietHome inherits Rectangle {
         font-weight: 560;
         letter-spacing: -108px * u * 0.06;
     }
-    property <float> fit: min(1, spot-w / max(1px, measure.preferred-width));
-    Text {
+    property <float> fit: max(0.52, min(1, spot-w / max(1px, measure.preferred-width)));
+    property <bool> two-lines: measure.preferred-width * fit > spot-w;
+    VerticalLayout {
         x: spot-x - 4px * u;
         y: 330px * u;
-        width: spot-w + 200px * u;
-        height: 121px * u;
-        text: chosen.name;
-        color: Quiet.ink;
-        font-size: 108px * u * fit;
-        font-weight: 560;
-        letter-spacing: -108px * u * fit * 0.06;
-        vertical-alignment: center;
-        wrap: no-wrap;
-    }
-    Text {
-        x: spot-x;
-        y: 467px * u;
-        width: 400px * u;
-        text: chosen.about;
-        color: #a5b1ba;
-        font-size: 21px * u;
-        letter-spacing: -21px * u * 0.012;
-        wrap: word-wrap;
-    }
-    if chosen.note != "": Text {
-        x: spot-x;
-        y: 467px * u + (chosen.about == "" ? 0px : 82px * u);
-        text: chosen.note;
-        color: Quiet.warm-dim;
-        font-size: 15px * u;
-        font-weight: 600;
+        width: spot-w;
+        height: 860px * u - self.y;
+        alignment: start;
+        spacing: 0px;
+        Text {
+            // Two of the font's own lines (its line height is about 1.4
+            // of its size), from the top.
+            height: two-lines ? 2 * 108px * u * fit * 1.42 : 121px * u;
+            text: chosen.name;
+            color: Quiet.ink;
+            font-size: 108px * u * fit;
+            font-weight: 560;
+            letter-spacing: -108px * u * fit * 0.06;
+            vertical-alignment: two-lines ? top : center;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+        Rectangle { height: 16px * u; }
+        if chosen.about != "": HorizontalLayout {
+            padding-left: 4px * u;
+            alignment: start;
+            Text {
+                width: 400px * u;
+                max-height: 4 * 21px * u * 1.35;
+                text: chosen.about;
+                color: #a5b1ba;
+                font-size: 21px * u;
+                letter-spacing: -21px * u * 0.012;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+        }
+        if chosen.about != "" && chosen.note != "": Rectangle { height: 22px * u; }
+        if chosen.note != "": HorizontalLayout {
+            padding-left: 4px * u;
+            Text {
+                text: chosen.note;
+                color: Quiet.warm-dim;
+                font-size: 15px * u;
+                font-weight: 600;
+                overflow: elide;
+            }
+        }
     }
 
     // ---- what the keys do here
@@ -696,7 +718,16 @@ export component QuietHome inherits Rectangle {
         FootItem { label: "İŞLEMCİ"; value: vitals.cpu-text; }
         FootItem { label: "BELLEK"; value: vitals.memory-text; }
         FootItem { label: "DEPOLAMA"; value: vitals.storage-text; }
-        FootItem { label: "AĞ"; value: vitals.network; max-width: 300px * u; }
+        // What the classic panel names: the cable, the radio's network by
+        // its name, or why there is none.
+        FootItem {
+            label: "AĞ";
+            value: vitals.eth-up && vitals.wifi-up ? "Ethernet · " + vitals.wifi-ssid
+                 : vitals.eth-up ? "Ethernet"
+                 : vitals.wifi-up ? vitals.wifi-ssid
+                 : vitals.network;
+            max-width: 300px * u;
+        }
         FootItem { label: "SICAKLIK"; value: vitals.temperature; }
         HorizontalLayout {
             spacing: 33px * u;
@@ -975,12 +1006,19 @@ export component QuietSettings inherits Rectangle {
 
     property <length> left: 121px * u;
     property <length> nav-w: 413px * u;
-    property <length> content-x: 708px * u;
-    property <length> content-w: min(868px * u, root.width - content-x - 121px * u);
-    // An editor needs the height more than the page needs its large title.
+    property <length> content-x: editor ? 650px * u : 708px * u;
+    // An editor is the classic face's own pane (output, cooling, audio,
+    // ethernet), laid out for the classic content column: it gets the width
+    // up to the right margin and the height from just under the back crumb,
+    // and its heading is the smaller one, so a chart or a table is never
+    // squeezed under the reference's large list title.
+    property <length> content-w: editor ? root.width - content-x - 100px * u
+                                        : min(868px * u, root.width - content-x - 121px * u);
     property <length> title-size: editor ? 46px * u : 68px * u;
-    property <length> list-top: editor ? 418px * u : 462px * u;
-    property <length> bottom: root.height - 56px * u;
+    property <length> head-y: editor ? 124px * u : 259px * u;
+    property <length> title-y: head-y + 27px * u;
+    property <length> list-top: editor ? 252px * u : 462px * u;
+    property <length> bottom: root.height - (editor ? 28px : 56px) * u;
 
     property <length> card-h: 74px * u;
     property <length> reading-h: 62px * u;
@@ -1140,14 +1178,14 @@ export component QuietSettings inherits Rectangle {
     // ---- the chosen category, or the page a card opened
     Overline {
         x: content-x;
-        y: 259px * u;
+        y: head-y;
         height: 15px * u;
         text: page == "" ? "MEDIABOX  /  AYARLAR" : "AYARLAR  /  SAYFA";
         color: Quiet.warm;
     }
     Text {
         x: content-x - 2px * u;
-        y: 286px * u;
+        y: title-y;
         width: content-w;
         height: title-size * 1.15;
         text: root.title;
@@ -1161,7 +1199,7 @@ export component QuietSettings inherits Rectangle {
     }
     Text {
         x: content-x;
-        y: 286px * u + title-size * 1.15 + 8px * u;
+        y: title-y + title-size * 1.15 + 8px * u;
         width: content-w;
         text: root.blurb;
         color: #91a0aa;

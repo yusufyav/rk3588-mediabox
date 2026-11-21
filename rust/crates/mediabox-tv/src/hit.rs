@@ -1328,6 +1328,14 @@ fn shots() {
     let status = serde_json::json!({
         "version": "3.0.0", "hostname": "mediabox", "uptime_seconds": 7260,
         "leds": {"mode": "off"},
+        "fan": {
+            "available": true, "temperature_c": 52.4, "pwm": 50, "pwm_percent": 19.6,
+            "rpm_available": false, "control_backend": "kernel-pwm-fan",
+            "curve": mediabox_core::FanCurve::balanced(), "pending_reboot": false,
+            "board_fix": "active", "boot_config_ready": true,
+        },
+        "output": crate::screens::output::tests::status_for_tests(),
+        "audio": crate::screens::audio::tests::status_for_tests(Default::default()),
     });
     let vitals = || crate::VitalsModel {
         time: "13:34".into(),
@@ -1400,7 +1408,112 @@ fn shots() {
                 app.paint();
             });
             shoot(format!("{name}-{}-settings-list.png", layout.name()));
+
+            // The editors, inside each face's frame: their panes are the
+            // classic ones on both (`QuietSettings` places them).
+            for (page, file) in [
+                (crate::screens::settings::Page::Output, "editor-output"),
+                (crate::screens::settings::Page::Cooling, "editor-cooling"),
+                (crate::screens::settings::Page::Audio, "editor-audio"),
+            ] {
+                let opened = app(|app| {
+                    app.open(crate::route::Route::Settings);
+                    while app.settings.back() {}
+                    let mut opened = false;
+                    for g in 0..app.settings.groups.len() {
+                        app.settings.point_section(g);
+                        if let Some(r) = app.settings.rows().iter().position(|row| row.page == Some(page)) {
+                            app.settings.point_row(r);
+                            opened = app.settings.open(page);
+                            break;
+                        }
+                    }
+                    app.paint();
+                    opened
+                });
+                assert!(opened, "{file}");
+                shoot(format!("{name}-{}-{file}.png", layout.name()));
+                app(|app| {
+                    while app.settings.back() {}
+                    app.paint();
+                });
+            }
         }
+
+        // Quiet OS at its edges: a long name and summary, a long network
+        // name, twenty applications, none at all and no network.
+        let long = crate::model::DisplayStatus {
+            owner: None,
+            applications: serde_json::from_value(serde_json::json!([
+                {"id": "kodi", "name": "KODI", "summary": "Donanım kod çözücüyle oynatma", "installed": true},
+                {"id": "longname", "name": "Çok Uzun Adlı Bir Uygulama Örneği Gerçekten Uzun",
+                 "summary": "Bu açıklama, bir uygulamanın kendini anlatırken ne kadar uzun bir cümle kurabileceğini göstermek için yazıldı; üç satırı aşan metnin ekranda nasıl durduğunu gösterir.",
+                 "installed": true}
+            ]))
+            .unwrap(),
+        };
+        let many = crate::model::DisplayStatus {
+            owner: None,
+            applications: serde_json::from_value(serde_json::Value::Array(
+                (1..=16)
+                    .map(|n| serde_json::json!({"id": format!("app{n}"), "name": format!("Uygulama {n}"), "summary": "", "installed": true}))
+                    .collect(),
+            ))
+            .unwrap(),
+        };
+        let edge_vitals = |wifi: bool, online: bool| crate::VitalsModel {
+            time: "13:34".into(),
+            cpu_text: "%1".into(),
+            memory_text: "%5".into(),
+            storage_text: "5.5 / 56.7 GB".into(),
+            network: if online { "Bağlı" } else { "Bağlı değil" }.into(),
+            temperature: "—".into(),
+            machine: "Orange Pi 5 Plus".into(),
+            wifi_up: online && wifi,
+            wifi_ssid: "Çok-Uzun-Kablosuz-Ağ-Adı-5GHz-Misafir-Katı-Ofis".into(),
+            eth_up: online && !wifi,
+            ..Default::default()
+        };
+        let edge_shoot = |file: String, vitals: crate::VitalsModel| {
+            slint::platform::update_timers_and_animations();
+            ui.set_vitals(vitals);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            slint::platform::update_timers_and_animations();
+            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+            let rendered = SHOT_WINDOW.with(|slot| {
+                let slot = slot.borrow();
+                let window = slot.as_ref().expect("the software window");
+                window.request_redraw();
+                window.draw_if_needed(|renderer| {
+                    renderer.render(&mut pixels, w as usize);
+                })
+            });
+            assert!(rendered, "a frame");
+            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
+            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
+        };
+        let home_with = |display: &crate::model::DisplayStatus, focus: usize| {
+            app(|app| {
+                app.layout = crate::layout::Layout::Quiet;
+                app.settings.set_layout(crate::layout::Layout::Quiet);
+                app.home.set_apps(crate::state::app_tiles_from(display));
+                ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+                app.go_home();
+                app.home.point_at(focus);
+                app.paint();
+            });
+        };
+        home_with(&long, 5);
+        edge_shoot(format!("{name}-quiet-edge-long.png"), edge_vitals(true, true));
+        home_with(&many, 17);
+        edge_shoot(format!("{name}-quiet-edge-many.png"), edge_vitals(false, true));
+        home_with(&crate::model::DisplayStatus { owner: None, applications: Vec::new() }, 0);
+        app(|app| {
+            app.home.set_apps(Vec::new());
+            ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+            app.paint();
+        });
+        edge_shoot(format!("{name}-quiet-edge-empty.png"), edge_vitals(false, false));
     }
 }
 
