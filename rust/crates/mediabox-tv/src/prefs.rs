@@ -334,6 +334,19 @@ pub(crate) fn write_in_background<T: Serialize + Send + 'static>(path: PathBuf, 
     }
 }
 
+/// Returns once every write queued before it is on the disk: the writer
+/// runs jobs in order, so a job that only answers is behind all of them.
+#[cfg(test)]
+pub(crate) fn flush() {
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let job: WriteJob = Box::new(move || {
+        let _ = done.send(());
+    });
+    if writer().send(job).is_ok() {
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
 pub(crate) fn write_now<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
     let text = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("tmp");
@@ -430,6 +443,32 @@ mod tests {
         }
         assert!(!path.with_extension("tmp").exists(), "no unfinished temp file");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Media and interface choices pressed faster than the disk, mixed:
+    /// each file ends as the last one pressed for it, and neither file's
+    /// writes touch the other's.
+    #[test]
+    fn rapid_choices_keep_the_last_one_for_each_file() {
+        let dir = std::env::temp_dir().join(format!("mediabox-tv-prefs-burst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("media-preferences.json");
+        let other = dir.join("interface-preferences.json");
+        let player = |kodi: bool| if kodi { PlayerChoice::Kodi } else { PlayerChoice::MediaBox };
+        for round in 0..20 {
+            for i in 0..50u32 {
+                write(media.clone(), MediaPreferences { player: player(i % 2 == 0), ..Default::default() });
+                write_in_background(other.clone(), serde_json::json!({ "n": i, "round": round }));
+            }
+            let last = round % 2 == 0;
+            write(media.clone(), MediaPreferences { player: player(last), ..Default::default() });
+            flush();
+            assert_eq!(read(&media).player, player(last), "round {round}");
+            let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&other).unwrap()).unwrap();
+            assert_eq!(kept, serde_json::json!({ "n": 49, "round": round }));
+            assert!(!media.with_extension("tmp").exists() && !other.with_extension("tmp").exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

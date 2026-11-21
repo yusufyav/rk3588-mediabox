@@ -99,4 +99,38 @@ mod tests {
         assert_eq!(read(&path), Layout::Quiet, "a newer build's extra field");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Klasik -> Quiet -> Klasik -> Quiet pressed faster than the disk is kept
+    /// as Quiet; and the other way round as Klasik.
+    #[test]
+    fn rapid_switching_keeps_the_last_layout() {
+        let dir =
+            std::env::temp_dir().join(format!("mediabox-tv-layout-burst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("interface-preferences.json");
+        for last in [Layout::Quiet, Layout::Classic, Layout::Quiet] {
+            for _ in 0..25 {
+                for layout in [
+                    Layout::Classic,
+                    Layout::Quiet,
+                    Layout::Classic,
+                    Layout::Quiet,
+                ] {
+                    write(path.clone(), layout);
+                }
+            }
+            write(
+                path.clone(),
+                if last == Layout::Quiet {
+                    Layout::Classic
+                } else {
+                    Layout::Quiet
+                },
+            );
+            write(path.clone(), last);
+            crate::prefs::flush();
+            assert_eq!(read(&path), last);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
