@@ -377,7 +377,8 @@ component FootItem inherits HorizontalLayout {
 //
 // Up and Down (or Left and Right) walk the same list the classic launcher's
 // row is (src/main.rs, `act_on_home`); Ok opens it; a pointer lights and
-// takes a row through the same "home" zone.
+// takes a row through the same focus (`quiet-home`: the "home" zone's
+// tiles, on a column that scrolls).
 export component QuietHome inherits Rectangle {
     in property <[AppTile]> apps;
     in property <VitalsModel> vitals;
@@ -390,10 +391,16 @@ export component QuietHome inherits Rectangle {
     property <length> list-x: 123px * u;
     property <length> list-w: 490px * u;
     property <length> list-y: 268px * u;
-    // A launcher that grew past what the column holds closes its rows up
-    // rather than running into the foot.
-    property <length> pitch: min(83px * u, (900px * u - list-y) / max(1, count));
+    // Every row keeps the reference's height and type, however many
+    // applications there are: a launcher that grew past what the column
+    // holds scrolls (the focused row kept in view, a hand and a wheel
+    // through the same surface every list has) rather than closing its rows
+    // up into something nobody can read or hit.
+    property <length> pitch: 83px * u;
     property <length> row-h: pitch - 7px * u;
+    property <length> view-h: 860px * u - list-y;
+    property <length> content-h: count * pitch;
+    property <int> focus-row: max(0, min(focus-col, count - 1));
 
     property <length> spot-x: 739px * u;
     // Up to where the orbits begin (their outer ring, 1303 design px).
@@ -444,82 +451,139 @@ export component QuietHome inherits Rectangle {
         vertical-alignment: center;
     }
 
-    // The one chosen: a warm wash and a short bar on its leading edge,
-    // sliding to the row the remote is on rather than jumping there.
-    if count > 0: Rectangle {
+    // The column: a window onto the rows, as tall as the reference's.
+    Rectangle {
         x: list-x;
-        y: list-y + max(0, min(focus-col, count - 1)) * pitch;
+        y: list-y;
         width: list-w;
-        height: row-h;
-        border-radius: 9px * u;
-        background: @linear-gradient(90deg, #dfc9a523 0%, #dfc9a509 100%);
-        animate y { duration: Quiet.t-move; easing: Quiet.ease; }
+        height: view-h;
+        clip: true;
+
+        pan := PanState {
+            surface: "quiet-home";
+            remote: clamp(focus-row * pitch - (view-h - pitch) / 2, 0px, max(0px, content-h - view-h));
+            limit: max(0px, content-h - view-h);
+            remote-duration: Quiet.t-move;
+        }
+
+        PointerPanArea { surface: "quiet-home"; }
 
         Rectangle {
             x: 0;
-            y: (parent.height - self.height) / 2;
-            width: 3px * u;
-            height: parent.height - 34px * u;
-            border-radius: self.width / 2;
-            background: Quiet.warm;
+            y: -pan.value;
+            width: parent.width;
+            height: max(content-h, parent.height);
+            animate y { duration: pan.duration; easing: Quiet.ease; }
+
+            // The one chosen: a warm wash and a short bar on its leading
+            // edge, sliding to the row the remote is on rather than jumping
+            // there.
+            if count > 0: Rectangle {
+                x: 0;
+                y: focus-row * pitch;
+                width: parent.width;
+                height: row-h;
+                border-radius: 9px * u;
+                background: @linear-gradient(90deg, #dfc9a523 0%, #dfc9a509 100%);
+                animate y { duration: Quiet.t-move; easing: Quiet.ease; }
+
+                Rectangle {
+                    x: 0;
+                    y: (parent.height - self.height) / 2;
+                    width: 3px * u;
+                    height: parent.height - 34px * u;
+                    border-radius: self.width / 2;
+                    background: Quiet.warm;
+                }
+            }
+
+            for tile[i] in apps: Rectangle {
+                property <bool> here: i == focus-col;
+                x: 0;
+                y: i * pitch;
+                width: parent.width;
+                height: row-h;
+                border-radius: 9px * u;
+                background: target.lit && !here ? Quiet.hover : transparent;
+                opacity: tile.ready ? 1.0 : 0.5;
+                animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+
+                Path {
+                    x: 19px * u;
+                    y: (parent.height - self.height) / 2;
+                    width: 26px * u;
+                    height: 26px * u;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: tile.mark;
+                    fill: transparent;
+                    stroke: here ? Quiet.warm-hi : Quiet.app;
+                    stroke-width: 1.45px * u;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                }
+                Text {
+                    x: 66px * u;
+                    width: parent.width - self.x - 60px * u;
+                    height: parent.height;
+                    text: tile.name;
+                    color: here ? Quiet.warm-hi : Quiet.app;
+                    font-size: 22px * u;
+                    font-weight: 520;
+                    letter-spacing: -22px * u * 0.025;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    animate color { duration: Theme.t-focus; easing: Quiet.ease; }
+                }
+                Text {
+                    x: parent.width - 19px * u - self.width;
+                    width: self.preferred-width;
+                    height: parent.height;
+                    text: Quiet.two(i + 1);
+                    color: here ? Quiet.warm-dim : Quiet.faint;
+                    font-size: 11px * u;
+                    letter-spacing: 11px * u * 0.08;
+                    vertical-alignment: center;
+                }
+
+                target := PointerTarget {
+                    zone: "quiet-home";
+                    index: i;
+                    veil: false;
+                }
+            }
+        }
+
+        // More above or below the window: a hairline fades in at that edge.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: 1px * max(1, u);
+            background: @linear-gradient(90deg, #dfc9a560 0%, #dfc9a500 100%);
+            opacity: pan.value > 1px ? 1 : 0;
+            animate opacity { duration: Quiet.t-move; }
+        }
+        Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: parent.width;
+            height: 1px * max(1, u);
+            background: @linear-gradient(90deg, #dfc9a560 0%, #dfc9a500 100%);
+            opacity: pan.value < content-h - view-h - 1px ? 1 : 0;
+            animate opacity { duration: Quiet.t-move; }
         }
     }
 
-    for tile[i] in apps: Rectangle {
-        property <bool> here: i == focus-col;
-        x: list-x;
-        y: list-y + i * pitch;
-        width: list-w;
+    if count == 0: Text {
+        x: list-x + 19px * u;
+        y: list-y;
         height: row-h;
-        border-radius: 9px * u;
-        background: target.lit && !here ? Quiet.hover : transparent;
-        opacity: tile.ready ? 1.0 : 0.5;
-        animate background { duration: Theme.t-focus; easing: Quiet.ease; }
-
-        Path {
-            x: 19px * u;
-            y: (parent.height - self.height) / 2;
-            width: 26px * u;
-            height: 26px * u;
-            viewbox-width: 24;
-            viewbox-height: 24;
-            commands: tile.mark;
-            fill: transparent;
-            stroke: here ? Quiet.warm-hi : Quiet.app;
-            stroke-width: 1.45px * u;
-            stroke-line-cap: round;
-            stroke-line-join: round;
-        }
-        Text {
-            x: 66px * u;
-            width: parent.width - self.x - 60px * u;
-            height: parent.height;
-            text: tile.name;
-            color: here ? Quiet.warm-hi : Quiet.app;
-            font-size: 22px * u;
-            font-weight: 520;
-            letter-spacing: -22px * u * 0.025;
-            vertical-alignment: center;
-            overflow: elide;
-            wrap: no-wrap;
-            animate color { duration: Theme.t-focus; easing: Quiet.ease; }
-        }
-        Text {
-            x: parent.width - 19px * u - self.width;
-            width: self.preferred-width;
-            height: parent.height;
-            text: Quiet.two(i + 1);
-            color: here ? Quiet.warm-dim : Quiet.faint;
-            font-size: 11px * u;
-            letter-spacing: 11px * u * 0.08;
-            vertical-alignment: center;
-        }
-
-        target := PointerTarget {
-            zone: "home";
-            index: i;
-            veil: false;
-        }
+        text: "Uygulama yok";
+        color: Quiet.faint;
+        font-size: 22px * u;
+        vertical-alignment: center;
     }
 
     // ---- the one chosen, named

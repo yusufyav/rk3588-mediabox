@@ -329,8 +329,63 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
     };
     ui.set_apps(model(vec![tile("media"), tile("livetv"), tile("browser"), tile("settings"), tile("kodi")]));
     let reached = panel.reach();
-    assert_eq!(indices(&reached, "home"), (0..5).collect(), "every application: {reached:?}");
-    assert_eq!(zones(&reached), BTreeSet::from(["home"]), "home is the root: no way back");
+    assert_eq!(indices(&reached, "quiet-home"), (0..5).collect(), "every application: {reached:?}");
+    assert_eq!(zones(&reached), BTreeSet::from(["quiet-home"]), "home is the root: no way back");
+
+    // Five, ten, twenty applications: every row keeps its height (a target
+    // a hand can hit, a name that can be read), the column shows as many as
+    // fit, the remote's focus is always among them, and a hand moves the
+    // column to its other end and no further.
+    for count in [5usize, 10, 20] {
+        let many: Vec<crate::AppTile> = (0..count)
+            .map(|n| crate::AppTile {
+                id: format!("app-{n}").into(),
+                name: format!("Uygulama {n}").into(),
+                ready: true,
+                ..Default::default()
+            })
+            .collect();
+        ui.set_apps(model(many));
+        ui.global::<PointerPan>().set_pinned(false);
+        for focus in [0, count / 2, count - 1] {
+            ui.set_focus_col(focus as i32);
+            panel.settle_eased();
+            let shown = indices(&panel.reach(), "quiet-home");
+            assert!(shown.contains(&(focus as i32)), "{count} apps, focus {focus}: {shown:?}");
+            // 83 design px a row in 592 of column: seven rows whole, and
+            // at most the edges of one more each way.
+            assert!(shown.len() >= count.min(7) && shown.len() <= 9, "{count}: {shown:?}");
+            let lo = *shown.iter().min().unwrap();
+            let hi = *shown.iter().max().unwrap();
+            assert_eq!(shown.len() as i32, hi - lo + 1, "one run of rows: {shown:?}");
+        }
+        // A pointer takes over: dragged a long way up, the last row; a long
+        // way down, the first, and no further either way.
+        ui.set_focus_col(0);
+        panel.settle_eased();
+        ui.global::<PointerPan>().set_pinned(true);
+        panel.edges.borrow_mut().clear();
+        panel.pan("quiet-home", -1, 100 + count as i32, 0.0, -10_000.0);
+        let bottom = indices(&panel.reach(), "quiet-home");
+        assert!(bottom.contains(&(count as i32 - 1)), "{count}: {bottom:?}");
+        assert_eq!(
+            bottom.contains(&0),
+            count <= 7,
+            "{count}: only a column that does not fit scrolls: {bottom:?}"
+        );
+        if count > 7 {
+            assert!(panel.edges.borrow().contains(&("quiet-home".to_string(), -1)));
+        }
+        panel.pan("quiet-home", -1, 200 + count as i32, 0.0, 10_000.0);
+        assert!(indices(&panel.reach(), "quiet-home").contains(&0), "{count}: back to the top");
+    }
+    ui.global::<PointerPan>().set_pinned(true);
+    ui.set_focus_col(0);
+    ui.set_apps(model(vec![]));
+    let reached = panel.reach();
+    assert!(reached.is_empty(), "an empty launcher draws no target: {reached:?}");
+    ui.set_apps(model(vec![tile("media"), tile("livetv"), tile("browser"), tile("settings"), tile("kodi")]));
+
     ui.set_layout("classic".into());
     let reached = panel.reach();
     assert_eq!(indices(&reached, "home"), (0..5).collect(), "and the classic row");

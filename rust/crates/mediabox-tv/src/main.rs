@@ -1273,7 +1273,7 @@ impl App {
         use screens::settings::EditorTarget;
         let (row, col) = pointer::cell(index);
         match zone {
-            Zone::HomeApps => self.home.point_at(index),
+            Zone::HomeApps | Zone::QuietHome => self.home.point_at(index),
             Zone::SettingsSections => self.settings.point_section(index),
             // A way back is no focus: a click on it is Back (or, out of a
             // film, Stop).
