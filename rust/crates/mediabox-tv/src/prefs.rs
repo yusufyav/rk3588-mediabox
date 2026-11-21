@@ -288,23 +288,50 @@ pub fn read(path: impl AsRef<Path>) -> MediaPreferences {
         .unwrap_or_default()
 }
 
-/// Written whole and atomically -- a temporary file, fsync, rename -- on a
-/// thread of its own, so a press never waits for the disk. A half-written
-/// file read at start would be worse than the defaults.
+/// Written whole and atomically -- a temporary file, fsync, rename -- off
+/// the UI event loop. A single writer processes changes in the order they were
+/// requested, so rapid layout switches cannot race over the shared .tmp path
+/// or leave an older choice as the last persisted one.
 pub fn write(path: PathBuf, prefs: MediaPreferences) {
     write_in_background(path, prefs);
 }
 
-/// The same atomic write for any small file this interface keeps for itself
-/// (`layout.rs` too): one way of keeping a choice, not one per choice.
+type WriteJob = Box<dyn FnOnce() + Send>;
+
+/// Shared by media preferences and the system's interface preferences.
+/// All sends originate from the UI event loop in production, where channel
+/// order is the exact order the user made the changes. No disk I/O runs there.
+fn writer() -> &'static std::sync::mpsc::Sender<WriteJob> {
+    use std::sync::{mpsc, OnceLock};
+    static WRITER: OnceLock<mpsc::Sender<WriteJob>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<WriteJob>();
+        if let Err(error) = std::thread::Builder::new()
+            .name("mediabox-tv-prefs".into())
+            .spawn(move || {
+                for write in receiver {
+                    write();
+                }
+            })
+        {
+            eprintln!("mediabox-tv.prefs could not start preference writer: {error}");
+        }
+        sender
+    })
+}
+
+/// The same ordered atomic writer for any small preference file this interface
+/// keeps for itself (`layout.rs` too). Values are serialized only by the
+/// writer, avoiding disk and serialization latency on a remote-control press.
 pub(crate) fn write_in_background<T: Serialize + Send + 'static>(path: PathBuf, value: T) {
-    let _ = std::thread::Builder::new()
-        .name("mediabox-tv-prefs".into())
-        .spawn(move || {
-            if let Err(error) = write_now(&path, &value) {
-                eprintln!("mediabox-tv.prefs could not write {}: {error}", path.display());
-            }
-        });
+    let job: WriteJob = Box::new(move || {
+        if let Err(error) = write_now(&path, &value) {
+            eprintln!("mediabox-tv.prefs could not write {}: {error}", path.display());
+        }
+    });
+    if writer().send(job).is_err() {
+        eprintln!("mediabox-tv.prefs preference writer has stopped");
+    }
 }
 
 pub(crate) fn write_now<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
@@ -376,6 +403,33 @@ mod tests {
         write_now(&path, &prefs).unwrap();
         assert_eq!(read(&path), prefs);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A burst of user choices must leave the newest one on disk. Each
+    /// request uses the same target and temporary path: parallel writers
+    /// previously raced at this point.
+    #[test]
+    fn rapid_preferences_keep_the_last_choice() {
+        let dir = std::env::temp_dir().join(format!(
+            "mediabox-tv-ordered-writes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("interface-preferences.json");
+        for choice in 0..24 {
+            write_in_background(path.clone(), choice);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&path).ok().as_deref() != Some("23") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the last queued preference was never persisted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!path.with_extension("tmp").exists(), "no unfinished temp file");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
