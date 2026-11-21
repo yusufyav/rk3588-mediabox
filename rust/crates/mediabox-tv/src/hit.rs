@@ -299,6 +299,42 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
     }
     ui.set_settings_choice_open(false);
 
+    // ------------------------------------------- the same two, Quiet OS
+    // Another face, the same targets: what the classic face reaches above,
+    // under the same zones and indices, and nothing the classic does not.
+    ui.set_layout("quiet".into());
+    let reached = panel.reach();
+    assert!(has(&reached, "settings-sections", 0) && has(&reached, "settings-sections", 1));
+    assert!(has(&reached, "settings-rows", 0) && has(&reached, "settings-rows", 2));
+    assert!(!has(&reached, "settings-rows", 1), "a disabled card is no target");
+    assert!(zones(&reached).contains("back"), "the way back to Home");
+    assert_eq!(
+        zones(&reached),
+        BTreeSet::from(["back", "settings-rows", "settings-sections"]),
+        "{reached:?}"
+    );
+    ui.set_settings_choice_open(true);
+    let reached = panel.reach();
+    assert!(has(&reached, "settings-choice", 0) && !has(&reached, "settings-choice", 1));
+    for under in ["settings-rows", "settings-sections"] {
+        assert!(!zones(&reached).contains(under), "{under} is under the list");
+    }
+    ui.set_settings_choice_open(false);
+    ui.set_screen("home".into());
+    let tile = |id: &str| crate::AppTile {
+        id: id.into(),
+        name: id.into(),
+        ready: true,
+        ..Default::default()
+    };
+    ui.set_apps(model(vec![tile("media"), tile("livetv"), tile("browser"), tile("settings"), tile("kodi")]));
+    let reached = panel.reach();
+    assert_eq!(indices(&reached, "home"), (0..5).collect(), "every application: {reached:?}");
+    assert_eq!(zones(&reached), BTreeSet::from(["home"]), "home is the root: no way back");
+    ui.set_layout("classic".into());
+    let reached = panel.reach();
+    assert_eq!(indices(&reached, "home"), (0..5).collect(), "and the classic row");
+
     // ------------------------------------------------------- diagnostics
     ui.set_screen("diagnostics".into());
     ui.set_diag_nav(model(vec![SettingNav {
@@ -865,6 +901,7 @@ fn driven() -> (MediaBoxWindow, Scratch) {
         window: window.clone(),
     }))
     .expect("one platform");
+    SHOT_WINDOW.with(|slot| *slot.borrow_mut() = Some(window.clone()));
     let ui = MediaBoxWindow::new().expect("the interface");
     ui.window().set_size(slint::PhysicalSize::new(W, H));
     ui.show().expect("shown");
@@ -878,6 +915,7 @@ fn driven() -> (MediaBoxWindow, Scratch) {
         cache: dir.join("cache").display().to_string(),
         state: dir.join("state.json").display().to_string(),
         prefs: dir.join("media-preferences.json"),
+        interface: dir.join("interface-preferences.json"),
         live_kept: crate::LiveKept::default(),
     };
     let app = crate::App::new(&ui, std::time::Instant::now(), false, files);
@@ -1130,4 +1168,187 @@ fn the_wifi_scan_spinner_runs_on_the_animation_clock() {
     let still = frame();
     std::thread::sleep(std::time::Duration::from_millis(667));
     assert_eq!(differ(&still, &frame()), 0, "no spinner, nothing moving");
+}
+
+
+/// Quiet OS is chosen where the classic face's settings are, takes the
+/// screen at once -- the same screen, the same row, no restart -- and is
+/// what the next start comes up in. Its launcher is a column: Down walks it.
+#[test]
+fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
+    use mediabox_core::InputAction;
+    let (ui, scratch) = driven();
+    // Paced as a hand presses: the dispatcher takes a repeat of a key this
+    // close to the last as one.
+    let key = |action| {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app(|app| {
+            app.remote_key(action, true, crate::input::Origin::Keyboard);
+            app.remote_key(action, false, crate::input::Origin::Keyboard);
+        });
+    };
+    assert_eq!(ui.get_layout(), "classic", "a box that never chose");
+    app(|app| app.open(crate::route::Route::Settings));
+    let system = app(|app| {
+        app.settings
+            .groups
+            .iter()
+            .position(|g| g.title == "Sistem")
+            .expect("Sistem")
+    });
+    app(|app| {
+        app.settings.point_section(system);
+        app.paint();
+    });
+    key(InputAction::Right);
+    let card = app(|app| app.settings.focused().map(|r| (r.label.clone(), r.value.clone())));
+    assert_eq!(card, Some(("Arayüz düzeni".into(), "Klasik MediaBox".into())));
+    key(InputAction::Ok);
+    assert!(ui.get_settings_choice_open(), "the two faces, as a list");
+    key(InputAction::Down);
+    key(InputAction::Ok);
+    assert!(!ui.get_settings_choice_open());
+    assert_eq!(ui.get_layout(), "quiet", "at once");
+    assert_eq!(ui.get_screen(), "settings", "on the same screen");
+    let place = app(|app| (app.settings.section, app.settings.pane, app.settings.row_index()));
+    assert_eq!(place.0, system, "in the same category");
+    assert_eq!(
+        app(|app| app.settings.focused().map(|r| r.value.clone())),
+        Some("Quiet OS".into()),
+        "on the same card, which says so"
+    );
+    // Kept, off the event loop.
+    let kept = scratch.0.join("interface-preferences.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::layout::read(&kept) != crate::layout::Layout::Quiet {
+        assert!(std::time::Instant::now() < deadline, "never kept");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // And the column of applications walks with Up and Down.
+    app(|app| {
+        let display = crate::model::DisplayStatus { owner: None, applications: Vec::new() };
+        app.home.set_apps(crate::state::app_tiles_from(&display));
+        app.go_home();
+    });
+    let first = app(|app| app.home.column());
+    key(InputAction::Down);
+    assert_eq!(app(|app| app.home.column()), first + 1);
+    key(InputAction::Up);
+    assert_eq!(app(|app| app.home.column()), first);
+    // Back the other way, from the Quiet face's own settings.
+    app(|app| app.open(crate::route::Route::Settings));
+    assert_eq!(app(|app| app.settings.focused().map(|r| r.label.clone())), Some("Arayüz düzeni".into()));
+    key(InputAction::Ok);
+    key(InputAction::Up);
+    key(InputAction::Ok);
+    assert_eq!(ui.get_layout(), "classic");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::layout::read(&kept) != crate::layout::Layout::Classic {
+        assert!(std::time::Instant::now() < deadline, "never kept");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Pictures of both faces at the panel sizes the appliance drives, for a
+/// person to look at: 1080p (scale 1), 1440p and 4K (scale 2, as
+/// `platform::scale_factor` chooses). Only with MEDIABOX_TV_SHOTS set to a
+/// directory; the software renderer draws them, so a rotation or a
+/// GPU-only effect is not in them.
+#[test]
+#[ignore]
+fn shots() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let (ui, _scratch) = driven();
+    let display = crate::model::DisplayStatus {
+        owner: None,
+        applications: serde_json::from_value(serde_json::json!([
+            {"id": "kodi", "name": "KODI", "summary": "Donanım kod çözücüyle oynatma", "installed": true}
+        ]))
+        .unwrap(),
+    };
+    let status = serde_json::json!({
+        "version": "3.0.0", "hostname": "mediabox", "uptime_seconds": 7260,
+        "leds": {"mode": "off"},
+    });
+    let vitals = || crate::VitalsModel {
+        time: "13:34".into(),
+        cpu_text: "%1".into(),
+        memory_text: "%5".into(),
+        storage_text: "5.5 / 56.7 GB".into(),
+        network: "Ethernet".into(),
+        temperature: "56 °C".into(),
+        machine: "Orange Pi 5 Plus".into(),
+        eth_up: true,
+        ..Default::default()
+    };
+    let window = ui.window();
+    for (w, h, scale, name) in [(1920u32, 1080u32, 1.0f32, "1080p"), (2560, 1440, 2.0, "1440p"), (3840, 2160, 2.0, "4k")] {
+        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        window.set_size(slint::PhysicalSize::new(w, h));
+        let shoot = |file: String| {
+            ui.set_vitals(vitals());
+            slint::platform::update_timers_and_animations();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+            let rendered = SHOT_WINDOW.with(|slot| {
+                let slot = slot.borrow();
+                let window = slot.as_ref().expect("the software window");
+                window.request_redraw();
+                window.draw_if_needed(|renderer| {
+                    renderer.render(&mut pixels, w as usize);
+                })
+            });
+            assert!(rendered, "a frame");
+            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
+            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
+        };
+        for layout in [crate::layout::Layout::Classic, crate::layout::Layout::Quiet] {
+            app(|app| {
+                app.layout = layout;
+                app.settings.set_layout(layout);
+                app.home.set_apps(crate::state::app_tiles_from(&display));
+                ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+                app.settings.compose(Some(&status), None, None);
+                app.go_home();
+                app.home.point_at(2);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-home.png", layout.name()));
+            app(|app| {
+                app.home.point_at(0);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-home-media.png", layout.name()));
+            app(|app| {
+                app.open(crate::route::Route::Settings);
+                let system = app.settings.groups.iter().position(|g| g.title == "Sistem").unwrap();
+                app.settings.point_section(system);
+                app.settings.point_row(0);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings.png", layout.name()));
+            app(|app| {
+                app.settings.open_layout_choice();
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings-choice.png", layout.name()));
+            app(|app| {
+                app.settings.back();
+                let links = app.settings.groups.iter().position(|g| g.title == "Bağlantılar").unwrap();
+                app.settings.point_section(links);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings-list.png", layout.name()));
+        }
+    }
+}
+
+thread_local! {
+    static SHOT_WINDOW: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
 }
