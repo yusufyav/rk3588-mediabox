@@ -288,21 +288,67 @@ pub fn read(path: impl AsRef<Path>) -> MediaPreferences {
         .unwrap_or_default()
 }
 
-/// Written whole and atomically -- a temporary file, fsync, rename -- on a
-/// thread of its own, so a press never waits for the disk. A half-written
-/// file read at start would be worse than the defaults.
+/// Written whole and atomically -- a temporary file, fsync, rename -- off
+/// the UI event loop. A single writer processes changes in the order they were
+/// requested, so rapid layout switches cannot race over the shared .tmp path
+/// or leave an older choice as the last persisted one.
 pub fn write(path: PathBuf, prefs: MediaPreferences) {
-    let _ = std::thread::Builder::new()
-        .name("mediabox-tv-prefs".into())
-        .spawn(move || {
-            if let Err(error) = write_now(&path, &prefs) {
-                eprintln!("mediabox-tv.prefs could not write {}: {error}", path.display());
-            }
-        });
+    write_in_background(path, prefs);
 }
 
-fn write_now(path: &Path, prefs: &MediaPreferences) -> std::io::Result<()> {
-    let text = serde_json::to_vec_pretty(prefs).map_err(std::io::Error::other)?;
+type WriteJob = Box<dyn FnOnce() + Send>;
+
+/// Shared by media preferences and the system's interface preferences.
+/// All sends originate from the UI event loop in production, where channel
+/// order is the exact order the user made the changes. No disk I/O runs there.
+fn writer() -> &'static std::sync::mpsc::Sender<WriteJob> {
+    use std::sync::{mpsc, OnceLock};
+    static WRITER: OnceLock<mpsc::Sender<WriteJob>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<WriteJob>();
+        if let Err(error) = std::thread::Builder::new()
+            .name("mediabox-tv-prefs".into())
+            .spawn(move || {
+                for write in receiver {
+                    write();
+                }
+            })
+        {
+            eprintln!("mediabox-tv.prefs could not start preference writer: {error}");
+        }
+        sender
+    })
+}
+
+/// The same ordered atomic writer for any small preference file this interface
+/// keeps for itself (`layout.rs` too). Values are serialized only by the
+/// writer, avoiding disk and serialization latency on a remote-control press.
+pub(crate) fn write_in_background<T: Serialize + Send + 'static>(path: PathBuf, value: T) {
+    let job: WriteJob = Box::new(move || {
+        if let Err(error) = write_now(&path, &value) {
+            eprintln!("mediabox-tv.prefs could not write {}: {error}", path.display());
+        }
+    });
+    if writer().send(job).is_err() {
+        eprintln!("mediabox-tv.prefs preference writer has stopped");
+    }
+}
+
+/// Returns once every write queued before it is on the disk: the writer
+/// runs jobs in order, so a job that only answers is behind all of them.
+#[cfg(test)]
+pub(crate) fn flush() {
+    let (done, wait) = std::sync::mpsc::channel::<()>();
+    let job: WriteJob = Box::new(move || {
+        let _ = done.send(());
+    });
+    if writer().send(job).is_ok() {
+        let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
+    }
+}
+
+pub(crate) fn write_now<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let text = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("tmp");
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temporary)?;
@@ -369,6 +415,59 @@ mod tests {
         let prefs = MediaPreferences { player: PlayerChoice::Ask, ..Default::default() };
         write_now(&path, &prefs).unwrap();
         assert_eq!(read(&path), prefs);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A burst of user choices must leave the newest one on disk. Each
+    /// request uses the same target and temporary path: parallel writers
+    /// previously raced at this point.
+    #[test]
+    fn rapid_preferences_keep_the_last_choice() {
+        let dir = std::env::temp_dir().join(format!(
+            "mediabox-tv-ordered-writes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("interface-preferences.json");
+        for choice in 0..24 {
+            write_in_background(path.clone(), choice);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::fs::read_to_string(&path).ok().as_deref() != Some("23") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the last queued preference was never persisted"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!path.with_extension("tmp").exists(), "no unfinished temp file");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Media and interface choices pressed faster than the disk, mixed:
+    /// each file ends as the last one pressed for it, and neither file's
+    /// writes touch the other's.
+    #[test]
+    fn rapid_choices_keep_the_last_one_for_each_file() {
+        let dir = std::env::temp_dir().join(format!("mediabox-tv-prefs-burst-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let media = dir.join("media-preferences.json");
+        let other = dir.join("interface-preferences.json");
+        let player = |kodi: bool| if kodi { PlayerChoice::Kodi } else { PlayerChoice::MediaBox };
+        for round in 0..20 {
+            for i in 0..50u32 {
+                write(media.clone(), MediaPreferences { player: player(i % 2 == 0), ..Default::default() });
+                write_in_background(other.clone(), serde_json::json!({ "n": i, "round": round }));
+            }
+            let last = round % 2 == 0;
+            write(media.clone(), MediaPreferences { player: player(last), ..Default::default() });
+            flush();
+            assert_eq!(read(&media).player, player(last), "round {round}");
+            let kept: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&other).unwrap()).unwrap();
+            assert_eq!(kept, serde_json::json!({ "n": 49, "round": round }));
+            assert!(!media.with_extension("tmp").exists() && !other.with_extension("tmp").exists());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

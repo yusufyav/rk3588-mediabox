@@ -224,6 +224,10 @@ pub fn cell(index: usize) -> (usize, usize) {
 pub enum Zone {
     /// The launcher's tiles.
     HomeApps,
+    /// The same tiles as Quiet OS draws them: a column that may be taller
+    /// than the panel, so it scrolls up and down under a hand and a wheel
+    /// (the classic row never does, and its wheel stays the arrows).
+    QuietHome,
     /// The settings' category column.
     SettingsSections,
     /// A way back: the remote's Back under the arrow. The settings'
@@ -361,6 +365,7 @@ impl Zone {
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "home" => Zone::HomeApps,
+            "quiet-home" => Zone::QuietHome,
             "settings-sections" => Zone::SettingsSections,
             "back" => Zone::Back,
             "settings-rows" => Zone::SettingsRows,
@@ -437,7 +442,7 @@ impl Zone {
     /// any) and its layer.
     fn place(self) -> (Option<Route>, Layer) {
         match self {
-            Zone::HomeApps => (Some(Route::Home), Layer::Screen),
+            Zone::HomeApps | Zone::QuietHome => (Some(Route::Home), Layer::Screen),
             Zone::SettingsSections
             | Zone::SettingsRows
             | Zone::EditorCards
@@ -590,7 +595,8 @@ impl Zone {
             Zone::Grid | Zone::LibraryMark => vertical(Zone::Grid),
             Zone::WifiRows | Zone::WifiInfo => vertical(Zone::WifiRows),
             Zone::DetailEpisodes | Zone::DetailMarks => vertical(Zone::DetailEpisodes),
-            Zone::SettingsRows
+            Zone::QuietHome
+            | Zone::SettingsRows
             | Zone::SettingsChoice
             | Zone::EditorPicker
             | Zone::OutputResolutions
@@ -613,6 +619,7 @@ impl Zone {
 pub fn zone_name(zone: Zone) -> &'static str {
     match zone {
         Zone::HomeApps => "home",
+        Zone::QuietHome => "quiet-home",
         Zone::SettingsSections => "settings-sections",
         Zone::Back => "back",
         Zone::SettingsRows => "settings-rows",
@@ -1648,7 +1655,7 @@ mod tests {
     const W: f32 = 1920.0;
     const H: f32 = 1080.0;
 
-    const ALL_ZONES: [Zone; 69] = [
+    const ALL_ZONES: [Zone; 70] = [
         Zone::DetailActions,
         Zone::DetailSources,
         Zone::DetailEpisodes,
@@ -1671,6 +1678,7 @@ mod tests {
         Zone::FrameAccountMenu,
         Zone::EditorVolume,
         Zone::HomeApps,
+        Zone::QuietHome,
         Zone::SettingsSections,
         Zone::Back,
         Zone::SettingsRows,
@@ -1746,6 +1754,7 @@ mod tests {
             include_str!("../ui/now_playing.slint"),
             include_str!("../ui/player.slint"),
             include_str!("../ui/live.slint"),
+            include_str!("../ui/quiet.slint"),
         ]
         .concat();
         for zone in ALL_ZONES {
@@ -3128,6 +3137,7 @@ mod tests {
             include_str!("../ui/detail.slint"),
             include_str!("../ui/player.slint"),
             include_str!("../ui/live.slint"),
+            include_str!("../ui/quiet.slint"),
         ]
         .concat();
         for zone in ALL_ZONES {

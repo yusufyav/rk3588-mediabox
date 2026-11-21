@@ -149,6 +149,7 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         memory_arc: String::new().into(),
         memory_text: "—".into(),
         performance_note: "—".into(),
+        temperature: "—".into(),
         storage_text: "—".into(),
         storage_fraction: 0.0,
         network: "Ağ yok".into(),
@@ -218,6 +219,7 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         .map(|c| format!("{c:.0} °C"))
         .unwrap_or_else(|| "—".into());
     model.performance_note = format!("{used}  ·  {heat}").into();
+    model.temperature = heat.into();
 
     if let Some(volume) = root
         .get("storage")

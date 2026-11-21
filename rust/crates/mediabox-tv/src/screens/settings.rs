@@ -22,6 +22,7 @@ use mediabox_core::{
 };
 use serde_json::Value;
 
+use crate::layout::Layout;
 use crate::model::DisplayStatus;
 use crate::pointer::Aim;
 
@@ -47,6 +48,11 @@ pub enum Action {
     /// Set the board's indicator lights to this mode: what choosing one in
     /// that list does.
     SetLeds(LedMode),
+    /// Opens the two faces of the home screen and these settings.
+    ChooseLayout,
+    /// Wear this face: what choosing one in that list does. The interface's
+    /// own choice, kept by the application (`layout.rs`), applied at once.
+    SetLayout(Layout),
     /// CEC: wake the television, or send it to standby. Neither touches this
     /// appliance's own power state — the daemon owns /dev/cec0 and this is a
     /// message to the panel.
@@ -112,6 +118,7 @@ impl Action {
                 | Action::OpenBluetooth
                 | Action::OpenAccount
                 | Action::ChooseLeds
+                | Action::ChooseLayout
                 | Action::ChooseCecTarget
                 | Action::ChooseCecSourceLost
                 | Action::ChooseLiveStartup
@@ -383,6 +390,7 @@ enum ChoiceKind {
     CecSourceLost,
     LiveStartup,
     LiveTolerance,
+    Layout,
 }
 
 const SOURCE_LOST: [CecSourceLost; 2] = [CecSourceLost::StayOn, CecSourceLost::Standby];
@@ -398,6 +406,10 @@ pub struct ChoiceView {
 }
 
 const LIVE_STARTUP: &str = "Alıcı başlangıç yöntemi";
+
+/// The card, and the list it opens, that choose the face of the home screen
+/// and these settings.
+pub const LAYOUT: &str = "Arayüz düzeni";
 
 /// What each startup method means for the viewer, under its name. Neither
 /// cuts the receiver's power, and neither line says so.
@@ -449,6 +461,8 @@ pub struct Settings {
     live_startup: Option<LiveReceiverStartupPolicy>,
     /// The signal-loss tolerance, as the daemon last kept it.
     live_tolerance: Option<LiveSignalTolerance>,
+    /// The face the home screen and these settings wear.
+    layout: Layout,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -479,6 +493,7 @@ impl Settings {
             cec: None,
             live_startup: None,
             live_tolerance: None,
+            layout: Layout::Classic,
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
@@ -682,8 +697,27 @@ impl Settings {
         true
     }
 
+    /// The face in use, shown on its card. The application keeps it; this
+    /// only draws it and offers the other.
+    pub fn set_layout(&mut self, layout: Layout) {
+        self.layout = layout;
+        for row in self.groups.iter_mut().flat_map(|group| group.rows.iter_mut()) {
+            if row.action == Some(Action::ChooseLayout) {
+                row.value = layout.label().into();
+            }
+        }
+    }
+
+    /// Opens the two faces on the one in use.
+    pub fn open_layout_choice(&mut self) -> bool {
+        self.choice = Some(Layout::ALL.iter().position(|l| *l == self.layout).unwrap_or(0));
+        self.choice_kind = ChoiceKind::Layout;
+        true
+    }
+
     fn choice_len(&self) -> usize {
         match self.choice_kind {
+            ChoiceKind::Layout => Layout::ALL.len(),
             ChoiceKind::LiveTolerance => LiveSignalTolerance::ALL.len(),
             ChoiceKind::LiveStartup => LiveReceiverStartupPolicy::ALL.len(),
             ChoiceKind::Leds => LedMode::ALL.len(),
@@ -696,6 +730,10 @@ impl Settings {
     pub fn choose(&mut self) -> Option<Action> {
         let at = self.choice.take()?;
         match self.choice_kind {
+            ChoiceKind::Layout => {
+                let layout = Layout::ALL.get(at).copied()?;
+                (self.layout != layout).then_some(Action::SetLayout(layout))
+            }
             ChoiceKind::LiveStartup => {
                 let policy = LiveReceiverStartupPolicy::ALL.get(at).copied()?;
                 (self.live_startup? != policy).then_some(Action::SetLiveStartup(policy))
@@ -724,6 +762,17 @@ impl Settings {
 
     pub fn choice_view(&self) -> Option<ChoiceView> {
         let focus = self.choice?;
+        if self.choice_kind == ChoiceKind::Layout {
+            return Some(ChoiceView {
+                title: LAYOUT.into(),
+                note: String::new(),
+                focus,
+                items: Layout::ALL
+                    .iter()
+                    .map(|layout| (layout.label().to_string(), String::new(), self.layout == *layout))
+                    .collect(),
+            });
+        }
         if self.choice_kind == ChoiceKind::LiveStartup {
             return Some(ChoiceView {
                 title: LIVE_STARTUP.into(),
@@ -1003,6 +1052,7 @@ impl Settings {
         let groups = compose(status, diagnostics, display);
         let changed = self.groups.len() != groups.len();
         self.groups = groups;
+        self.set_layout(self.layout);
         if changed || self.positions.len() != self.groups.len() {
             self.positions = vec![0; self.groups.len()];
         }
@@ -1730,9 +1780,11 @@ fn compose(
         },
         Group {
             title: "Sistem".into(),
-            blurb: "Sürüm, yeniden başlatma ve kapatma",
+            blurb: "Arayüz düzeni, sürüm, yeniden başlatma ve kapatma",
             icon: "info",
             rows: vec![
+                // Its value is the face in use (`Settings::set_layout`).
+                Row::act(LAYOUT, Action::ChooseLayout),
                 Row::act("Yeniden başlat", Action::Restart),
                 Row::act("Kapat", Action::Shutdown),
                 Row::header("Sürüm"),
@@ -2122,6 +2174,11 @@ mod tests {
         assert!(settings.step(1, 0));
         assert_eq!(
             settings.focused().and_then(|r| r.action),
+            Some(Action::ChooseLayout)
+        );
+        assert!(settings.step(0, 1));
+        assert_eq!(
+            settings.focused().and_then(|r| r.action),
             Some(Action::Restart)
         );
         assert!(settings.step(0, 1));
@@ -2143,6 +2200,7 @@ mod tests {
         let mut settings = Settings::new();
         section(&mut settings, "Sistem");
         settings.step(1, 0);
+        settings.step(0, 1);
         settings.step(0, 1);
         settings.step(-1, 0);
         settings.step(0, -1); // Cihaz

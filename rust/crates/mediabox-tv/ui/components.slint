@@ -54,6 +54,9 @@ export struct AppTile {
     hue: float,
     ready: bool,
     note: string,
+    // One line on what it is for: Quiet OS's home screen shows it under the
+    // chosen application's name. "" when the interface does not know.
+    about: string,
 }
 
 // A label and a reading, with an optional verdict. Used by the technical panel,
@@ -122,6 +125,8 @@ export struct VitalsModel {
     memory-arc: string,
     memory-text: string,
     performance-note: string,
+    // The hottest sensor, as "56 °C" or "—": Quiet OS's footer.
+    temperature: string,
     storage-text: string,
     storage-fraction: float,
     network: string,

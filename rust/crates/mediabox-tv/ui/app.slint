@@ -10,6 +10,7 @@ import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
 import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
+import { QuietHome, QuietSettings } from "quiet.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
@@ -90,6 +91,9 @@ export component MediaBoxWindow inherits Window {
     // Which screen is on the panel. Rust owns this; the interface never decides
     // where it is on its own.
     in property <string> screen: "boot";
+    // Which face the home screen and the system settings wear: "classic" or
+    // "quiet" (src/layout.rs). Anything else is the classic face.
+    in property <string> layout: "classic";
     /// Whether the film's own controls are up. They come up on a key and go
     /// down by themselves; a film with a control bar permanently across it is
     /// not a television.
@@ -498,7 +502,7 @@ export component MediaBoxWindow inherits Window {
             failed: root.failed;
         }
 
-        if screen == "home": Home {
+        if screen == "home" && layout != "quiet": Home {
             width: 100%;
             height: 100%;
             apps: root.apps;
@@ -654,7 +658,43 @@ export component MediaBoxWindow inherits Window {
             technical: root.np-technical;
         }
 
-        if screen == "settings": Settings {
+        if screen == "home" && layout == "quiet": QuietHome {
+            width: 100%;
+            height: 100%;
+            apps: root.apps;
+            vitals: root.vitals;
+            focus-col: root.focus-col;
+        }
+
+        if screen == "settings" && layout == "quiet": QuietSettings {
+            width: 100%;
+            height: 100%;
+            sections: root.settings-sections;
+            section: root.settings-section;
+            on-sections: root.settings-on-sections;
+            rows: root.settings-rows;
+            row-index: root.settings-row;
+            page: root.settings-page;
+            page-icon: root.settings-page-icon;
+            title: root.settings-title;
+            blurb: root.settings-blurb;
+            vitals: root.vitals;
+            cooling: root.settings-cooling;
+            cooling-view: root.settings-cooling-view;
+            output: root.settings-output;
+            output-view: root.settings-output-view;
+            ethernet: root.settings-ethernet;
+            ethernet-view: root.settings-ethernet-view;
+            audio: root.settings-audio;
+            audio-view: root.settings-audio-view;
+            choice-open: root.settings-choice-open;
+            choice-title: root.settings-choice-title;
+            choice: root.settings-choice;
+            choice-focus: root.settings-choice-focus;
+            choice-note: root.settings-choice-note;
+        }
+
+        if screen == "settings" && layout != "quiet": Settings {
             width: 100%;
             height: 100%;
             sections: root.settings-sections;
@@ -809,7 +849,9 @@ export component MediaBoxWindow inherits Window {
             && screen != "settings" && screen != "diagnostics" && screen != "media-settings"
             // The radios' lists sit in the settings' own frame; only the
             // password keeps the bar.
-            && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face != "password"): TopBar {
+            && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face != "password")
+            // Quiet OS's home carries its own.
+            && !(screen == "home" && layout == "quiet"): TopBar {
             x: 0;
             y: 0;
             width: 100%;
