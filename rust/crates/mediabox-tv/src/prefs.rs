@@ -292,17 +292,23 @@ pub fn read(path: impl AsRef<Path>) -> MediaPreferences {
 /// thread of its own, so a press never waits for the disk. A half-written
 /// file read at start would be worse than the defaults.
 pub fn write(path: PathBuf, prefs: MediaPreferences) {
+    write_in_background(path, prefs);
+}
+
+/// The same atomic write for any small file this interface keeps for itself
+/// (`layout.rs` too): one way of keeping a choice, not one per choice.
+pub(crate) fn write_in_background<T: Serialize + Send + 'static>(path: PathBuf, value: T) {
     let _ = std::thread::Builder::new()
         .name("mediabox-tv-prefs".into())
         .spawn(move || {
-            if let Err(error) = write_now(&path, &prefs) {
+            if let Err(error) = write_now(&path, &value) {
                 eprintln!("mediabox-tv.prefs could not write {}: {error}", path.display());
             }
         });
 }
 
-fn write_now(path: &Path, prefs: &MediaPreferences) -> std::io::Result<()> {
-    let text = serde_json::to_vec_pretty(prefs).map_err(std::io::Error::other)?;
+pub(crate) fn write_now<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
+    let text = serde_json::to_vec_pretty(value).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("tmp");
     let written = (|| -> std::io::Result<()> {
         let mut file = std::fs::File::create(&temporary)?;

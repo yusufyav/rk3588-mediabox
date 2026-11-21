@@ -1,0 +1,1083 @@
+import { Theme, Metrics } from "theme.slint";
+import { AppTile, VitalsModel, SettingRow } from "components.slint";
+import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
+import { SettingNav, Icon, ChoiceItem, ChoiceSheet } from "kit.slint";
+import { CoolingPane, CoolingView } from "cooling.slint";
+import { OutputPane, OutputView } from "output.slint";
+import { EthernetPane, EthernetView } from "ethernet.slint";
+import { AudioPane, AudioView } from "audio.slint";
+
+// Quiet OS: the second face of the home screen and the system settings.
+//
+// A face, not a second interface. Everything on these two screens is fed by
+// the same properties the classic face is fed by (ui/home.slint,
+// ui/settings.slint) and names its targets with the same pointer zones and
+// indices, so Rust's focus, its pointer table (src/pointer.rs) and every
+// action are one and the same under both; only where things are drawn, and
+// how, is this file's.
+//
+// Laid out on a 1920 x 1080 design and scaled by one factor, so 1440p and 4K
+// are the same picture larger, and nothing is placed by measuring. Every
+// decoration is a flat fill, a gradient or a stroked path: no blur, no image,
+// nothing that animates when nothing is happening.
+
+export global Quiet {
+    // One design pixel, on this panel.
+    out property <float> u: min(Metrics.vw / 1920px, Metrics.vh / 1080px);
+
+    out property <color> ink: #f1f0ee;
+    out property <color> muted: #a5afba;
+    out property <color> dim: #6e7c89;
+    out property <color> faint: #65717c;
+    out property <color> label: #8b99a5;
+    out property <color> hair: #d0dce224;
+    out property <color> warm: #dfc9a5;
+    out property <color> warm-hi: #f2e5d0;
+    out property <color> warm-dim: #bbaa92;
+    out property <color> app: #aeb7bf;
+    out property <color> hover: #d6e0e80c;
+    out property <color> current: #dfc9a518;
+    out property <color> good: #84a89a;
+
+    out property <duration> t-move: Theme.motion ? 180ms : 0ms;
+    out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+
+    public pure function two(n: int) -> string {
+        return n < 10 ? "0" + n : "" + n;
+    }
+
+    // A verdict, said quietly: the word is always there, the colour only
+    // tints it.
+    public pure function tone(name: string) -> color {
+        return name == "good" ? #9bbfae
+             : name == "warn" ? #dcc08a
+             : name == "bad"  ? #e0a092
+             : #adb8bf;
+    }
+}
+
+// The ground both screens stand on: a slate gradient and two soft light
+// pools. Three full-screen fills, drawn once and never again.
+component QuietGround inherits Rectangle {
+    background: @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%);
+    Rectangle {
+        x: root.width * 0.83 - self.width / 2;
+        y: root.height * 0.5 - self.height / 2;
+        width: root.width * 1.2;
+        height: root.height * 1.7;
+        background: @radial-gradient(circle, #2a3b4240 0%, #2a3b4200 60%);
+    }
+    Rectangle {
+        x: root.width * 0.09 - self.width / 2;
+        y: root.height * 0.05 - self.height / 2;
+        width: root.width * 1.1;
+        height: root.height * 1.2;
+        background: @radial-gradient(circle, #1a2c3940 0%, #1a2c3900 65%);
+    }
+}
+
+// The small capitals over a block: tracked out, never shouted.
+component Overline inherits Text {
+    property <float> u: Quiet.u;
+    font-size: 12px * u;
+    font-weight: 650;
+    letter-spacing: 12px * u * 0.21;
+    color: Quiet.label;
+    wrap: no-wrap;
+    vertical-alignment: center;
+}
+
+// The mark, the name, where you are; whether the box is on a network, and
+// the time.
+component QuietBar inherits Rectangle {
+    in property <VitalsModel> vitals;
+    in property <string> crumb;
+    property <float> u: Quiet.u;
+    property <bool> online: vitals.eth-up || vitals.wifi-up;
+
+    HorizontalLayout {
+        x: 100px * u;
+        y: 34px * u;
+        height: 44px * u;
+        spacing: 17px * u;
+        alignment: start;
+
+        VerticalLayout {
+            alignment: center;
+            padding-top: 8px * u;
+            Rectangle {
+                width: 24px * u;
+                height: 24px * u;
+                Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 28;
+                    viewbox-height: 28;
+                    commands: "M4 3.8 L23.5 14 L4 24.2 Z";
+                    fill: transparent;
+                    stroke: #dedad1;
+                    stroke-width: 2.1px * u;
+                    stroke-line-join: round;
+                }
+                Path {
+                    width: 100%;
+                    height: 100%;
+                    viewbox-width: 28;
+                    viewbox-height: 28;
+                    commands: "M4 24.2 L13.2 14 L4 3.8";
+                    fill: transparent;
+                    stroke: #d5b992;
+                    stroke-width: 2.1px * u;
+                    stroke-line-join: round;
+                }
+            }
+        }
+        Text {
+            text: "MediaBox";
+            color: Quiet.ink;
+            font-size: 31px * u;
+            font-weight: 700;
+            letter-spacing: -31px * u * 0.05;
+            vertical-alignment: center;
+        }
+        if crumb != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 1px;
+                height: 17px * u;
+                background: Quiet.hair;
+            }
+        }
+        if crumb != "": Text {
+            text: crumb;
+            color: Quiet.muted;
+            font-size: 15px * u;
+            font-weight: 500;
+            vertical-alignment: center;
+        }
+    }
+
+    HorizontalLayout {
+        x: root.width - 100px * u - self.width;
+        y: 30px * u;
+        width: self.preferred-width;
+        height: 44px * u;
+        spacing: 25px * u;
+
+        HorizontalLayout {
+            spacing: 9px * u;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 7px * u;
+                    height: self.width;
+                    border-radius: self.width / 2;
+                    background: online ? Quiet.good : #c08a6e;
+                }
+            }
+            Text {
+                text: online ? "Bağlı" : "Bağlı değil";
+                color: #bbc4c6;
+                font-size: 14px * u;
+                vertical-alignment: center;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 1px;
+                height: 24px * u;
+                background: Quiet.hair;
+            }
+        }
+        Text {
+            text: vitals.time;
+            color: Quiet.ink;
+            font-size: 27px * u;
+            font-weight: 600;
+            letter-spacing: -27px * u * 0.03;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// The orbits behind the chosen application: the browser's globe, or the
+// application's own mark drawn large inside two rings. Stroked paths in a
+// 650-unit box, the reference's own drawing with its tilt worked into the
+// coordinates (no transform: the GPU draws them as lines and nothing else).
+component Orbits inherits Rectangle {
+    in property <string> mark;
+    in property <bool> globe;
+    in property <int> index;
+    property <float> u: Quiet.u;
+    property <length> line: 1px * max(1, u);
+
+    if globe: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 650;
+        viewbox-height: 650;
+        fill: transparent;
+        stroke: #e6d4bc55;
+        stroke-width: 2px * u;
+        commands: "M524.9 269.4 C554.5 379.9 489 493.4 378.6 522.9 C268.1 552.5 154.6 487 125.1 376.6 C95.5 266.1 161 152.6 271.4 123.1 C381.9 93.5 495.4 159 524.9 269.4 Z";
+    }
+    if globe: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 650;
+        viewbox-height: 650;
+        fill: transparent;
+        stroke: #bbc5bf30;
+        stroke-width: line;
+        commands: "M512.4 272.8 C540.1 376.3 478.7 482.7 375.2 510.4 C271.7 538.1 165.3 476.7 137.6 373.2 C109.9 269.7 171.3 163.3 274.8 135.6 C378.3 107.9 484.7 169.3 512.4 272.8 Z M473.8 283.1 C495.8 365.3 447 449.7 364.9 471.8 C282.7 493.8 198.3 445 176.2 362.9 C154.2 280.7 203 196.3 285.1 174.2 C367.3 152.2 451.7 201 473.8 283.1 Z M524.9 269.4 C546.5 350 474.5 439.3 364.1 468.9 C253.7 498.4 146.6 457.1 125.1 376.6 C103.5 296 175.5 206.7 285.9 177.1 C396.3 147.6 503.4 188.9 524.9 269.4 Z M125.1 376.6 L524.9 269.4 M271.4 123.1 L378.6 522.9";
+    }
+    if globe: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 650;
+        viewbox-height: 650;
+        fill: transparent;
+        stroke: #bdc8c366;
+        stroke-width: line * 1.2;
+        commands: "M433.2 294 C462.8 404.4 438.3 506.9 378.6 522.9 C318.8 539 246.4 462.4 216.8 352 C187.2 241.6 211.7 139.1 271.4 123.1 C331.2 107 403.6 183.6 433.2 294 Z M524.9 269.4 C538.2 319 459.5 383.2 349.1 412.8 C238.6 442.4 138.3 426.2 125.1 376.6 C111.8 327 190.5 262.8 300.9 233.2 C411.4 203.6 511.7 219.8 524.9 269.4 Z";
+    }
+    if globe: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 650;
+        viewbox-height: 650;
+        fill: transparent;
+        stroke: #e0d7c633;
+        stroke-width: line * 1.1;
+        commands: "M372.3 310.3 C401.9 420.7 404.7 515.9 378.6 522.9 C352.4 530 307.3 446.1 277.7 335.7 C248.1 225.3 245.3 130.1 271.4 123.1 C297.6 116 342.7 199.9 372.3 310.3 Z";
+    }
+    if globe: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 650;
+        viewbox-height: 650;
+        fill: transparent;
+        stroke: #bdcbc826;
+        stroke-width: line;
+        commands: "M101 286.7 L500.9 179.6 M149.1 466.4 L549 359.3 M95.1 384.6 L69 391.6 M554.9 261.4 L581 254.4 M263.4 93.1 L256.4 67 M386.6 552.9 L393.6 579 M79 156 L154 156 M495 540 L570 540";
+    }
+    if globe: Rectangle {
+        x: root.width * 321 / 650;
+        y: root.height * 319 / 650;
+        width: root.width * 8 / 650;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: #e2cfb08c;
+    }
+
+    if !globe: Rectangle {
+        x: root.width * 102 / 650;
+        y: root.height * 102 / 650;
+        width: root.width * 446 / 650;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: 1.5px * u;
+        border-color: #b8c4c51f;
+    }
+    if !globe: Rectangle {
+        x: root.width * 145 / 650;
+        y: root.height * 145 / 650;
+        width: root.width * 360 / 650;
+        height: self.width;
+        border-radius: self.width / 2;
+        border-width: line;
+        border-color: #d8c6a914;
+    }
+    if !globe: Path {
+        x: root.width * 165 / 650;
+        y: root.height * 165 / 650;
+        width: root.width * 320 / 650;
+        height: self.width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: mark;
+        fill: transparent;
+        stroke: #c8d0ca8f;
+        stroke-width: 1.3px * u;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+
+    Text {
+        x: root.width * 62 / 650;
+        y: root.height * 114 / 650;
+        text: Quiet.two(index + 1) + " — " + (globe ? "WEB" : "UYGULAMA");
+        color: #899c9d8c;
+        font-size: 12px * u;
+        letter-spacing: 3px * u;
+    }
+    Text {
+        x: root.width * 478 / 650;
+        y: root.height * 558 / 650;
+        text: "MEDIA / " + Quiet.two(index + 1);
+        color: #899c9d8c;
+        font-size: 12px * u;
+        letter-spacing: 3px * u;
+    }
+}
+
+// A key drawn as a keycap, holding a stroked mark rather than a glyph the
+// typeface may not have.
+component KeyCap inherits Rectangle {
+    in property <string> mark;
+    property <float> u: Quiet.u;
+    width: 29px * u;
+    height: 27px * u;
+    border-radius: 5px * u;
+    border-width: 1px;
+    border-color: #63717b66;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px * u;
+        height: 13px * u;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: mark;
+        fill: transparent;
+        stroke: #c1cbc8;
+        stroke-width: 1.4px * u;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+}
+
+// One reading along the foot.
+component FootItem inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> value;
+    property <float> u: Quiet.u;
+    spacing: 12px * u;
+    if label != "": Text {
+        text: label;
+        color: #687783;
+        font-size: 12px * u;
+        font-weight: 600;
+        letter-spacing: 12px * u * 0.14;
+        vertical-alignment: center;
+    }
+    Text {
+        text: value;
+        color: #c5cbd0;
+        font-size: 15px * u;
+        font-weight: 530;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+}
+
+// The home screen, quietly: the applications down the left, the chosen one
+// named large in the middle, and how the box is doing along the foot.
+//
+// Up and Down (or Left and Right) walk the same list the classic launcher's
+// row is (src/main.rs, `act_on_home`); Ok opens it; a pointer lights and
+// takes a row through the same "home" zone.
+export component QuietHome inherits Rectangle {
+    in property <[AppTile]> apps;
+    in property <VitalsModel> vitals;
+    in property <int> focus-col;
+
+    property <float> u: Quiet.u;
+    property <int> count: apps.length;
+    property <AppTile> chosen: count > 0 ? apps[min(max(focus-col, 0), count - 1)] : { name: "", ready: true };
+
+    property <length> list-x: 123px * u;
+    property <length> list-w: 490px * u;
+    property <length> list-y: 268px * u;
+    // A launcher that grew past what the column holds closes its rows up
+    // rather than running into the foot.
+    property <length> pitch: min(83px * u, (900px * u - list-y) / max(1, count));
+    property <length> row-h: pitch - 7px * u;
+
+    property <length> spot-x: 739px * u;
+    // Up to where the orbits begin (their outer ring, 1303 design px).
+    property <length> spot-w: 540px * u;
+
+    clip: true;
+
+    QuietGround {
+        width: 100%;
+        height: 100%;
+    }
+
+    Orbits {
+        x: 1201px * u;
+        y: 150px * u;
+        width: 650px * u;
+        height: 650px * u;
+        opacity: 0.88;
+        globe: chosen.id == "browser";
+        mark: chosen.mark;
+        index: focus-col;
+    }
+
+    QuietBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 104px * u;
+        vitals: root.vitals;
+    }
+
+    // ---- the applications
+    Overline {
+        x: list-x;
+        y: 227px * u;
+        height: 15px * u;
+        text: "UYGULAMALAR";
+    }
+    Text {
+        x: list-x + list-w - self.width;
+        y: 227px * u;
+        height: 15px * u;
+        width: self.preferred-width;
+        text: Quiet.two(min(focus-col + 1, count)) + " / " + Quiet.two(count);
+        color: #6f808c;
+        font-size: 12px * u;
+        letter-spacing: 12px * u * 0.15;
+        vertical-alignment: center;
+    }
+
+    // The one chosen: a warm wash and a short bar on its leading edge,
+    // sliding to the row the remote is on rather than jumping there.
+    if count > 0: Rectangle {
+        x: list-x;
+        y: list-y + max(0, min(focus-col, count - 1)) * pitch;
+        width: list-w;
+        height: row-h;
+        border-radius: 9px * u;
+        background: @linear-gradient(90deg, #dfc9a523 0%, #dfc9a509 100%);
+        animate y { duration: Quiet.t-move; easing: Quiet.ease; }
+
+        Rectangle {
+            x: 0;
+            y: (parent.height - self.height) / 2;
+            width: 3px * u;
+            height: parent.height - 34px * u;
+            border-radius: self.width / 2;
+            background: Quiet.warm;
+        }
+    }
+
+    for tile[i] in apps: Rectangle {
+        property <bool> here: i == focus-col;
+        x: list-x;
+        y: list-y + i * pitch;
+        width: list-w;
+        height: row-h;
+        border-radius: 9px * u;
+        background: target.lit && !here ? Quiet.hover : transparent;
+        opacity: tile.ready ? 1.0 : 0.5;
+        animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+
+        Path {
+            x: 19px * u;
+            y: (parent.height - self.height) / 2;
+            width: 26px * u;
+            height: 26px * u;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: tile.mark;
+            fill: transparent;
+            stroke: here ? Quiet.warm-hi : Quiet.app;
+            stroke-width: 1.45px * u;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+        }
+        Text {
+            x: 66px * u;
+            width: parent.width - self.x - 60px * u;
+            height: parent.height;
+            text: tile.name;
+            color: here ? Quiet.warm-hi : Quiet.app;
+            font-size: 22px * u;
+            font-weight: 520;
+            letter-spacing: -22px * u * 0.025;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+            animate color { duration: Theme.t-focus; easing: Quiet.ease; }
+        }
+        Text {
+            x: parent.width - 19px * u - self.width;
+            width: self.preferred-width;
+            height: parent.height;
+            text: Quiet.two(i + 1);
+            color: here ? Quiet.warm-dim : Quiet.faint;
+            font-size: 11px * u;
+            letter-spacing: 11px * u * 0.08;
+            vertical-alignment: center;
+        }
+
+        target := PointerTarget {
+            zone: "home";
+            index: i;
+            veil: false;
+        }
+    }
+
+    // ---- the one chosen, named
+    HorizontalLayout {
+        x: spot-x;
+        y: 294px * u;
+        height: 15px * u;
+        spacing: 14px * u;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 34px * u;
+                height: 1px * max(1, u);
+                background: Quiet.warm;
+            }
+        }
+        Overline {
+            text: Quiet.two(min(focus-col + 1, count)) + " / " + Quiet.two(count) + "  —  SEÇİLİ UYGULAMA";
+            color: Quiet.warm;
+        }
+    }
+
+    // Set as large as the reference sets it, and smaller only for a name
+    // that would otherwise run into the orbits.
+    measure := Text {
+        visible: false;
+        text: chosen.name;
+        font-size: 108px * u;
+        font-weight: 560;
+        letter-spacing: -108px * u * 0.06;
+    }
+    property <float> fit: min(1, spot-w / max(1px, measure.preferred-width));
+    Text {
+        x: spot-x - 4px * u;
+        y: 330px * u;
+        width: spot-w + 200px * u;
+        height: 121px * u;
+        text: chosen.name;
+        color: Quiet.ink;
+        font-size: 108px * u * fit;
+        font-weight: 560;
+        letter-spacing: -108px * u * fit * 0.06;
+        vertical-alignment: center;
+        wrap: no-wrap;
+    }
+    Text {
+        x: spot-x;
+        y: 467px * u;
+        width: 400px * u;
+        text: chosen.about;
+        color: #a5b1ba;
+        font-size: 21px * u;
+        letter-spacing: -21px * u * 0.012;
+        wrap: word-wrap;
+    }
+    if chosen.note != "": Text {
+        x: spot-x;
+        y: 467px * u + (chosen.about == "" ? 0px : 82px * u);
+        text: chosen.note;
+        color: Quiet.warm-dim;
+        font-size: 15px * u;
+        font-weight: 600;
+    }
+
+    // ---- what the keys do here
+    HorizontalLayout {
+        x: spot-x;
+        y: 886px * u;
+        height: 27px * u;
+        spacing: 13px * u;
+        alignment: start;
+        HorizontalLayout {
+            spacing: 5px * u;
+            KeyCap { mark: "M12 19V5 M6 11l6-6 6 6"; }
+            KeyCap { mark: "M12 5v14 M6 13l6 6 6-6"; }
+        }
+        Text {
+            text: "Uygulama seç";
+            color: #aeb9bf;
+            font-size: 13px * u;
+            font-weight: 550;
+            vertical-alignment: center;
+        }
+        Rectangle { width: 6px * u; }
+        KeyCap { mark: "M19 5v7a3 3 0 0 1-3 3H6 M10 11l-4 4 4 4"; }
+        Text {
+            text: chosen.id == "settings" ? "Ayarlar'a gir" : "Uygulamayı aç";
+            color: #82929d;
+            font-size: 13px * u;
+            vertical-alignment: center;
+        }
+    }
+
+    // ---- the box
+    Rectangle {
+        x: 121px * u;
+        y: 940px * u;
+        width: root.width - 242px * u;
+        height: 1px;
+        background: Quiet.hair;
+    }
+    HorizontalLayout {
+        x: 121px * u;
+        y: 941px * u;
+        width: root.width - 242px * u;
+        height: 79px * u;
+        spacing: 20px * u;
+        alignment: space-between;
+        FootItem { label: "İŞLEMCİ"; value: vitals.cpu-text; }
+        FootItem { label: "BELLEK"; value: vitals.memory-text; }
+        FootItem { label: "DEPOLAMA"; value: vitals.storage-text; }
+        FootItem { label: "AĞ"; value: vitals.network; max-width: 300px * u; }
+        FootItem { label: "SICAKLIK"; value: vitals.temperature; }
+        HorizontalLayout {
+            spacing: 33px * u;
+            VerticalLayout {
+                alignment: center;
+                Rectangle { width: 1px; height: 24px * u; background: Quiet.hair; }
+            }
+            FootItem { label: ""; value: vitals.machine; }
+        }
+    }
+}
+
+// The system settings, quietly: the same categories, cards, readings, pages,
+// editors, lists and questions as ui/settings.slint, from the same
+// properties, under one heading and down one column.
+//
+// The rows are placed by arithmetic from Rust's counts (`SettingRow`'s
+// n-header, n-reading, n-card), as the classic face places them, so where
+// the focused row is -- and how far the list scrolls -- is known without
+// measuring. The editors are the classic ones, given this face's column;
+// their own lists and questions cover the panel as they always do.
+export component QuietSettings inherits Rectangle {
+    in property <[SettingNav]> sections;
+    in property <int> section;
+    in property <bool> on-sections;
+    in property <[SettingRow]> rows;
+    in property <int> row-index;
+    in property <string> page;
+    in property <string> page-icon;
+    in property <string> title;
+    in property <string> blurb;
+    in property <bool> cooling;
+    in property <CoolingView> cooling-view;
+    in property <bool> output;
+    in property <OutputView> output-view;
+    in property <bool> ethernet;
+    in property <EthernetView> ethernet-view;
+    in property <bool> audio;
+    in property <AudioView> audio-view;
+    in property <VitalsModel> vitals;
+    in property <bool> choice-open;
+    in property <string> choice-title;
+    in property <[ChoiceItem]> choice;
+    in property <int> choice-focus;
+    in property <string> choice-note;
+
+    property <float> u: Quiet.u;
+    property <bool> editor: cooling || output || ethernet || audio;
+    property <string> section-label: sections.length > section && section >= 0 ? sections[section].label : "";
+
+    property <length> left: 121px * u;
+    property <length> nav-w: 413px * u;
+    property <length> content-x: 708px * u;
+    property <length> content-w: min(868px * u, root.width - content-x - 121px * u);
+    // An editor needs the height more than the page needs its large title.
+    property <length> title-size: editor ? 46px * u : 68px * u;
+    property <length> list-top: editor ? 418px * u : 462px * u;
+    property <length> bottom: root.height - 56px * u;
+
+    property <length> card-h: 74px * u;
+    property <length> reading-h: 62px * u;
+    property <length> header-h: 58px * u;
+
+    clip: true;
+
+    QuietGround {
+        width: 100%;
+        height: 100%;
+    }
+
+    QuietBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 104px * u;
+        vitals: root.vitals;
+        crumb: page == "" ? "Ayarlar" : "Ayarlar  /  " + section-label;
+    }
+
+    // ---- the way back, and where this is
+    Rectangle {
+        x: left;
+        y: 172px * u;
+        width: 34px * u;
+        height: 34px * u;
+        border-radius: 7px * u;
+        background: back.lit ? #ffffff1d : #ffffff09;
+        animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: "back";
+            size: 17px * u;
+            ink: #d8d4cb;
+        }
+        // A click is the remote's Back: a list closes, a page goes to its
+        // category, the cards to the column, the column to the home screen.
+        back := PointerTarget {
+            zone: "back";
+            index: 0;
+            veil: false;
+        }
+    }
+    Overline {
+        x: left + 47px * u;
+        y: 172px * u;
+        height: 34px * u;
+        text: page == "" ? "SİSTEM AYARLARI  /  KATEGORİLER" : "SİSTEM AYARLARI  /  GERİ DÖN";
+        color: #99a5aa;
+    }
+
+    // ---- the categories
+    Overline {
+        x: left;
+        y: 259px * u;
+        height: 15px * u;
+        text: "KATEGORİLER";
+    }
+    Rectangle {
+        x: 590px * u;
+        y: 259px * u;
+        width: 1px;
+        height: 691px * u;
+        background: Quiet.hair;
+    }
+
+    for item[i] in sections: Rectangle {
+        property <bool> here: i == section;
+        property <bool> lit: here && on-sections && !choice-open;
+        x: left;
+        y: 286px * u + i * 55px * u;
+        width: nav-w;
+        height: 51px * u;
+
+        // The wash fits the name, as the reference draws it; the target is
+        // the whole width, so the hand does not have to find the word.
+        Rectangle {
+            x: 0;
+            y: 0;
+            height: parent.height;
+            width: min(parent.width, line.preferred-width + 30px * u);
+            border-radius: 5px * u;
+            background: lit ? #dfc9a52a : here ? Quiet.current : (cat.lit ? Quiet.hover : transparent);
+            animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+        }
+        if here: Rectangle {
+            x: 0;
+            y: 15px * u;
+            width: 3px * u;
+            height: parent.height - 30px * u;
+            border-radius: self.width / 2;
+            background: Quiet.warm;
+        }
+        line := HorizontalLayout {
+            x: 15px * u;
+            y: 0;
+            height: parent.height;
+            width: self.preferred-width;
+            spacing: 15px * u;
+            VerticalLayout {
+                alignment: center;
+                Icon {
+                    name: item.icon;
+                    size: 21px * u;
+                    ink: lit ? Quiet.warm-hi : here ? #dccfb9 : #8f9ba5;
+                }
+            }
+            Text {
+                text: item.label;
+                color: lit ? Quiet.warm-hi : here ? #e6dccb : (cat.lit ? #e3e6e6 : #8f9ba5);
+                font-size: 19px * u;
+                font-weight: lit ? 560 : 480;
+                vertical-alignment: center;
+                wrap: no-wrap;
+                animate color { duration: Theme.t-focus; easing: Quiet.ease; }
+            }
+        }
+        cat := PointerTarget {
+            enabled: page == "";
+            zone: "settings-sections";
+            index: i;
+            veil: false;
+        }
+    }
+
+    Rectangle {
+        x: left;
+        y: 854px * u;
+        width: 411px * u;
+        height: 1px;
+        background: Quiet.hair;
+    }
+    VerticalLayout {
+        x: left;
+        y: 882px * u;
+        width: nav-w;
+        height: 70px * u;
+        spacing: 6px * u;
+        alignment: start;
+        Overline { text: "CİHAZ"; }
+        Text {
+            text: vitals.machine;
+            color: #e3e1dc;
+            font-size: 17px * u;
+            font-weight: 500;
+            overflow: elide;
+        }
+        Text {
+            text: "MediaBox";
+            color: #74848b;
+            font-size: 13px * u;
+        }
+    }
+
+    // ---- the chosen category, or the page a card opened
+    Overline {
+        x: content-x;
+        y: 259px * u;
+        height: 15px * u;
+        text: page == "" ? "MEDIABOX  /  AYARLAR" : "AYARLAR  /  SAYFA";
+        color: Quiet.warm;
+    }
+    Text {
+        x: content-x - 2px * u;
+        y: 286px * u;
+        width: content-w;
+        height: title-size * 1.15;
+        text: root.title;
+        color: Quiet.ink;
+        font-size: title-size;
+        font-weight: 560;
+        letter-spacing: -title-size * 0.05;
+        vertical-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    Text {
+        x: content-x;
+        y: 286px * u + title-size * 1.15 + 8px * u;
+        width: content-w;
+        text: root.blurb;
+        color: #91a0aa;
+        font-size: 17px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+
+    if cooling: CoolingPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: cooling-view;
+        active-pane: !on-sections;
+        titled: false;
+    }
+    if ethernet: EthernetPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: ethernet-view;
+        active-pane: !on-sections;
+    }
+    if audio: AudioPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: audio-view;
+        active-pane: !on-sections;
+    }
+    if output: OutputPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: output-view;
+        active-pane: !on-sections;
+    }
+
+    // The list: hairlines between names and values. It scrolls only when the
+    // focused row would otherwise fall off the bottom, and a pointer's hand
+    // and wheel move it through the same surface the classic list is.
+    if !editor: Rectangle {
+        property <length> focus-y: rows.length == 0 ? 0px : y-of(rows[row-index]);
+        property <length> focus-h: rows.length == 0 ? 0px : h-of(rows[row-index]);
+        property <length> content-h: rows.length == 0 ? 0px : y-of(rows[rows.length - 1]) + h-of(rows[rows.length - 1]);
+        pan := PanState {
+            surface: "settings-rows";
+            remote: max(0px, focus-y + focus-h + 8px * u - parent.height);
+            limit: max(0px, content-h + 8px * u - parent.height);
+            remote-duration: Theme.t-row;
+        }
+
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        clip: true;
+
+        pure function y-of(r: SettingRow) -> length {
+            return r.n-header * header-h + r.n-reading * reading-h + r.n-card * card-h;
+        }
+        pure function h-of(r: SettingRow) -> length {
+            return r.kind == "header" ? header-h : r.kind == "reading" ? reading-h : card-h;
+        }
+
+        PointerPanArea { surface: "settings-rows"; }
+
+        Rectangle {
+            x: 0;
+            y: -pan.value;
+            width: parent.width;
+            animate y { duration: pan.duration; easing: Quiet.ease; }
+
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Quiet.hair;
+                visible: rows.length > 0 && rows[0].kind != "header";
+            }
+
+            for entry[i] in rows: Rectangle {
+                property <bool> card: entry.kind == "link" || entry.kind == "action";
+                property <bool> focused: card && entry.enabled && !on-sections && !choice-open && i == row-index;
+                property <color> name-ink: !entry.enabled ? Quiet.dim : focused ? Quiet.warm-hi : (card ? #e2e5e7 : #b9c2c8);
+                y: y-of(entry);
+                width: parent.width;
+                height: h-of(entry);
+
+                // A heading inside a category: a quiet label over the rows it
+                // names, in the names' own case.
+                if entry.kind == "header": Text {
+                    x: 0;
+                    y: parent.height - 17px * u - 12px * u;
+                    height: 17px * u;
+                    text: entry.label;
+                    color: #80919a;
+                    font-size: 14px * u;
+                    font-weight: 600;
+                    letter-spacing: 14px * u * 0.04;
+                    vertical-alignment: center;
+                }
+
+                if entry.kind != "header": Rectangle {
+                    background: focused ? #dfc9a51c : (row-target.lit ? #dae3e50c : transparent);
+                    animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+                }
+                if focused: Rectangle {
+                    x: 0;
+                    y: 20px * u;
+                    width: 3px * u;
+                    height: parent.height - 40px * u;
+                    border-radius: self.width / 2;
+                    background: Quiet.warm;
+                }
+                if entry.kind != "header": Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Quiet.hair;
+                }
+
+                if entry.kind != "header": HorizontalLayout {
+                    padding-left: focused ? 18px * u : 0px;
+                    padding-right: 6px * u;
+                    spacing: 20px * u;
+                    animate padding-left { duration: Theme.t-focus; easing: Quiet.ease; }
+
+                    Text {
+                        text: entry.label;
+                        color: name-ink;
+                        font-size: card ? 20px * u : 18px * u;
+                        font-weight: card ? 520 : 460;
+                        letter-spacing: -20px * u * 0.02;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        min-width: 0px;
+                    }
+                    if entry.toggle >= 0: VerticalLayout {
+                        alignment: center;
+                        Rectangle {
+                            width: 43px * u;
+                            height: 23px * u;
+                            border-radius: self.height / 2;
+                            border-width: 1px;
+                            border-color: entry.toggle == 1 ? #a5baaa : #5c706d88;
+                            background: entry.toggle == 1 ? #9baea0 : #65757d4d;
+                            opacity: entry.enabled ? 1 : 0.45;
+                            animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+                            Rectangle {
+                                x: entry.toggle == 1 ? parent.width - self.width - 4px * u : 4px * u;
+                                y: (parent.height - self.height) / 2;
+                                width: 15px * u;
+                                height: self.width;
+                                border-radius: self.width / 2;
+                                background: entry.toggle == 1 ? #18231c : #cad5d1;
+                                animate x { duration: Theme.t-focus; easing: Quiet.ease; }
+                            }
+                        }
+                    }
+                    if entry.value != "": Text {
+                        text: entry.value;
+                        color: !entry.enabled ? Quiet.dim : Quiet.tone(entry.tone);
+                        font-size: 16px * u;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        max-width: parent.width * 0.5;
+                    }
+                    if entry.kind == "link": VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            name: "chevron";
+                            size: 15px * u;
+                            ink: focused ? Quiet.warm : #71838a;
+                        }
+                    }
+                }
+
+                row-target := PointerTarget {
+                    enabled: card && entry.enabled;
+                    zone: card && entry.enabled ? "settings-rows" : "";
+                    index: i;
+                    veil: false;
+                }
+            }
+        }
+    }
+
+    // A short list opened from a card, over everything: the same list the
+    // classic face opens, as the editors' own lists are.
+    if choice-open: ChoiceSheet {
+        width: 100%;
+        height: 100%;
+        panel-w: Metrics.dialog-w * 1.3;
+        title: choice-title;
+        items: choice;
+        focus-at: choice-focus;
+        note: choice-note;
+        pointer-zone: "settings-choice";
+    }
+}

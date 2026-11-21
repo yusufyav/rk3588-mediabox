@@ -19,6 +19,7 @@ mod hit;
 mod images;
 mod input;
 mod keyboard;
+mod layout;
 mod metrics;
 mod model;
 mod monitor;
@@ -125,6 +126,15 @@ fn prefs_file() -> std::path::PathBuf {
     match std::env::var_os("MEDIABOX_TV_PREFERENCES") {
         Some(path) => path.into(),
         None => std::path::Path::new(&state_file()).with_file_name("media-preferences.json"),
+    }
+}
+
+/// Which face the home screen and the settings wear (`layout.rs`), beside
+/// the session file and apart from any application's own preferences.
+fn interface_file() -> std::path::PathBuf {
+    match std::env::var_os("MEDIABOX_TV_INTERFACE") {
+        Some(path) => path.into(),
+        None => std::path::Path::new(&state_file()).with_file_name("interface-preferences.json"),
     }
 }
 
@@ -254,6 +264,9 @@ struct App {
     /// What that screen keeps for itself: the player a source opens in,
     /// where a film left part-way starts, how the subtitle looks.
     prefs: prefs::MediaPreferences,
+    /// The face of the home screen and the settings, and where it is kept.
+    layout: layout::Layout,
+    interface: std::path::PathBuf,
     account: screens::account::Account,
     wifi: screens::wireless::Wifi,
     bt: screens::wireless::Bluetooth,
@@ -731,8 +744,14 @@ impl App {
 
     fn act_on_home(&mut self, intent: Intent) {
         match intent {
-            Intent::Move(dx, _) => {
-                if self.home.step(dx as isize) {
+            // The classic launcher is a row; Quiet OS's is a column, and
+            // either arrow along it walks the same list.
+            Intent::Move(dx, dy) => {
+                let along = match self.layout {
+                    layout::Layout::Classic => dx,
+                    layout::Layout::Quiet => if dy != 0 { dy } else { dx },
+                };
+                if self.home.step(along as isize) {
                     self.paint();
                 }
             }
@@ -6290,6 +6309,21 @@ impl App {
                     self.paint();
                 }
             }
+            Action::ChooseLayout => {
+                if self.settings.open_layout_choice() {
+                    self.paint();
+                }
+            }
+            Action::SetLayout(layout) => {
+                // The same screen, the same row, the other face: nothing is
+                // restarted and no focus moves. Kept before it is drawn, so a
+                // restart after this frame comes back to it.
+                self.layout = layout;
+                self.settings.set_layout(layout);
+                layout::write(self.interface.clone(), layout);
+                self.clear_notice();
+                self.paint();
+            }
             Action::ChooseCecTarget => {
                 if self.settings.open_cec_choice() {
                     self.paint();
@@ -6857,6 +6891,7 @@ impl App {
             return;
         }
         window.set_screen(route.name().into());
+        window.set_layout(self.layout.name().into());
 
         self.paint_sheet(&window);
 
@@ -8576,6 +8611,7 @@ struct AppFiles {
     cache: String,
     state: String,
     prefs: std::path::PathBuf,
+    interface: std::path::PathBuf,
     live_kept: LiveKept,
 }
 
@@ -8585,6 +8621,7 @@ impl AppFiles {
             cache: cache_dir(),
             state: state_file(),
             prefs: prefs_file(),
+            interface: interface_file(),
             live_kept: read_live_kept(),
         }
     }
@@ -8593,6 +8630,9 @@ impl AppFiles {
 impl App {
     /// The interface's state, on `window`, before anything is shown.
     fn new(window: &MediaBoxWindow, started: Instant, trace_input: bool, files: AppFiles) -> Self {
+        let layout = layout::read(&files.interface);
+        let mut settings = screens::settings::Settings::new();
+        settings.set_layout(layout);
         App {
             window: window.as_weak(),
             stack: route::Stack::new(),
@@ -8615,9 +8655,11 @@ impl App {
             search: screens::search::Search::new(),
             discover: screens::discover::Discover::new(),
             library: screens::library::Library::new(),
-            settings: screens::settings::Settings::new(),
+            settings,
             media_settings: screens::media_settings::MediaSettings::new(),
             prefs: prefs::read(&files.prefs),
+            layout,
+            interface: files.interface.clone(),
             account: screens::account::Account::new(),
             wifi: screens::wireless::Wifi::new(),
             bt: screens::wireless::Bluetooth::new(),
