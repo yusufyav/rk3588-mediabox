@@ -1,7 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
 import { AppTile, VitalsModel, SettingRow } from "components.slint";
-import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
-import { SettingNav, Icon, ChoiceItem, ChoiceSheet } from "kit.slint";
+import { PointerTarget, PointerPanArea, PanState, PointerShield, PointerSwallow, PointerClose } from "pointer.slint";
+import { SettingNav, Icon, ChoiceItem } from "kit.slint";
 import { CoolingPane, CoolingView } from "cooling.slint";
 import { OutputPane, OutputView } from "output.slint";
 import { EthernetPane, EthernetView } from "ethernet.slint";
@@ -709,6 +709,232 @@ export component QuietHome inherits Rectangle {
     }
 }
 
+// The settings' short list (`ChoiceSheet` on the classic face), as Quiet OS
+// draws a list: hairlines between names, the focus a warm wash and a short
+// bar on its leading edge, the one in effect a warm dot. What it shows and
+// what a press does are the classic sheet's: the same `ChoiceItem`s, the
+// same zone ("settings-choice") and indices, the same ground (Back), panel
+// (nothing) and close mark, the same surface for a hand and a wheel.
+export component QuietChoice inherits Rectangle {
+    in property <string> title;
+    in property <[ChoiceItem]> items;
+    in property <int> focus-at;
+    in property <string> note;
+
+    property <float> u: Quiet.u;
+    property <length> pitch: 68px * u;
+    property <int> shown: min(items.length, 7);
+    property <length> viewport: shown * pitch;
+    property <length> total: items.length * pitch;
+    property <length> pad: 44px * u;
+    property <length> head-h: 118px * u;
+    property <length> note-h: note == "" ? 0px : 64px * u;
+
+    background: #05080bd8;
+
+    PointerShield { }
+
+    panel := Rectangle {
+        width: min(760px * u, root.width - 160px * u);
+        height: min(head-h + viewport + note-h + pad, root.height - 120px * u);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: 18px * u;
+        background: @linear-gradient(180deg, #161d24 0%, #10161c 100%);
+        border-width: 1px;
+        border-color: Quiet.hair;
+        clip: true;
+
+        PointerSwallow { }
+
+        HorizontalLayout {
+            x: pad;
+            y: 38px * u;
+            height: 15px * u;
+            spacing: 14px * u;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 34px * u;
+                    height: 1px * max(1, u);
+                    background: Quiet.warm;
+                }
+            }
+            Overline {
+                text: "SEÇİN";
+                color: Quiet.warm;
+            }
+        }
+        Text {
+            x: pad;
+            y: 60px * u;
+            width: parent.width - pad * 2 - 60px * u;
+            height: 40px * u;
+            text: root.title;
+            color: Quiet.ink;
+            font-size: 32px * u;
+            font-weight: 560;
+            letter-spacing: -32px * u * 0.03;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        PointerClose {
+            x: parent.width - self.width - pad * 0.5;
+            y: pad * 0.5;
+        }
+
+        list := Rectangle {
+            x: pad;
+            y: head-h;
+            width: parent.width - pad * 2;
+            height: min(viewport, parent.height - head-h - note-h - pad);
+            clip: true;
+
+            pan := PanState {
+                surface: "settings-choice";
+                remote: clamp(focus-at * pitch - (list.height - pitch) / 2, 0px, self.limit);
+                limit: max(0px, total - list.height);
+                remote-duration: Quiet.t-move;
+            }
+
+            PointerPanArea { surface: "settings-choice"; }
+
+            Rectangle {
+                x: 0;
+                y: -pan.value;
+                width: parent.width;
+                height: max(total, parent.height);
+                animate y { duration: pan.duration; easing: Quiet.ease; }
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: 1px;
+                    background: Quiet.hair;
+                }
+
+                for c[i] in items: Rectangle {
+                    x: 0;
+                    y: i * pitch;
+                    width: parent.width;
+                    height: pitch;
+                    opacity: c.enabled ? 1.0 : 0.45;
+
+                    Rectangle {
+                        x: 0;
+                        y: 4px * u;
+                        width: parent.width;
+                        height: parent.height - 8px * u;
+                        border-radius: 9px * u;
+                        background: c.focused ? @linear-gradient(90deg, #dfc9a526 0%, #dfc9a50a 100%)
+                                  : target.lit ? Quiet.hover : transparent;
+                        animate background { duration: Theme.t-focus; easing: Quiet.ease; }
+
+                        Rectangle {
+                            x: 0;
+                            y: (parent.height - self.height) / 2;
+                            width: 3px * u;
+                            height: parent.height - 28px * u;
+                            border-radius: self.width / 2;
+                            background: Quiet.warm;
+                            opacity: c.focused ? 1 : 0;
+                            animate opacity { duration: Theme.t-focus; }
+                        }
+                    }
+
+                    // The one in effect.
+                    Rectangle {
+                        x: 22px * u;
+                        y: (parent.height - self.height) / 2;
+                        width: 14px * u;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        border-width: 1.5px * u;
+                        border-color: c.selected ? Quiet.warm : #ffffff30;
+                        Rectangle {
+                            width: parent.width * 0.45;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            background: c.selected ? Quiet.warm : transparent;
+                        }
+                    }
+
+                    VerticalLayout {
+                        x: 56px * u;
+                        width: parent.width - self.x - 150px * u;
+                        height: parent.height;
+                        alignment: center;
+                        spacing: 2px * u;
+                        Text {
+                            text: c.title;
+                            color: c.focused ? Quiet.warm-hi : (c.selected ? Quiet.ink : Quiet.app);
+                            font-size: 21px * u;
+                            font-weight: c.focused || c.selected ? 560 : 500;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                        if c.sub != "": Text {
+                            text: c.sub;
+                            color: Quiet.dim;
+                            font-size: 14px * u;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        x: parent.width - self.width - 20px * u;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        spacing: 14px * u;
+                        if c.now: Overline {
+                            text: "ŞU AN";
+                            color: Quiet.tone("good");
+                        }
+                        if c.badge != "": Overline {
+                            text: c.badge;
+                            color: Quiet.tone(c.badge-tone);
+                        }
+                    }
+
+                    Rectangle {
+                        x: 0;
+                        y: parent.height - 1px;
+                        width: parent.width;
+                        height: 1px;
+                        background: Quiet.hair;
+                    }
+
+                    // Not while it cannot be pressed: hover, focus and a click
+                    // are refused as the remote's are.
+                    target := PointerTarget {
+                        enabled: c.enabled;
+                        zone: c.enabled ? "settings-choice" : "";
+                        index: i;
+                        veil: false;
+                    }
+                }
+            }
+        }
+
+        if note != "": Text {
+            x: pad;
+            y: list.y + list.height + 18px * u;
+            width: parent.width - pad * 2;
+            height: note-h - 18px * u;
+            text: root.note;
+            color: Quiet.dim;
+            font-size: 15px * u;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+}
+
 // The system settings, quietly: the same categories, cards, readings, pages,
 // editors, lists and questions as ui/settings.slint, from the same
 // properties, under one heading and down one column.
@@ -1132,16 +1358,15 @@ export component QuietSettings inherits Rectangle {
         }
     }
 
-    // A short list opened from a card, over everything: the same list the
-    // classic face opens, as the editors' own lists are.
-    if choice-open: ChoiceSheet {
+    // A short list opened from a card, over everything, in this face's own
+    // hand: the same items, focus and note Rust gives the classic sheet, its
+    // rows under the same zone and indices.
+    if choice-open: QuietChoice {
         width: 100%;
         height: 100%;
-        panel-w: Metrics.dialog-w * 1.3;
         title: choice-title;
         items: choice;
         focus-at: choice-focus;
         note: choice-note;
-        pointer-zone: "settings-choice";
     }
 }
