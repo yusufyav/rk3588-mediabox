@@ -151,6 +151,9 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         performance_note: "—".into(),
         temperature: "—".into(),
         storage_text: "—".into(),
+        storage_free: "—".into(),
+        storage_low: false,
+        temperature_warm: false,
         storage_fraction: 0.0,
         network: "Ağ yok".into(),
         // Replaced below from the machine's own device tree. This is what a
@@ -201,14 +204,29 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         model.memory_text = format!("%{:.0}", fraction * 100.0).into();
     }
 
+    // The SoC's own zone, as the fan editor reads it (mediaboxd-rs fan.rs,
+    // `soc_temperature`). Not the hottest zone: on the Plus that is the Wi-Fi
+    // card (`iwlwifi_1`, a steady 55 °C), which says nothing about the box.
+    // A board without "soc-thermal" gets its hottest SoC zone ("*-thermal").
     let hottest = root
         .get("temperatures")
         .and_then(Value::as_array)
-        .map(|entries| {
+        .and_then(|entries| {
+            let named = |entry: &&Value| {
+                entry.get("name").and_then(Value::as_str).unwrap_or_default().to_string()
+            };
+            let celsius = |entry: &Value| entry.get("celsius").and_then(Value::as_f64);
             entries
                 .iter()
-                .filter_map(|entry| entry.get("celsius").and_then(Value::as_f64))
-                .fold(f64::NEG_INFINITY, f64::max)
+                .find(|entry| named(entry) == "soc-thermal")
+                .and_then(celsius)
+                .or_else(|| {
+                    entries
+                        .iter()
+                        .filter(|entry| named(entry).ends_with("-thermal"))
+                        .filter_map(celsius)
+                        .reduce(f64::max)
+                })
         })
         .filter(|value| value.is_finite());
 
@@ -220,6 +238,10 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
         .unwrap_or_else(|| "—".into());
     model.performance_note = format!("{used}  ·  {heat}").into();
     model.temperature = heat.into();
+    // The SoC's first passive trip point on the Plus (thermal_zone0,
+    // `trip_point_0_temp` = 75000, measured 2026-11-21): where the kernel
+    // starts to slow it down, and the cooling editor's "Kısma sınırı".
+    model.temperature_warm = hottest.is_some_and(|c| c >= 75.0);
 
     if let Some(volume) = root
         .get("storage")
@@ -232,6 +254,9 @@ pub fn read(answer: Option<&Value>) -> VitalsModel {
             if total > 0.0 {
                 model.storage_fraction = (used / total) as f32;
                 model.storage_text = format!("{} / {}", human_size(used), human_size(total)).into();
+                model.storage_free = human_size((total - used).max(0.0)).into();
+                // Less than a tenth left: worth a word on the home screen.
+                model.storage_low = (total - used) / total < 0.10;
             }
         }
     }

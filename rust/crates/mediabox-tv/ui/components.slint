@@ -125,9 +125,15 @@ export struct VitalsModel {
     memory-arc: string,
     memory-text: string,
     performance-note: string,
-    // The hottest sensor, as "56 °C" or "—": Quiet OS's footer.
+    // The SoC's temperature, as "45 °C" or "—": Quiet OS's footer.
     temperature: string,
     storage-text: string,
+    // What is left on the system volume, as "51.1 GB": Quiet OS's footer.
+    storage-free: string,
+    // Under a tenth of the volume left, and the SoC at its first passive trip
+    // point (75 °C): the two things Quiet OS's home says in the warning tone.
+    storage-low: bool,
+    temperature-warm: bool,
     storage-fraction: float,
     network: string,
     machine: string,
