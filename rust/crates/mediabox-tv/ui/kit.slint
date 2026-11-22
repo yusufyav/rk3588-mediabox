@@ -47,10 +47,12 @@ export component FocusRing inherits Rectangle {
 
     background: transparent;
     border-radius: radius;
-    border-width: on ? Metrics.focus-w : 0px;
-    border-color: Theme.focus;
+    // Quiet OS: no ring and no glow. The surface under it lifts and warms
+    // (`Theme.s-card-hi`); this only draws its edge, faintly.
+    border-width: on ? (Theme.quiet ? 1px : Metrics.focus-w) : 0px;
+    border-color: Theme.quiet ? Theme.focus.with-alpha(0.32) : Theme.focus;
 
-    if on: Rectangle {
+    if on && !Theme.quiet: Rectangle {
         x: -g;
         y: -g;
         width: parent.width + g * 2;
@@ -60,7 +62,7 @@ export component FocusRing inherits Rectangle {
         border-color: Theme.focus-glow;
         background: transparent;
     }
-    if on: Rectangle {
+    if on && !Theme.quiet: Rectangle {
         x: -g * 2;
         y: -g * 2;
         width: parent.width + g * 4;
@@ -81,21 +83,24 @@ export component Toggle inherits Rectangle {
     in property <bool> focused;
     property <length> pad: self.height * 0.14;
 
-    height: Metrics.t-primary * 1.25;
-    width: self.height * 1.8;
+    height: Theme.quiet ? 23px * Metrics.qu : Metrics.t-primary * 1.25;
+    width: Theme.quiet ? 43px * Metrics.qu : self.height * 1.8;
     border-radius: self.height / 2;
     opacity: enabled ? 1 : 0.4;
-    background: on ? Theme.accent : (focused ? #4a5262 : #343b48);
+    // Quiet OS: the settings list's own switch, sage when on.
+    background: Theme.quiet ? (on ? #9baea0 : #65757d4d) : on ? Theme.accent : (focused ? #4a5262 : #343b48);
+    border-width: Theme.quiet ? 1px : 0px;
+    border-color: on ? #a5baaa : #5c706d88;
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
 
     Rectangle {
-        y: pad;
+        y: (parent.height - self.height) / 2;
         x: on ? parent.width - self.width - pad : pad;
-        width: parent.height - pad * 2;
+        width: Theme.quiet ? 15px * Metrics.qu : parent.height - pad * 2;
         height: self.width;
         border-radius: self.width / 2;
-        background: on ? #ffffff : #c9ced8;
-        drop-shadow-blur: 4px;
+        background: Theme.quiet ? (on ? #18231c : #cad5d1) : on ? #ffffff : #c9ced8;
+        drop-shadow-blur: Theme.quiet ? 0px : 4px;
         drop-shadow-color: #00000066;
         animate x { duration: Theme.t-focus; easing: Theme.ease; }
     }
@@ -136,25 +141,30 @@ export component ValueBadge inherits Rectangle {
     in property <string> text;
     in property <string> tone;
     in property <length> font-size: Metrics.t-meta * 0.86;
+    // The widest the pill may be; a longer word is cut short inside it.
+    in property <length> width-cap: word.preferred-width + font-size * 1.3;
     property <color> ink: tone == "hdr" ? Theme.badge-hdr
         : tone == "good" ? Theme.badge-good
         : tone == "warn" ? #fbbf24
         : Theme.badge-plain;
 
     height: max(Metrics.badge-h, font-size * 1.7);
-    width: word.preferred-width + font-size * 1.3;
+    width: min(width-cap, word.preferred-width + font-size * 1.3);
     border-radius: self.height / 2;
     background: ink.with-alpha(0.12);
     border-width: 1px;
     border-color: ink.with-alpha(0.34);
 
     word := Text {
+        x: root.font-size * 0.65;
+        width: root.width - root.font-size * 1.3;
         text: root.text;
         color: ink;
         font-size: root.font-size;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
+        overflow: elide;
     }
 }
 
@@ -186,9 +196,10 @@ export component PageHeader inherits VerticalLayout {
     Text {
         text: root.title;
         color: Theme.text;
-        font-size: Metrics.t-page;
-        font-weight: 750;
-        letter-spacing: -0.012 * Metrics.t-page;
+        // Quiet OS sets a heading large and light, tight, as its own pages do.
+        font-size: Theme.quiet ? Metrics.t-page * 1.3 : Metrics.t-page;
+        font-weight: Theme.quiet ? 560 : 750;
+        letter-spacing: (Theme.quiet ? -0.045 : -0.012) * Metrics.t-page;
         overflow: elide;
         wrap: no-wrap;
     }
@@ -223,13 +234,24 @@ export component SettingCard inherits Rectangle {
     // Pointed at, where a screen gives it a zone (ui/pointer.slint).
     in property <string> pointer-zone;
     in property <int> pointer-index;
+    // Quiet OS: the list draws the focus's capsule itself, travelling from
+    // row to row (ui/wireless.slint's RadioList).
+    in property <bool> glide;
 
     height: hint == "" ? Metrics.set-h-flat : Metrics.set-h;
-    border-radius: Metrics.s-radius;
-    background: focused ? Theme.s-card-hi : Theme.s-card;
-    border-width: 1px;
+    border-radius: Theme.quiet ? self.height / 2 : Metrics.s-radius;
+    // Quiet OS: a row on a hairline, not a card. The focus is the row
+    // lifting into a warm capsule; nothing moves, nothing is outlined.
+    background: Theme.quiet ? (focused && !glide ? Theme.s-card-hi : transparent) : (focused ? Theme.s-card-hi : Theme.s-card);
+    border-width: Theme.quiet ? 0px : 1px;
     border-color: focused ? transparent : Theme.s-line;
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    if Theme.quiet: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: focused ? transparent : Theme.s-hairline;
+    }
 
     HorizontalLayout {
         padding-left: Metrics.card-pad;
@@ -240,8 +262,8 @@ export component SettingCard inherits Rectangle {
             alignment: center;
             Icon {
                 name: icon;
-                size: Metrics.icon * 1.15;
-                ink: !enabled ? Theme.dim : (focused ? Theme.text : #c9ced8);
+                size: Theme.quiet ? Metrics.icon : Metrics.icon * 1.15;
+                ink: !enabled ? Theme.dim : (focused ? (Theme.quiet ? #f2e5d0 : Theme.text) : (Theme.quiet ? #8f9ba5 : #c9ced8));
             }
         }
 
@@ -252,9 +274,10 @@ export component SettingCard inherits Rectangle {
             min-width: 0px;
             Text {
                 text: label;
-                color: !enabled ? Theme.dim : (danger ? Theme.bad : (focused ? #ffffff : Theme.text));
+                color: !enabled ? Theme.dim : (danger ? Theme.bad : (focused ? (Theme.quiet ? #f2e5d0 : #ffffff) : (Theme.quiet ? #e2e5e7 : Theme.text)));
                 font-size: Metrics.t-primary;
-                font-weight: focused ? 650 : 600;
+                font-weight: Theme.quiet ? 520 : (focused ? 650 : 600);
+                letter-spacing: Theme.quiet ? -Metrics.t-primary * 0.02 : 0px;
                 overflow: elide;
                 wrap: no-wrap;
             }
@@ -287,9 +310,9 @@ export component SettingCard inherits Rectangle {
             max-width: root.width * 0.45;
             Text {
                 text: value;
-                color: !enabled ? Theme.dim : (focused ? Theme.text : #c3c8d2);
+                color: !enabled ? Theme.dim : Theme.quiet ? #adb8bf : (focused ? Theme.text : #c3c8d2);
                 font-size: Metrics.t-secondary;
-                font-weight: 600;
+                font-weight: Theme.quiet ? 400 : 600;
                 horizontal-alignment: right;
                 overflow: elide;
                 wrap: no-wrap;
@@ -301,7 +324,7 @@ export component SettingCard inherits Rectangle {
             Icon {
                 name: "chevron";
                 size: Metrics.icon-small;
-                ink: focused ? Theme.text : Theme.dim;
+                ink: focused ? (Theme.quiet ? #dfc9a5 : Theme.text) : (Theme.quiet ? #71838a : Theme.dim);
             }
         }
     }
@@ -309,7 +332,7 @@ export component SettingCard inherits Rectangle {
     FocusRing {
         width: 100%;
         height: 100%;
-        on: focused;
+        on: focused && !Theme.quiet;
     }
 
     // Not while it cannot be pressed: hover, focus and a click are refused
@@ -389,18 +412,24 @@ export component ActionButton inherits Rectangle {
     height: Metrics.button-h;
     min-width: caption.preferred-width + Metrics.button-h * 1.1;
     border-radius: self.height / 2;
-    background: lit ? (focused ? #ffc766 : Theme.focus.with-alpha(0.9))
+    // Quiet OS: the one the remote is on is the warm, solid one, whichever
+    // it is; the one that commits is only tinted until then.
+    background: Theme.quiet
+        ? (focused ? (danger ? #e0a092 : #f2e5d0) : (lit ? #dfc9a524 : (enabled ? #ffffff0b : transparent)))
+        : lit ? (focused ? #ffc766 : Theme.focus.with-alpha(0.9))
         : (focused && danger ? #7f1d1d
         : (focused ? Theme.s-card-hi : (enabled ? Theme.s-card : transparent)));
-    border-width: 1px;
+    border-width: Theme.quiet ? 0px : 1px;
     border-color: lit || focused ? transparent : (enabled ? Theme.s-line : Theme.s-hairline);
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
 
     caption := Text {
         text: label;
-        color: lit ? Theme.accent-ink : (enabled ? (focused ? #ffffff : (danger ? Theme.bad : Theme.text)) : Theme.dim);
+        color: Theme.quiet
+            ? (focused ? #15191d : (!enabled ? Theme.dim : lit ? #f2e5d0 : danger ? Theme.bad : #e2e5e7))
+            : lit ? Theme.accent-ink : (enabled ? (focused ? #ffffff : (danger ? Theme.bad : Theme.text)) : Theme.dim);
         font-size: Metrics.t-secondary;
-        font-weight: 700;
+        font-weight: Theme.quiet ? 560 : 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         wrap: no-wrap;
@@ -410,7 +439,7 @@ export component ActionButton inherits Rectangle {
         width: 100%;
         height: 100%;
         radius: parent.height / 2;
-        on: focused;
+        on: focused && !Theme.quiet;
     }
 
     // Not while it cannot be pressed: hover, focus and a click are refused
@@ -438,7 +467,7 @@ export component ChoiceRow inherits Rectangle {
     in property <int> pointer-index;
 
     height: sub == "" ? Metrics.set-h-flat * 0.92 : Metrics.set-h * 0.9;
-    border-radius: Metrics.s-radius * 0.8;
+    border-radius: Theme.quiet ? self.height / 2 : Metrics.s-radius * 0.8;
     background: focused ? Theme.s-card-hi : (selected ? Theme.s-current : transparent);
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
 
@@ -500,7 +529,7 @@ export component ChoiceRow inherits Rectangle {
         width: 100%;
         height: 100%;
         radius: parent.border-radius;
-        on: focused;
+        on: focused && !Theme.quiet;
     }
 
     // Not while it cannot be pressed: hover, focus and a click are refused
@@ -574,12 +603,29 @@ export component InfoPanel inherits Rectangle {
     in property <string> line;
     in property <[Badge]> badges;
     in property <[InfoLine]> rows;
+    // Off: one line for the title, one row of badges, as drawn everywhere.
+    // On: the title takes a second line rather than being cut, and badges
+    // that do not fit in one row, measured, are stacked one under another.
+    in property <bool> fit-content: false;
+
+    property <length> inner-w: root.width - Metrics.card-pad * 2;
+    property <bool> badges-in-row: !fit-content || badge-probe.preferred-width <= inner-w;
 
     border-radius: Metrics.s-radius;
-    background: #10131bcc;
-    border-width: 1px;
+    // Quiet OS: a faint surface, no edge, as the heading's column reads.
+    background: Theme.quiet ? #ffffff06 : #10131bcc;
+    border-width: Theme.quiet ? 0px : 1px;
     border-color: Theme.s-hairline;
     height: body.preferred-height;
+
+    // The badges as one row, never drawn: what the row would need.
+    Rectangle {
+        visible: false;
+        badge-probe := HorizontalLayout {
+            spacing: Metrics.row-gap * 0.8;
+            for b in badges: ValueBadge { text: b.text; tone: b.tone; }
+        }
+    }
 
     body := VerticalLayout {
         padding: Metrics.card-pad;
@@ -587,10 +633,11 @@ export component InfoPanel inherits Rectangle {
         alignment: start;
 
         Text {
-            text: caption;
-            color: Theme.muted;
-            font-size: Metrics.t-meta;
+            text: Theme.quiet ? caption.to-uppercase() : caption;
+            color: Theme.quiet ? #dfc9a5 : Theme.muted;
+            font-size: Theme.quiet ? 12px * Metrics.qu : Metrics.t-meta;
             font-weight: 600;
+            letter-spacing: Theme.quiet ? 12px * Metrics.qu * 0.16 : 0px;
         }
         HorizontalLayout {
             spacing: Metrics.card-pad * 0.7;
@@ -607,9 +654,9 @@ export component InfoPanel inherits Rectangle {
                     text: title;
                     color: Theme.text;
                     font-size: Metrics.t-section;
-                    font-weight: 750;
+                    font-weight: Theme.quiet ? 560 : 750;
                     overflow: elide;
-                    wrap: no-wrap;
+                    wrap: root.fit-content ? word-wrap : no-wrap;
                 }
                 if line != "": Text {
                     text: line;
@@ -621,10 +668,17 @@ export component InfoPanel inherits Rectangle {
                 }
             }
         }
-        if badges.length > 0: HorizontalLayout {
+        if badges.length > 0 && badges-in-row: HorizontalLayout {
             spacing: Metrics.row-gap * 0.8;
             alignment: start;
             for b in badges: ValueBadge { text: b.text; tone: b.tone; }
+        }
+        if badges.length > 0 && !badges-in-row: VerticalLayout {
+            spacing: Metrics.row-gap * 0.5;
+            for b in badges: HorizontalLayout {
+                alignment: start;
+                ValueBadge { text: b.text; tone: b.tone; width-cap: inner-w; }
+            }
         }
         if rows.length > 0: Rectangle { height: Metrics.row-gap * 0.2; }
         for r in rows: HorizontalLayout {
@@ -672,7 +726,8 @@ export component Dialog inherits Rectangle {
         width: min(panel-w, parent.width - Metrics.safe-x * 2);
         height: min(inner.preferred-height, parent.height - Metrics.safe-y * 2);
         border-radius: Metrics.s-radius * 1.3;
-        background: @linear-gradient(180deg, #171a24 0%, #11141c 100%);
+        background: Theme.quiet ? @linear-gradient(180deg, #161d24 0%, #10161c 100%)
+            : @linear-gradient(180deg, #171a24 0%, #11141c 100%);
         border-width: 1px;
         border-color: Theme.s-line;
         clip: true;
@@ -913,7 +968,7 @@ export component Toast inherits Rectangle {
     height: Metrics.button-h;
     width: min(caption.preferred-width + Metrics.button-h * 1.6, Metrics.vw - Metrics.safe-x * 2);
     border-radius: self.height / 2;
-    background: #171a24f0;
+    background: Theme.quiet ? #121a21f0 : #171a24f0;
     border-width: 1px;
     border-color: Theme.s-line;
 
@@ -1018,20 +1073,36 @@ export component DeviceToast inherits Rectangle {
 // little violet in it, as the reference has. Three gradients the renderer
 // fills and never animates.
 export component Backdrop inherits Rectangle {
-    background: @linear-gradient(160deg, #0a0c14 0%, #07080d 55%, #06070b 100%);
-    Rectangle {
+    background: Theme.quiet ? @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%)
+        : @linear-gradient(160deg, #0a0c14 0%, #07080d 55%, #06070b 100%);
+    if !Theme.quiet: Rectangle {
         x: parent.width * 0.42;
         y: -parent.height * 0.35;
         width: parent.width * 0.9;
         height: parent.height * 0.95;
         background: @radial-gradient(circle, #3d2e7048 0%, #3d2e7000 65%);
     }
-    Rectangle {
+    if !Theme.quiet: Rectangle {
         x: parent.width * 0.55;
         y: parent.height * 0.45;
         width: parent.width * 0.7;
         height: parent.height * 0.9;
         background: @radial-gradient(circle, #17345640 0%, #17345600 62%);
+    }
+    // Quiet OS's two soft pools (quiet.slint, `QuietGround`).
+    if Theme.quiet: Rectangle {
+        x: parent.width * 0.83 - self.width / 2;
+        y: parent.height * 0.5 - self.height / 2;
+        width: parent.width * 1.2;
+        height: parent.height * 1.7;
+        background: @radial-gradient(circle, #2a3b4240 0%, #2a3b4200 60%);
+    }
+    if Theme.quiet: Rectangle {
+        x: parent.width * 0.09 - self.width / 2;
+        y: parent.height * 0.05 - self.height / 2;
+        width: parent.width * 1.1;
+        height: parent.height * 1.2;
+        background: @radial-gradient(circle, #1a2c3940 0%, #1a2c3900 65%);
     }
 }
 
@@ -1148,7 +1219,7 @@ export component SideNav inherits Rectangle {
             // Current but not focused: a short amber bar on the leading edge,
             // so the section the right-hand side belongs to is visible while
             // the remote is over there.
-            if here && !active: Rectangle {
+            if here && !active && !Theme.quiet: Rectangle {
                 x: 0;
                 y: parent.height * 0.26;
                 width: Metrics.focus-w * 1.2;
@@ -1227,7 +1298,7 @@ export component SideNav inherits Rectangle {
                     wrap: no-wrap;
                 }
             }
-            Rectangle {
+            if !Theme.quiet: Rectangle {
                 x: 0;
                 y: parent.height * 0.26;
                 width: Metrics.focus-w * 1.2;
@@ -1239,27 +1310,109 @@ export component SideNav inherits Rectangle {
     }
 }
 
+// Whether the box is on a network, said by a mark alone, as a console's
+// corner says it: the cable's plug, or the radio's three arcs lit as far as
+// its signal reaches (bars 1-4), or the arcs dark and struck through when
+// there is no network at all -- then in the warning's tone, so the one state
+// worth noticing is the one that shows.
+export component NetGlyph inherits Rectangle {
+    in property <length> size: 20px;
+    in property <bool> eth-up;
+    in property <bool> wifi-up;
+    in property <int> bars;
+    in property <color> ink: #c9d0d4;
+    in property <color> warn: #dcc08a;
+    property <bool> offline: !eth-up && !wifi-up;
+    property <int> lit: offline ? 0 : clamp(bars, 1, 3);
+    width: size;
+    height: size;
+
+    if eth-up: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M7 4.5h10v7.5l-2 2.5H9l-2-2.5z M10 4.5v3 M14 4.5v3 M12 14.5v5";
+        fill: transparent;
+        stroke: root.ink;
+        stroke-width: root.size / 13;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+    if !eth-up: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M12 18.6a.9.9 0 1 0 0 .01";
+        fill: transparent;
+        stroke: offline ? root.warn : root.ink;
+        stroke-width: root.size / 9;
+        stroke-line-cap: round;
+    }
+    for arc[i] in [
+        "M8.6 15.3a4.8 4.8 0 0 1 6.8 0",
+        "M5.4 12.1a9.3 9.3 0 0 1 13.2 0",
+        "M2.3 8.9a13.6 13.6 0 0 1 19.4 0",
+    ]: Path {
+        visible: !root.eth-up;
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: arc;
+        fill: transparent;
+        stroke: root.offline ? root.warn.with-alpha(0.55) : i < root.lit ? root.ink : root.ink.with-alpha(0.25);
+        stroke-width: root.size / 13;
+        stroke-line-cap: round;
+    }
+    if offline: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M4 4l16 16";
+        fill: transparent;
+        stroke: root.warn;
+        stroke-width: root.size / 12;
+        stroke-line-cap: round;
+    }
+}
+
 // The name of the box, whether it is on the network, and the time: the top
 // right of every settings screen.
 export component StatusCorner inherits HorizontalLayout {
     in property <string> network;
     in property <string> time;
+    // Quiet OS says the network with its mark alone (`NetGlyph`).
+    in property <bool> eth-up;
+    in property <bool> wifi-up;
+    in property <int> wifi-bars;
     spacing: Metrics.t-secondary * 1.2;
     alignment: end;
 
-    Text {
+    if !Theme.quiet: Text {
         text: "MediaBox";
         color: Theme.text;
         font-size: Metrics.t-secondary;
         font-weight: 600;
         vertical-alignment: center;
     }
-    Text {
+    if !Theme.quiet: Text {
         text: network;
         color: Theme.muted;
         font-size: Metrics.t-meta;
         font-weight: 550;
         vertical-alignment: center;
+    }
+    if Theme.quiet: VerticalLayout {
+        alignment: center;
+        NetGlyph {
+            size: Metrics.t-secondary * 1.25;
+            eth-up: root.eth-up;
+            wifi-up: root.wifi-up;
+            bars: root.wifi-bars;
+        }
     }
     Text {
         text: time;

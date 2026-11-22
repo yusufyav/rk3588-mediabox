@@ -307,10 +307,12 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
     assert!(has(&reached, "settings-sections", 0) && has(&reached, "settings-sections", 1));
     assert!(has(&reached, "settings-rows", 0) && has(&reached, "settings-rows", 2));
     assert!(!has(&reached, "settings-rows", 1), "a disabled card is no target");
-    assert!(zones(&reached).contains("back"), "the way back to Home");
+    // Quiet's top left is the way home (the remote's Home); one level back
+    // is the remote's Back and the right button.
+    assert!(zones(&reached).contains("go-home"), "the way home");
     assert_eq!(
         zones(&reached),
-        BTreeSet::from(["back", "settings-rows", "settings-sections"]),
+        BTreeSet::from(["go-home", "settings-rows", "settings-sections"]),
         "{reached:?}"
     );
     ui.set_settings_choice_open(true);
@@ -1342,6 +1344,7 @@ fn shots() {
         cpu_text: "%1".into(),
         memory_text: "%5".into(),
         storage_text: "5.5 / 56.7 GB".into(),
+        storage_free: "51.2 GB".into(),
         network: "Ethernet".into(),
         temperature: "56 °C".into(),
         machine: "Orange Pi 5 Plus".into(),
@@ -1466,6 +1469,7 @@ fn shots() {
             cpu_text: "%1".into(),
             memory_text: "%5".into(),
             storage_text: "5.5 / 56.7 GB".into(),
+            storage_free: "51.2 GB".into(),
             network: if online { "Bağlı" } else { "Bağlı değil" }.into(),
             temperature: "—".into(),
             machine: "Orange Pi 5 Plus".into(),

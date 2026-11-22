@@ -15,10 +15,17 @@
 // there grows.
 
 export global Theme {
+    // Quiet OS wears the settings family -- the settings, the radios, the
+    // account, the diagnostics, every editor -- in its own hand: the same
+    // components, the same rows and targets, other tokens. Set by the window
+    // (app.slint) only while one of those screens is up under Quiet OS, so
+    // the catalogue, the player and the classic face never see it.
+    in property <bool> quiet: false;
+
     // Ground and surfaces. Near-black rather than black — a television's own
     // letterboxing is blacker than any panel can draw, and matching it makes
     // the interface look like a fault.
-    out property <brush> bg: #07080b;
+    out property <brush> bg: quiet ? @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%) : #07080b;
     out property <brush> bg-raise: #0f131a;
     out property <brush> bg-card: #151a23;
     out property <brush> bg-sheet: #0d1118;
@@ -26,16 +33,16 @@ export global Theme {
     out property <brush> line-soft: #1a202a;
 
     // Type.
-    out property <brush> text: #f5f7fa;
-    out property <brush> muted: #9aa5b4;
+    out property <brush> text: quiet ? #f1f0ee : #f5f7fa;
+    out property <brush> muted: quiet ? #a5afba : #9aa5b4;
     out property <brush> dim: #64707f;
 
     // Accents and verdicts.
-    out property <brush> accent: #ffb43a;
+    out property <brush> accent: quiet ? #dfc9a5 : #ffb43a;
     out property <brush> accent-ink: #1b1204;
-    out property <brush> ok: #4ade80;
-    out property <brush> warn: #fbbf24;
-    out property <brush> bad: #f87171;
+    out property <brush> ok: quiet ? #9bbfae : #4ade80;
+    out property <brush> warn: quiet ? #dcc08a : #fbbf24;
+    out property <brush> bad: quiet ? #e0a092 : #f87171;
 
     // The film's own accent. The rest of the interface is the appliance's
     // amber; a film is the reference's purple, measured off its bar at
@@ -46,8 +53,8 @@ export global Theme {
     // to the top right, measured off its board (#1f1c3e to #141318).
     out property <brush> catalog-bg: @linear-gradient(225deg, #1f1c3e 0%, #191728 50%, #141318 100%);
 
-    out property <brush> focus-ring: #ffffff;
-    out property <brush> focus-fill: #ffffff;
+    out property <brush> focus-ring: quiet ? #dfc9a5 : #ffffff;
+    out property <brush> focus-fill: quiet ? #e9dcc6 : #ffffff;
     // What a pointer's arrow over a control looks like: a faint veil, never
     // the remote's ring, so the two are told apart at a glance.
     out property <brush> hover-veil: #ffffff17;
@@ -83,28 +90,31 @@ export global Theme {
     // sofa and does not depend on colour alone. Nothing grows — a list whose
     // rows change size under the remote is a list that cannot be read while
     // moving through it.
-    out property <color> focus: #f4b64e;
+    out property <color> focus: quiet ? #dfc9a5 : #f4b64e;
     // The glow is two rings of the same amber at low alpha rather than a blur:
     // a drop shadow is a blur pass on this GPU for every frame it is drawn.
-    out property <color> focus-glow: #f4b64e38;
-    out property <color> focus-glow-far: #f4b64e14;
+    // Quiet OS has none: its focus is the surface lifting, not a ring.
+    out property <color> focus-glow: quiet ? transparent : #f4b64e38;
+    out property <color> focus-glow-far: quiet ? transparent : #f4b64e14;
 
-    out property <brush> s-ground: #07080d;
+    out property <brush> s-ground: quiet ? @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%) : #07080d;
     // The column down the left, a shade apart from the ground.
-    out property <brush> s-nav: #0b0d14;
-    out property <brush> s-card: #141720;
-    out property <brush> s-card-hi: #1e212c;
-    out property <brush> s-line: #252a36;
-    out property <brush> s-hairline: #1a1e28;
+    out property <brush> s-nav: quiet ? transparent : #0b0d14;
+    // Quiet OS's surfaces are barely there until the remote is on one; then
+    // it warms, as its own lists do.
+    out property <brush> s-card: quiet ? #ffffff07 : #141720;
+    out property <brush> s-card-hi: quiet ? #dfc9a51f : #1e212c;
+    out property <brush> s-line: quiet ? transparent : #252a36;
+    out property <brush> s-hairline: quiet ? #d0dce21c : #1a1e28;
     // Where the remote is not, but the place it came from is: the section a
     // page belongs to, the choice already made.
-    out property <brush> s-current: #ffffff10;
+    out property <brush> s-current: quiet ? #ffffff0b : #ffffff10;
 
     // Verdicts as small labels. Colour and a word, always: a status that is
     // only a colour is a status half of the room cannot read.
-    out property <color> badge-hdr: #f6c46a;
-    out property <color> badge-good: #6ee7a0;
-    out property <color> badge-plain: #dfe3ea;
+    out property <color> badge-hdr: quiet ? #dcc08a : #f6c46a;
+    out property <color> badge-good: quiet ? #9bbfae : #6ee7a0;
+    out property <color> badge-plain: quiet ? #d6dade : #dfe3ea;
 
     // Whether anything moves at all. Every duration in the settings language
     // is read through this, so a reduced-motion preference is one property
@@ -288,22 +298,30 @@ export global Metrics {
 
     // The type. 1080p: 45 / 30 / 26 / 21 / 19.
     out property <length> t-page: max(28px, min(96px, vw * 0.0234));
-    out property <length> t-section: max(18px, min(64px, vw * 0.0152));
-    out property <length> t-primary: max(17px, min(56px, vw * 0.0135));
-    out property <length> t-secondary: max(14.5px, min(46px, vw * 0.011));
-    out property <length> t-meta: max(13.5px, min(40px, vw * 0.0099));
+    // Quiet OS's design pixel (Quiet.u): its settings family sets type and
+    // rows on its own 1920 x 1080 scale, so a radio's list and an editor
+    // read as the settings list they were opened from.
+    out property <float> qu: min(vw / 1920px, vh / 1080px);
+    out property <length> t-section: Theme.quiet ? 24px * qu : max(18px, min(64px, vw * 0.0152));
+    out property <length> t-primary: Theme.quiet ? 20px * qu : max(17px, min(56px, vw * 0.0135));
+    out property <length> t-secondary: Theme.quiet ? 16px * qu : max(14.5px, min(46px, vw * 0.011));
+    out property <length> t-meta: Theme.quiet ? 14px * qu : max(13.5px, min(40px, vw * 0.0099));
     out property <length> t-nav-head: max(20px, min(68px, vw * 0.0167));
 
     // Rows. A card is a row that does something; a reading only says.
-    out property <length> set-h: max(62px, min(190px, vh * 0.092));
-    out property <length> set-h-flat: max(50px, min(150px, vh * 0.07));
-    out property <length> reading-h: max(40px, min(128px, vh * 0.058));
-    out property <length> header-h: max(38px, min(120px, vh * 0.058));
-    out property <length> row-gap: max(7px, min(26px, vh * 0.012));
-    out property <length> card-pad: max(14px, min(56px, vw * 0.0145));
-    out property <length> s-radius: max(10px, min(32px, vw * 0.0083));
-    out property <length> icon: max(20px, min(68px, vw * 0.0172));
-    out property <length> icon-small: max(15px, min(52px, vw * 0.0125));
+    out property <length> set-h: Theme.quiet ? 86px * qu : max(62px, min(190px, vh * 0.092));
+    out property <length> set-h-flat: Theme.quiet ? 74px * qu : max(50px, min(150px, vh * 0.07));
+    out property <length> reading-h: Theme.quiet ? 62px * qu : max(40px, min(128px, vh * 0.058));
+    out property <length> header-h: Theme.quiet ? 58px * qu : max(38px, min(120px, vh * 0.058));
+    out property <length> row-gap: Theme.quiet ? 12px * qu : max(7px, min(26px, vh * 0.012));
+    // Between the rows of a list of cards. Quiet's rows are hairlines, not
+    // cards: they stand edge to edge.
+    out property <length> stack-gap: Theme.quiet ? 0px : row-gap;
+    out property <length> card-pad: Theme.quiet ? 22px * qu : max(14px, min(56px, vw * 0.0145));
+    // Quiet OS rounds them further: a surface there is a soft lift, not a box.
+    out property <length> s-radius: Theme.quiet ? max(16px, min(52px, vw * 0.0135)) : max(10px, min(32px, vw * 0.0083));
+    out property <length> icon: Theme.quiet ? 21px * qu : max(20px, min(68px, vw * 0.0172));
+    out property <length> icon-small: Theme.quiet ? 15px * qu : max(15px, min(52px, vw * 0.0125));
 
     // The focus outline and its glow. Whole-ish pixels at 1080p so the line is
     // crisp; the 4K panel doubles it with everything else.
@@ -311,10 +329,10 @@ export global Metrics {
     out property <length> glow-w: max(3px, min(10px, vw * 0.0024));
 
     // A small label: HDR, 10-bit, Bağlı.
-    out property <length> badge-h: max(22px, min(64px, vh * 0.03));
+    out property <length> badge-h: Theme.quiet ? 24px * qu : max(22px, min(64px, vh * 0.03));
 
     // A dialog over a settings screen.
     out property <length> dialog-w: max(420px, min(1180px, vw * 0.4));
     out property <length> dialog-pad: max(18px, min(64px, vw * 0.0185));
-    out property <length> button-h: max(40px, min(110px, vh * 0.054));
+    out property <length> button-h: Theme.quiet ? 50px * qu : max(40px, min(110px, vh * 0.054));
 }

@@ -10,7 +10,7 @@ import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
 import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
-import { QuietHome, QuietSettings } from "quiet.slint";
+import { QuietHome, QuietSettings, QuietBar } from "quiet.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
@@ -94,6 +94,13 @@ export component MediaBoxWindow inherits Window {
     // Which face the home screen and the system settings wear: "classic" or
     // "quiet" (src/layout.rs). Anything else is the classic face.
     in property <string> layout: "classic";
+    // The settings family under Quiet OS: the screens that wear its tokens
+    // (theme.slint, `Theme.quiet`). Home and settings draw their own Quiet
+    // components; the radios, the account and the diagnostics are the shared
+    // ones in Quiet's hand.
+    property <bool> quiet-family: layout == "quiet" && (screen == "settings" || screen == "wifi"
+        || screen == "bluetooth" || screen == "account" || screen == "diagnostics");
+    changed quiet-family => { Theme.quiet = quiet-family; }
     /// Whether the film's own controls are up. They come up on a key and go
     /// down by themselves; a film with a control bar permanently across it is
     /// not a television.
@@ -756,6 +763,8 @@ export component MediaBoxWindow inherits Window {
         if screen == "wifi": WifiScreen {
             width: 100%;
             height: 100%;
+            sections: root.settings-sections;
+            section: root.settings-section;
             known: root.wifi-known;
             present: root.wifi-present;
             powered: root.wifi-powered;
@@ -790,6 +799,8 @@ export component MediaBoxWindow inherits Window {
         if screen == "bluetooth": BluetoothScreen {
             width: 100%;
             height: 100%;
+            sections: root.settings-sections;
+            section: root.settings-section;
             known: root.bt-known;
             present: root.bt-present;
             summary: root.bt-summary;
@@ -850,8 +861,9 @@ export component MediaBoxWindow inherits Window {
             // The radios' lists sit in the settings' own frame; only the
             // password keeps the bar.
             && screen != "bluetooth" && !(screen == "wifi" && root.wifi-face != "password")
-            // Quiet OS's home carries its own.
-            && !(screen == "home" && layout == "quiet"): TopBar {
+            // Quiet OS's home carries its own, and so does its settings
+            // family (below).
+            && !(screen == "home" && layout == "quiet") && !quiet-family: TopBar {
             x: 0;
             y: 0;
             width: 100%;
@@ -870,6 +882,16 @@ export component MediaBoxWindow inherits Window {
                 : screen == "bluetooth" ? "Bluetooth"
                 : screen == "now-playing" ? "Şimdi Oynatılan"
                 : "";
+        }
+
+        // The account and the Wi-Fi password under Quiet OS: its own bar.
+        if quiet-family && (screen == "account" || (screen == "wifi" && root.wifi-face == "password")): QuietBar {
+            x: 0;
+            y: 0;
+            width: 100%;
+            height: Metrics.topbar * 1.9;
+            vitals: root.vitals;
+            crumb: screen == "account" ? "Ayarlar  /  Hesap" : "Ayarlar  /  Wi-Fi";
         }
 
         // What went wrong, if anything did, without taking the screen away from

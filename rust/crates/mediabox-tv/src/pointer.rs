@@ -234,6 +234,10 @@ pub enum Zone {
     /// column's heading and its parent row, the catalogue frame's mark, a
     /// screen's title bar, the close of a sheet or a panel -- whichever is up.
     Back,
+    /// The way home: the remote's Home under the arrow. Quiet OS's settings
+    /// family draws it at the top left, where a page's way out is looked
+    /// for; Back stays the right button and the remote's own key.
+    GoHome,
     /// The settings' cards, a category's or a list page's.
     SettingsRows,
     /// A short list opened from a settings card.
@@ -368,6 +372,7 @@ impl Zone {
             "quiet-home" => Zone::QuietHome,
             "settings-sections" => Zone::SettingsSections,
             "back" => Zone::Back,
+            "go-home" => Zone::GoHome,
             "settings-rows" => Zone::SettingsRows,
             "settings-choice" => Zone::SettingsChoice,
             "editor-cards" => Zone::EditorCards,
@@ -486,6 +491,9 @@ impl Zone {
             Zone::Sheet => (None, Layer::Sheet),
             // Whichever layer is on top: see `accepts`.
             Zone::Back => (None, Layer::Screen),
+            // Any screen, and only with nothing over it: Home under a sheet
+            // is refused as the remote's is (`actions::intent_for`).
+            Zone::GoHome => (None, Layer::Screen),
             Zone::AccountForm | Zone::AccountKeys => (Some(Route::Account), Layer::Screen),
             Zone::WifiRows
             | Zone::WifiInfo
@@ -529,6 +537,7 @@ impl Zone {
         use mediabox_core::InputAction;
         match self {
             Zone::Back | Zone::Shield => Activation::Key(InputAction::Back),
+            Zone::GoHome => Activation::Key(InputAction::Home),
             // The way out of the film is the remote's Stop, which leaves it
             // for the page it was started from: Back on a film whose
             // controls are up only takes the controls away, and a pointer
@@ -622,6 +631,7 @@ pub fn zone_name(zone: Zone) -> &'static str {
         Zone::QuietHome => "quiet-home",
         Zone::SettingsSections => "settings-sections",
         Zone::Back => "back",
+        Zone::GoHome => "go-home",
         Zone::SettingsRows => "settings-rows",
         Zone::SettingsChoice => "settings-choice",
         Zone::EditorCards => "editor-cards",
@@ -825,6 +835,14 @@ pub fn accepts(context: Context, zone: Zone) -> bool {
     // a modal is under its ground, which is Back as well.
     if zone == Zone::Back {
         return true;
+    }
+    // Quiet OS draws the categories beside the radios as well, which are
+    // pages of "Bağlantılar": a click there leaves for that category.
+    if zone == Zone::SettingsSections
+        && matches!(context.route, Route::Wifi | Route::Bluetooth)
+        && !context.film
+    {
+        return layer == context.layer;
     }
     // While a film plays the panel is its player: the screen it was started
     // from is not drawn, and the player is drawn nowhere else.
@@ -1655,7 +1673,7 @@ mod tests {
     const W: f32 = 1920.0;
     const H: f32 = 1080.0;
 
-    const ALL_ZONES: [Zone; 70] = [
+    const ALL_ZONES: [Zone; 71] = [
         Zone::DetailActions,
         Zone::DetailSources,
         Zone::DetailEpisodes,
@@ -1681,6 +1699,7 @@ mod tests {
         Zone::QuietHome,
         Zone::SettingsSections,
         Zone::Back,
+        Zone::GoHome,
         Zone::SettingsRows,
         Zone::SettingsChoice,
         Zone::EditorCards,

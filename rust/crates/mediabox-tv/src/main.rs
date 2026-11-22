@@ -1018,7 +1018,7 @@ impl App {
             match lane {
                 // A window of rows Rust keeps moves a row a detent; fingers
                 // are counted in rows by the list itself (`PanState`).
-                Some(lane) if lane.stepped() && scrolled.eased => {
+                Some(lane) if (lane.stepped() || self.quiet_rows(lane)) && scrolled.eased => {
                     if steps != 0 {
                         self.pointer_shift(lane, steps);
                     }
@@ -1183,8 +1183,24 @@ impl App {
         }
     }
 
+    /// Quiet OS's settings rows: a wheel's detents walk the focus there
+    /// (`Settings::wheel_rows`) instead of scrolling the rows away from it.
+    /// A hand moves the list itself, as on every other list.
+    fn quiet_rows(&self, lane: pointer::Lane) -> bool {
+        self.layout == layout::Layout::Quiet && lane.zone == pointer::Zone::SettingsRows
+    }
+
     fn pointer_shift(&mut self, lane: pointer::Lane, rows: i32) {
         if rows == 0 || !pointer::accepts(self.pointer_context(), lane.zone) {
+            return;
+        }
+        if self.quiet_rows(lane) {
+            // A hand may have left the list away from the focus: the wheel
+            // walks the focus, so the list is the focus's again first.
+            self.pointer_release_named(pointer::zone_name(lane.zone), lane.lane);
+            if self.settings.wheel_rows(rows) {
+                self.paint();
+            }
             return;
         }
         match lane.zone {
@@ -1274,10 +1290,39 @@ impl App {
         let (row, col) = pointer::cell(index);
         match zone {
             Zone::HomeApps | Zone::QuietHome => self.home.point_at(index),
-            Zone::SettingsSections => self.settings.point_section(index),
+            // Quiet OS keeps the categories on screen under a page; a click
+            // on one leaves the page the way Back does (each editor's own
+            // Back first: an open cell, a trial), and only once the page is
+            // gone does the category take the focus. The classic face draws
+            // no categories under a page.
+            Zone::SettingsSections => {
+                // From a radio, a page of "Bağlantılar": its own Back first
+                // (a network's page, the password), then out to the
+                // settings, where the category takes the focus.
+                for _ in 0..4 {
+                    match self.route() {
+                        Route::Wifi => self.act_on_wifi(Intent::Dismiss),
+                        Route::Bluetooth => self.act_on_bluetooth(Intent::Dismiss),
+                        _ => break,
+                    }
+                }
+                if self.route() != Route::Settings {
+                    return pointer::Aim::Refused;
+                }
+                if self.layout == layout::Layout::Quiet
+                    && self.settings.page().is_some()
+                    && !self.settings.modal()
+                {
+                    self.act_on_settings(Intent::Dismiss);
+                    if self.settings.page().is_some() {
+                        return pointer::Aim::Refused;
+                    }
+                }
+                self.settings.point_section(index)
+            }
             // A way back is no focus: a click on it is Back (or, out of a
             // film, Stop).
-            Zone::Back | Zone::PlayerExit => pointer::Aim::Here,
+            Zone::Back | Zone::GoHome | Zone::PlayerExit => pointer::Aim::Here,
             Zone::SettingsRows => self.settings.point_row(index),
             Zone::SettingsChoice => self.settings.point_choice(index),
             Zone::EditorCards => self.settings.point_editor(EditorTarget::Card(index)),

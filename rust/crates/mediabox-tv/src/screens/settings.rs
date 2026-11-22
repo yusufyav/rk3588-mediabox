@@ -929,6 +929,25 @@ impl Settings {
         true
     }
 
+    /// Quiet OS's wheel and hand over the rows: the focus walks them a row a
+    /// step, as Down and Up do, and the list follows the focus, so the row
+    /// the remote is on is never scrolled out of sight. From the column the
+    /// first step goes into the rows. Not under an open list, nor on an
+    /// editor's page, whose own surfaces scroll.
+    pub fn wheel_rows(&mut self, steps: i32) -> bool {
+        if steps == 0 || self.choice.is_some() || (self.pane == Pane::Page && !self.in_list_page()) {
+            return false;
+        }
+        if self.pane == Pane::Sections {
+            return self.enter_rows();
+        }
+        let mut moved = false;
+        for _ in 0..steps.unsigned_abs() {
+            moved |= self.move_rows(steps.signum());
+        }
+        moved
+    }
+
     fn move_rows(&mut self, dy: i32) -> bool {
         if dy == 0 {
             return false;

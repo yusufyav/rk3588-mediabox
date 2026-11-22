@@ -1,9 +1,10 @@
 import { Theme, Metrics } from "theme.slint";
+import { Quiet, QuietFrame } from "quiet.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
 import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import {
     SettingCard, SectionHeader, PageHeader, SideNav, StatusCorner, Backdrop, FocusRing, Icon,
-    ActionButton, InfoLine,
+    ActionButton, InfoLine, SettingNav,
 } from "kit.slint";
 
 // One row of the Wi-Fi list or of "Kayıtlı ağlar", top to bottom, in the
@@ -96,7 +97,7 @@ component Bars inherits Rectangle {
         height: parent.height * (0.28 + 0.24 * i);
         y: parent.height - self.height;
         border-radius: w / 2;
-        background: step <= bars ? (focused ? Theme.text : #d6dae2) : #ffffff26;
+        background: step <= bars ? (focused ? (Theme.quiet ? #f2e5d0 : Theme.text) : (Theme.quiet ? #c9d0d4 : #d6dae2)) : #ffffff26;
     }
 }
 
@@ -117,6 +118,8 @@ component RadioCard inherits Rectangle {
     in property <string> pointer-zone;
     in property <string> info-zone;
     in property <int> pointer-index;
+    // As SettingCard's: the list draws the travelling capsule.
+    in property <bool> glide;
     property <bool> lit: focused && !info-focused;
 
     height: under == "" ? Metrics.set-h-flat : Metrics.set-h;
@@ -127,11 +130,19 @@ component RadioCard inherits Rectangle {
         zone: root.pointer-zone;
         index: root.pointer-index;
     }
-    border-radius: Metrics.s-radius;
-    background: lit ? Theme.s-card-hi : Theme.s-card;
-    border-width: 1px;
+    border-radius: Theme.quiet ? self.height / 2 : Metrics.s-radius;
+    // Quiet OS: a row on a hairline, lifting into the warm capsule when the
+    // remote is on it, as the settings list's rows do.
+    background: Theme.quiet ? (lit && !glide ? Theme.s-card-hi : transparent) : (lit ? Theme.s-card-hi : Theme.s-card);
+    border-width: Theme.quiet ? 0px : 1px;
     border-color: lit ? transparent : Theme.s-line;
     animate background { duration: Theme.t-focus; easing: Theme.ease; }
+
+    if Theme.quiet: Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: focused ? transparent : Theme.s-hairline;
+    }
 
     HorizontalLayout {
         padding-left: Metrics.card-pad;
@@ -156,9 +167,10 @@ component RadioCard inherits Rectangle {
                 alignment: start;
                 Text {
                     text: title;
-                    color: lit ? #ffffff : Theme.text;
+                    color: lit ? (Theme.quiet ? #f2e5d0 : #ffffff) : (Theme.quiet ? #e2e5e7 : Theme.text);
                     font-size: Metrics.t-primary;
-                    font-weight: lit ? 650 : 600;
+                    font-weight: Theme.quiet ? 520 : (lit ? 650 : 600);
+                    letter-spacing: Theme.quiet ? -Metrics.t-primary * 0.02 : 0px;
                     overflow: elide;
                     wrap: no-wrap;
                     vertical-alignment: center;
@@ -167,13 +179,14 @@ component RadioCard inherits Rectangle {
                     width: tag-text.preferred-width + Metrics.t-secondary * 0.8;
                     height: Metrics.t-secondary * 1.45;
                     y: (parent.height - self.height) / 2;
-                    border-radius: self.height * 0.22;
-                    background: #ffffff1f;
+                    border-radius: Theme.quiet ? self.height / 2 : self.height * 0.22;
+                    background: Theme.quiet ? #ffffff0d : #ffffff1f;
                     tag-text := Text {
                         text: tag;
                         color: Theme.muted;
-                        font-size: Metrics.t-secondary * 0.82;
+                        font-size: Metrics.t-secondary * (Theme.quiet ? 0.75 : 0.82);
                         font-weight: 600;
+                        letter-spacing: Theme.quiet ? Metrics.t-secondary * 0.04 : 0px;
                     }
                 }
             }
@@ -221,13 +234,13 @@ component RadioCard inherits Rectangle {
                 Icon {
                     name: "info";
                     size: Metrics.icon * 1.05;
-                    ink: info-focused ? #ffffff : Theme.muted;
+                    ink: info-focused ? (Theme.quiet ? #f2e5d0 : #ffffff) : Theme.muted;
                 }
                 FocusRing {
                     width: 100%;
                     height: 100%;
                     radius: parent.width / 2;
-                    on: info-focused;
+                    on: info-focused && !Theme.quiet;
                 }
                 if info-zone != "": PointerTarget {
                     zone: root.info-zone;
@@ -240,7 +253,7 @@ component RadioCard inherits Rectangle {
     FocusRing {
         width: 100%;
         height: 100%;
-        on: lit;
+        on: lit && !Theme.quiet;
     }
 }
 
@@ -252,12 +265,34 @@ component Frame inherits Rectangle {
     in property <string> title;
     in property <string> blurb;
     in property <VitalsModel> vitals;
+    // The settings' categories, and the one this radio is a page of: Quiet
+    // OS keeps them down the left, as the settings screen does.
+    in property <[SettingNav]> sections;
+    in property <int> section;
 
-    Backdrop {
+    // Quiet OS: the settings' own frame (quiet.slint), the list in its
+    // content column.
+    if Theme.quiet: QuietFrame {
+        width: 100%;
+        height: 100%;
+        vitals: root.vitals;
+        crumb: "Ayarlar  /  Bağlantılar  /  " + root.page;
+        column: "KATEGORİLER";
+        items: root.sections;
+        current: root.section;
+        active: false;
+        pointer-zone: "settings-sections";
+        page-label: root.page;
+        page-icon: root.page-icon;
+        overline: "AYARLAR  /  BAĞLANTILAR";
+        title: root.title;
+        blurb: root.blurb;
+    }
+    if !Theme.quiet: Backdrop {
         width: 100%;
         height: 100%;
     }
-    SideNav {
+    if !Theme.quiet: SideNav {
         x: 0;
         y: 0;
         width: Metrics.safe-x + Metrics.nav-w + Metrics.safe-x * 0.5;
@@ -270,15 +305,18 @@ component Frame inherits Rectangle {
         page-icon: root.page-icon;
         back-zone: "back";
     }
-    StatusCorner {
+    if !Theme.quiet: StatusCorner {
         x: root.width - Metrics.safe-x - self.width;
         y: Metrics.safe-y;
         width: self.preferred-width;
         height: Metrics.t-nav-head * 2.6;
         network: vitals.network;
         time: vitals.time;
+        eth-up: vitals.eth-up;
+        wifi-up: vitals.wifi-up;
+        wifi-bars: vitals.wifi-bars;
     }
-    PageHeader {
+    if !Theme.quiet: PageHeader {
         x: Metrics.pane-x;
         y: Metrics.safe-y + Metrics.t-nav-head * 0.5;
         width: Metrics.pane-w * 0.68;
@@ -292,20 +330,31 @@ component Frame inherits Rectangle {
 // value beside it.
 component Facts inherits Rectangle {
     in property <[InfoLine]> rows;
+    // Quiet OS: readings on hairlines, as the settings list draws them.
     border-radius: Metrics.s-radius;
-    background: Theme.s-card;
-    border-width: 1px;
+    background: Theme.quiet ? transparent : Theme.s-card;
+    border-width: Theme.quiet ? 0px : 1px;
     border-color: Theme.s-line;
     height: body.preferred-height;
 
     body := VerticalLayout {
-        padding-left: Metrics.card-pad;
-        padding-right: Metrics.card-pad;
-        padding-top: Metrics.card-pad * 0.5;
-        padding-bottom: Metrics.card-pad * 0.5;
+        padding-left: Theme.quiet ? 0px : Metrics.card-pad;
+        padding-right: Theme.quiet ? 0px : Metrics.card-pad;
+        padding-top: Theme.quiet ? 0px : Metrics.card-pad * 0.5;
+        padding-bottom: Theme.quiet ? 0px : Metrics.card-pad * 0.5;
         for r in rows: HorizontalLayout {
             spacing: Metrics.card-pad * 0.6;
-            height: Metrics.t-primary * 2.1;
+            height: Theme.quiet ? Metrics.reading-h : Metrics.t-primary * 2.1;
+            if Theme.quiet: Rectangle {
+                width: 0px;
+                Rectangle {
+                    x: 0;
+                    y: parent.height - 1px;
+                    width: root.width;
+                    height: 1px;
+                    background: Theme.s-hairline;
+                }
+            }
             Text {
                 text: r.label;
                 color: Theme.muted;
@@ -344,11 +393,14 @@ component RadioList inherits Rectangle {
     // The rows' zone and the networks' (i) zone, by the row's slot.
     in property <string> rows-zone;
     in property <string> info-zone;
+    property <bool> glide-on;
 
     property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
-    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
-    property <length> flat-step: Metrics.set-h-flat + Metrics.row-gap;
-    property <length> tall-step: Metrics.set-h + Metrics.row-gap;
+    property <length> top: Theme.quiet ? Quiet.content-top : Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> col-x: Theme.quiet ? Quiet.content-x : Metrics.pane-x;
+    property <length> col-w: Theme.quiet ? Quiet.content-w : Metrics.list-w;
+    property <length> flat-step: Metrics.set-h-flat + Metrics.stack-gap;
+    property <length> tall-step: Metrics.set-h + Metrics.stack-gap;
     property <length> note-step: Metrics.t-secondary * 2.4;
 
     Rectangle {
@@ -372,9 +424,9 @@ component RadioList inherits Rectangle {
         }
         property <length> scroll: pan.value;
 
-        x: Metrics.pane-x - pad;
+        x: col-x - pad;
         y: top - pad;
-        width: Metrics.list-w + pad * 2;
+        width: col-w + pad * 2;
         height: root.height - Metrics.safe-y - top + pad;
         clip: true;
 
@@ -383,10 +435,31 @@ component RadioList inherits Rectangle {
         Rectangle {
             x: pad;
             y: pad - scroll;
-            width: Metrics.list-w;
+            width: col-w;
             animate y { duration: pan.duration; easing: Theme.ease; }
 
+            // Quiet OS: the focus is one capsule travelling from row to
+            // row, as on the settings list; only over a row, not over a
+            // heading's "Yenile" or a network's (i), which light their own.
+            if Theme.quiet: Rectangle {
+                x: 0;
+                y: focus-y;
+                width: parent.width;
+                height: focus-tall ? Metrics.set-h : Metrics.set-h-flat;
+                border-radius: self.height / 2;
+                background: Theme.s-card-hi;
+                opacity: root.glide-on ? 1 : 0;
+                animate y, height { duration: Theme.motion ? 230ms : 0ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
+                animate opacity { duration: Theme.t-focus; easing: Theme.ease; }
+            }
+
             for row in rows: Rectangle {
+                // Which row the remote is on, and whether it is one the
+                // capsule lifts: a card or the switch, not its (i).
+                property <int> focus-kind: !row.focused ? 0
+                    : ((row.kind == "card" || row.kind == "toggle") && !row.info-focused ? 1 : 2);
+                init => { if focus-kind > 0 { root.glide-on = focus-kind == 1; } }
+                changed focus-kind => { if focus-kind > 0 { root.glide-on = focus-kind == 1; } }
                 y: row-y(row);
                 width: 100%;
                 height: row-h(row);
@@ -398,12 +471,13 @@ component RadioList inherits Rectangle {
                     width: 100%;
                     height: 100%;
                     Text {
-                        x: Metrics.card-pad * 0.4;
-                        y: parent.height - self.height - Metrics.row-gap * 0.5;
+                        x: Theme.quiet ? Metrics.card-pad : Metrics.card-pad * 0.4;
+                        y: parent.height - self.height - (Theme.quiet ? 12px * Metrics.qu : Metrics.row-gap * 0.5);
                         text: row.label;
-                        color: Theme.muted;
-                        font-size: Metrics.t-secondary;
+                        color: Theme.quiet ? #80919a : Theme.muted;
+                        font-size: Theme.quiet ? 14px * Metrics.qu : Metrics.t-secondary;
                         font-weight: 600;
+                        letter-spacing: Theme.quiet ? 14px * Metrics.qu * 0.04 : 0px;
                     }
                     if row.tag != "" && !row.on: Rectangle {
                         x: parent.width - self.width;
@@ -449,6 +523,7 @@ component RadioList inherits Rectangle {
                     value: !known ? "…" : (present ? "" : "Bu kartta yok");
                     enabled: !known || present;
                     focused: row.focused;
+                    glide: Theme.quiet;
                     pointer-zone: row.slot >= 0 ? root.rows-zone : "";
                     pointer-index: row.slot;
                 }
@@ -464,6 +539,7 @@ component RadioList inherits Rectangle {
                     tag: row.tag;
                     info: row.info;
                     info-focused: row.info-focused;
+                    glide: Theme.quiet;
                     icon: row.icon;
                     pointer-zone: row.slot >= 0 ? root.rows-zone : "";
                     info-zone: row.info ? root.info-zone : "";
@@ -490,6 +566,8 @@ export component WifiScreen inherits Rectangle {
     in property <bool> busy;
     in property <string> notice;
     in property <VitalsModel> vitals;
+    in property <[SettingNav]> sections;
+    in property <int> section;
 
     // "list" | "saved" | "details" | "password"
     in property <string> face;
@@ -521,9 +599,11 @@ export component WifiScreen inherits Rectangle {
     in property <int> key-col;
 
     property <length> head-h: Metrics.t-page * 1.3 + Metrics.t-secondary * 1.5;
-    property <length> top: Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
-    property <length> flat-step: Metrics.set-h-flat + Metrics.row-gap;
-    property <length> tall-step: Metrics.set-h + Metrics.row-gap;
+    property <length> top: Theme.quiet ? Quiet.content-top : Metrics.safe-y + head-h + Metrics.row-gap * 3.4;
+    property <length> col-x: Theme.quiet ? Quiet.content-x : Metrics.pane-x;
+    property <length> col-w: Theme.quiet ? Quiet.content-w : Metrics.list-w;
+    property <length> flat-step: Metrics.set-h-flat + Metrics.stack-gap;
+    property <length> tall-step: Metrics.set-h + Metrics.stack-gap;
     property <length> note-step: Metrics.t-secondary * 2.4;
 
     background: Theme.s-ground;
@@ -537,6 +617,8 @@ export component WifiScreen inherits Rectangle {
         title: root.title;
         blurb: notice;
         vitals: root.vitals;
+        sections: root.sections;
+        section: root.section;
 
         RadioList {
             width: 100%;
@@ -564,11 +646,13 @@ export component WifiScreen inherits Rectangle {
         title: root.target;
         blurb: notice != "" ? notice : details-status;
         vitals: root.vitals;
+        sections: root.sections;
+        section: root.section;
 
         VerticalLayout {
-            x: Metrics.pane-x;
+            x: col-x;
             y: top;
-            width: Metrics.list-w;
+            width: col-w;
             height: self.preferred-height;
             spacing: Metrics.row-gap * 1.6;
             alignment: start;
@@ -759,6 +843,8 @@ export component BluetoothScreen inherits Rectangle {
     in property <string> summary;
     in property <string> notice;
     in property <VitalsModel> vitals;
+    in property <[SettingNav]> sections;
+    in property <int> section;
     in property <[WifiRow]> rows;
     in property <int> focus-flats;
     in property <int> focus-talls;
@@ -777,6 +863,8 @@ export component BluetoothScreen inherits Rectangle {
         title: "Bluetooth";
         blurb: notice != "" ? notice : summary;
         vitals: root.vitals;
+        sections: root.sections;
+        section: root.section;
 
         RadioList {
             width: 100%;
