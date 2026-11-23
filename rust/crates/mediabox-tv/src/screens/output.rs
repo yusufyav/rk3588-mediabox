@@ -737,6 +737,26 @@ impl Output {
         self.picker.is_some() || self.sheet != Sheet::None
     }
 
+    /// The list the focus is on, by its targets' zone; none under a
+    /// question, on the colour cells, which are a grid, and on the buttons.
+    pub fn list(&self) -> Option<crate::pointer::Zone> {
+        use crate::pointer::Zone as Target;
+        if self.sheet != Sheet::None {
+            return None;
+        }
+        if self.picker.is_some() {
+            return Some(Target::EditorPicker);
+        }
+        if self.face == Face::Simple {
+            return (self.simple < SIMPLE_ROWS).then_some(Target::EditorCards);
+        }
+        match self.zone {
+            Zone::Resolutions => Some(Target::OutputResolutions),
+            Zone::Rates => Some(Target::OutputRates),
+            Zone::Colours | Zone::Actions => None,
+        }
+    }
+
     // ------------------------------------------------------------ pressing
 
     pub fn press(&mut self) -> Press {

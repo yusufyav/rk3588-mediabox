@@ -299,6 +299,99 @@ fn a_pointer_reaches_what_each_screen_draws_and_nothing_else() {
     }
     ui.set_settings_choice_open(false);
 
+    // ------------------------------------------- the same two, Quiet OS
+    // Another face, the same targets: what the classic face reaches above,
+    // under the same zones and indices, and nothing the classic does not.
+    ui.set_layout("quiet".into());
+    let reached = panel.reach();
+    assert!(has(&reached, "settings-sections", 0) && has(&reached, "settings-sections", 1));
+    assert!(has(&reached, "settings-rows", 0) && has(&reached, "settings-rows", 2));
+    assert!(!has(&reached, "settings-rows", 1), "a disabled card is no target");
+    // Quiet's top left is the way home (the remote's Home); one level back
+    // is the remote's Back and the right button.
+    assert!(zones(&reached).contains("go-home"), "the way home");
+    assert_eq!(
+        zones(&reached),
+        BTreeSet::from(["go-home", "settings-rows", "settings-sections"]),
+        "{reached:?}"
+    );
+    ui.set_settings_choice_open(true);
+    let reached = panel.reach();
+    assert!(has(&reached, "settings-choice", 0) && !has(&reached, "settings-choice", 1));
+    for under in ["settings-rows", "settings-sections"] {
+        assert!(!zones(&reached).contains(under), "{under} is under the list");
+    }
+    ui.set_settings_choice_open(false);
+    ui.set_screen("home".into());
+    let tile = |id: &str| crate::AppTile {
+        id: id.into(),
+        name: id.into(),
+        ready: true,
+        ..Default::default()
+    };
+    ui.set_apps(model(vec![tile("media"), tile("livetv"), tile("browser"), tile("settings"), tile("kodi")]));
+    let reached = panel.reach();
+    assert_eq!(indices(&reached, "quiet-home"), (0..5).collect(), "every application: {reached:?}");
+    assert_eq!(zones(&reached), BTreeSet::from(["quiet-home"]), "home is the root: no way back");
+
+    // Five, ten, twenty applications: every row keeps its height (a target
+    // a hand can hit, a name that can be read), the column shows as many as
+    // fit, the remote's focus is always among them, and a hand moves the
+    // column to its other end and no further.
+    for count in [5usize, 10, 20] {
+        let many: Vec<crate::AppTile> = (0..count)
+            .map(|n| crate::AppTile {
+                id: format!("app-{n}").into(),
+                name: format!("Uygulama {n}").into(),
+                ready: true,
+                ..Default::default()
+            })
+            .collect();
+        ui.set_apps(model(many));
+        ui.global::<PointerPan>().set_pinned(false);
+        for focus in [0, count / 2, count - 1] {
+            ui.set_focus_col(focus as i32);
+            panel.settle_eased();
+            let shown = indices(&panel.reach(), "quiet-home");
+            assert!(shown.contains(&(focus as i32)), "{count} apps, focus {focus}: {shown:?}");
+            // 83 design px a row in 592 of column: seven rows whole, and
+            // at most the edges of one more each way.
+            assert!(shown.len() >= count.min(7) && shown.len() <= 9, "{count}: {shown:?}");
+            let lo = *shown.iter().min().unwrap();
+            let hi = *shown.iter().max().unwrap();
+            assert_eq!(shown.len() as i32, hi - lo + 1, "one run of rows: {shown:?}");
+        }
+        // A pointer takes over: dragged a long way up, the last row; a long
+        // way down, the first, and no further either way.
+        ui.set_focus_col(0);
+        panel.settle_eased();
+        ui.global::<PointerPan>().set_pinned(true);
+        panel.edges.borrow_mut().clear();
+        panel.pan("quiet-home", -1, 100 + count as i32, 0.0, -10_000.0);
+        let bottom = indices(&panel.reach(), "quiet-home");
+        assert!(bottom.contains(&(count as i32 - 1)), "{count}: {bottom:?}");
+        assert_eq!(
+            bottom.contains(&0),
+            count <= 7,
+            "{count}: only a column that does not fit scrolls: {bottom:?}"
+        );
+        if count > 7 {
+            assert!(panel.edges.borrow().contains(&("quiet-home".to_string(), -1)));
+        }
+        panel.pan("quiet-home", -1, 200 + count as i32, 0.0, 10_000.0);
+        assert!(indices(&panel.reach(), "quiet-home").contains(&0), "{count}: back to the top");
+    }
+    ui.global::<PointerPan>().set_pinned(true);
+    ui.set_focus_col(0);
+    ui.set_apps(model(vec![]));
+    let reached = panel.reach();
+    assert!(reached.is_empty(), "an empty launcher draws no target: {reached:?}");
+    ui.set_apps(model(vec![tile("media"), tile("livetv"), tile("browser"), tile("settings"), tile("kodi")]));
+
+    ui.set_layout("classic".into());
+    let reached = panel.reach();
+    assert_eq!(indices(&reached, "home"), (0..5).collect(), "and the classic row");
+
     // ------------------------------------------------------- diagnostics
     ui.set_screen("diagnostics".into());
     ui.set_diag_nav(model(vec![SettingNav {
@@ -865,6 +958,7 @@ fn driven() -> (MediaBoxWindow, Scratch) {
         window: window.clone(),
     }))
     .expect("one platform");
+    SHOT_WINDOW.with(|slot| *slot.borrow_mut() = Some(window.clone()));
     let ui = MediaBoxWindow::new().expect("the interface");
     ui.window().set_size(slint::PhysicalSize::new(W, H));
     ui.show().expect("shown");
@@ -878,6 +972,7 @@ fn driven() -> (MediaBoxWindow, Scratch) {
         cache: dir.join("cache").display().to_string(),
         state: dir.join("state.json").display().to_string(),
         prefs: dir.join("media-preferences.json"),
+        interface: dir.join("interface-preferences.json"),
         live_kept: crate::LiveKept::default(),
     };
     let app = crate::App::new(&ui, std::time::Instant::now(), false, files);
@@ -1061,6 +1156,533 @@ fn fingers_lifted_off_a_touchpad_leave_the_rows_coasting() {
     assert!(!app(|app| app.gesture.coasting()));
 }
 
+/// Quiet OS: a wheel's detent takes the rows over for the focus, so what the
+/// fingers left coasting there stops, and its frames with it. Left running,
+/// the coast's next frame took the list away from the focus again. A button
+/// held down keeps its drag: a detent is not the end of it.
+#[test]
+fn quiet_wheel_cancels_scroll_inertia_before_reclaiming_focus() {
+    use crate::pointer::{Hit, Lane, Phase, Scroll, Zone};
+    use crate::screens::settings::Pane;
+    use std::time::{Duration, Instant};
+
+    let (ui, _scratch) = driven();
+    app(|app| {
+        app.layout = crate::layout::Layout::Quiet;
+        app.settings.set_layout(app.layout);
+        app.open(crate::route::Route::Settings);
+        app.pointer_lit = Some((Zone::SettingsRows, 0));
+
+        let lane = Lane::vertical(Zone::SettingsRows);
+        let now = Instant::now();
+        for step in (0..6).rev() {
+            app.gesture.wheel(lane, 30.0, now - Duration::from_millis(step * 10));
+        }
+        assert!(app.gesture.lift((false, true), true, 1080.0, now));
+        app.pointer_coast_start();
+        assert!(app.gesture.coasting());
+        assert!(app.coast_timer.running());
+        assert_eq!(app.settings.pane, Pane::Sections);
+
+        app.pointer_scroll(Scroll::Wheel(0.0, 120.0));
+        assert_eq!(app.settings.pane, Pane::Rows);
+        assert!(
+            !app.gesture.coasting(),
+            "a wheel detent moved focus, but the previous pan still owns the next frame"
+        );
+        assert!(!app.coast_timer.running(), "its frames are timed no more");
+    });
+    // Frames later, nothing has moved the surface on.
+    let pan = || {
+        let pan = ui.global::<crate::PointerPan>();
+        (pan.get_gesture(), pan.get_dy())
+    };
+    let after = pan();
+    std::thread::sleep(Duration::from_millis(50));
+    slint::platform::update_timers_and_animations();
+    assert_eq!(pan(), after, "the list stays with the focus");
+
+    // The hand's own drag goes on through a detent.
+    app(|app| {
+        app.gesture.press((900.0, 600.0), app.pointer_context(), 1080.0);
+        app.gesture
+            .hit(Hit::Target(Zone::SettingsRows, 0), app.pointer_context());
+        app.gesture.motion((900.0, 500.0), Instant::now());
+        assert!(matches!(app.gesture.phase(), Phase::Panning { .. }));
+        app.pointer_scroll(Scroll::Wheel(0.0, 120.0));
+        assert!(matches!(app.gesture.phase(), Phase::Panning { .. }));
+    });
+}
+
+/// Slint's clock on, and the pointer's targets with it: animations over.
+fn settle(ui: &MediaBoxWindow) {
+    for _ in 0..6 {
+        slint::platform::update_timers_and_animations();
+        std::thread::sleep(std::time::Duration::from_millis(60));
+    }
+    slint::platform::update_timers_and_animations();
+    crate::platform::deliver_pointer(ui.window());
+}
+
+/// The targets of `zone` drawn on the panel, from where the arrow is to the
+/// right: what hit testing reaches, so what a list clips away is not here.
+/// The arrow is back where it was when this ends.
+fn drawn(ui: &MediaBoxWindow, zone: crate::pointer::Zone, at: (f32, f32)) -> BTreeSet<usize> {
+    let mut seen = BTreeSet::new();
+    for x in (at.0 as usize..W as usize).step_by(STEP * 5) {
+        for y in (0..H as usize).step_by(STEP) {
+            point(ui, x as f32, y as f32);
+            if let Some((lit, index)) = app(|app| app.pointer_lit)
+                && lit == zone
+            {
+                seen.insert(index);
+            }
+        }
+    }
+    point(ui, at.0, at.1);
+    seen
+}
+
+/// The button down at (x, from), and the hand to (x, to) with it.
+fn drag(ui: &MediaBoxWindow, x: f32, from: f32, to: f32) {
+    point(ui, x, from);
+    app(|app| app.pointer_button(true));
+    crate::platform::deliver_pointer(ui.window());
+    for step in 1..=6 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        point(ui, x, from + (to - from) * step as f32 / 6.0);
+        slint::platform::update_timers_and_animations();
+    }
+}
+
+/// And up.
+fn lift(ui: &MediaBoxWindow) {
+    app(|app| app.pointer_button(false));
+    crate::platform::deliver_pointer(ui.window());
+}
+
+/// One list of Quiet OS's settings family under the wheel. A hand takes it
+/// away from the focus and leaves it coasting; the first detent ends that,
+/// moves the focus a row and shows it, and so does every one after it, each
+/// as far as the remote's own key goes. A drag moves the list alone.
+fn wheel_walks_the_focus(
+    ui: &MediaBoxWindow,
+    zone: crate::pointer::Zone,
+    last: usize,
+    focus: impl Fn() -> usize,
+) {
+    use crate::pointer::Scroll;
+    let at = find(ui, Some(zone));
+    let wheel = |detents: i32| {
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, f64::from(detents * 120)));
+    };
+    let shown = |what: &str| {
+        settle(ui);
+        let seen = drawn(ui, zone, at);
+        assert!(seen.contains(&focus()), "{zone:?} {what}: {} of {seen:?}", focus());
+    };
+    let pan = || ui.global::<PointerPan>().get_dy();
+    let start = focus();
+    let hand = |from: f32, to: f32| drag(ui, at.0, from, to);
+    let drop = || lift(ui);
+    // A hand takes the list away until the focus is off the panel.
+    hand(at.1 + 300.0, at.1 + 60.0);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    drop();
+    settle(ui);
+    let seen = drawn(ui, zone, at);
+    assert!(!seen.contains(&start), "{zone:?} dragged away: {start} of {seen:?}");
+    // Let go while moving: the list runs on, the focus stays.
+    hand(at.1 + 300.0, at.1 + 40.0);
+    drop();
+    assert!(
+        app(|app| app.gesture.coasting() && app.coast_timer.running()),
+        "{zone:?}: the list runs on"
+    );
+    assert_eq!(focus(), start, "{zone:?}: a hand leaves the focus");
+    // A frame of it the surface hears of only with the wheel.
+    slint::platform::update_timers_and_animations();
+    app(|app| app.pointer_coast(0.016));
+    wheel(1);
+    assert!(!app(|app| app.gesture.coasting() || app.coast_timer.running()), "{zone:?}");
+    assert_eq!(focus(), start + 1, "{zone:?}: a row a detent");
+    let after = pan();
+    shown("after a coast");
+    assert_eq!(pan(), after, "{zone:?}: nothing moves it on");
+    wheel(-1);
+    assert_eq!(focus(), start, "{zone:?}: and back");
+    // Part of a detent moves nothing until the rest of it comes.
+    for part in [40.0, 40.0] {
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, part));
+        assert_eq!(focus(), start, "{zone:?}: part of a detent");
+    }
+    crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, 40.0));
+    assert_eq!(focus(), start + 1, "{zone:?}: the whole of it");
+    // Several detents in one report are as many rows, none dropped.
+    wheel(2);
+    assert_eq!(focus(), (start + 3).min(last), "{zone:?}: each detent counts");
+    // To the end, a detent at a time, the focus in view all along.
+    for turn in 0..last + 2 {
+        wheel(1);
+        if turn % 6 == 0 {
+            shown("on the way down");
+        }
+    }
+    assert_eq!(focus(), last, "{zone:?}: the end");
+    shown("at the end");
+    // A held button's drag moves the list alone, and the wheel waits for it.
+    hand(at.1 + 60.0, at.1 + 200.0);
+    let drag = app(|app| app.gesture.phase());
+    assert!(
+        matches!(drag, crate::pointer::Phase::Panning { lane, .. } if lane.zone == zone),
+        "{zone:?}: {drag:?}"
+    );
+    wheel(-1);
+    assert_eq!(focus(), last, "{zone:?}: the hand has the list");
+    assert_eq!(app(|app| app.gesture.phase()), drag);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    drop();
+    point(ui, at.0, at.1);
+    for _ in 0..last + 2 {
+        wheel(-1);
+    }
+    assert_eq!(focus(), 0, "{zone:?}: the top");
+    shown("at the top");
+}
+
+/// A box with a Wi-Fi and a Bluetooth list longer than the panel.
+fn with_radios() {
+    app(|app| {
+        app.wifi.open();
+        app.wifi.known = true;
+        app.wifi.present = true;
+        app.wifi.powered = true;
+        app.wifi.take_networks(
+            (0..30)
+                .map(|n| crate::screens::wireless::Network {
+                    ssid: format!("Ağ {n:02}"),
+                    signal: -50,
+                    secured: true,
+                    heard: true,
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        let devices: Vec<_> = (0..24)
+            .map(|n| {
+                serde_json::json!({
+                    "address": format!("00:00:00:00:00:{n:02}"), "name": format!("Aygıt {n:02}"),
+                    "paired": n < 6, "connected": n == 0,
+                })
+            })
+            .collect();
+        app.bt.open();
+        app.bt.take_status(&serde_json::json!({
+            "present": true, "controller": {"address": "00", "powered": true}, "devices": devices,
+        }));
+    });
+}
+
+fn wear(layout: crate::layout::Layout) {
+    app(|app| {
+        app.layout = layout;
+        app.settings.set_layout(layout);
+        app.paint();
+    });
+}
+
+/// Quiet OS's "Sistem" with thirty cards, the focus on the first.
+fn long_settings() {
+    wear(crate::layout::Layout::Quiet);
+    app(|app| {
+        app.open(crate::route::Route::Settings);
+        let system = app.settings.groups.iter().position(|g| g.title == "Sistem").expect("Sistem");
+        app.settings.point_section(system);
+        let row = app.settings.groups[system].rows.iter().find(|r| r.action.is_some()).cloned();
+        app.settings.groups[system].rows = vec![row.expect("a card"); 30];
+        app.settings.point_row(0);
+        app.paint();
+    });
+}
+
+/// A coast's frame the surface has not been told of when a wheel, the
+/// remote or a mouse's Back takes the list over: it is never applied, nor is
+/// one after it, and the row the focus is on is on the panel.
+#[test]
+fn a_frame_not_yet_drawn_never_takes_the_list_from_the_focus() {
+    use crate::input::Origin;
+    use crate::pointer::{Scroll, Zone};
+    use crate::screens::settings::Pane;
+    use mediabox_core::InputAction;
+    let (ui, _scratch) = driven();
+    long_settings();
+    let at = find(&ui, Some(Zone::SettingsRows));
+    for (input, pane, row) in [
+        ("wheel", Pane::Rows, 2),
+        ("remote", Pane::Rows, 1),
+        ("back", Pane::Sections, 0),
+    ] {
+        app(|app| {
+            app.settings.point_row(0);
+            app.paint();
+        });
+        drag(&ui, at.0, at.1 + 300.0, at.1 + 60.0);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        lift(&ui);
+        settle(&ui);
+        assert!(!drawn(&ui, Zone::SettingsRows, at).contains(&0), "{input}: dragged away");
+        drag(&ui, at.0, at.1 + 300.0, at.1 + 40.0);
+        lift(&ui);
+        slint::platform::update_timers_and_animations();
+        app(|app| {
+            assert!(app.gesture.coasting() && app.coast_timer.running(), "{input}");
+            app.pointer_coast(0.016);
+        });
+        match input {
+            "wheel" => crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, 240.0)),
+            "remote" => app(|app| app.remote_key(InputAction::Down, true, Origin::Keyboard)),
+            _ => app(|app| app.pointer_back(true)),
+        }
+        app(|app| {
+            assert_eq!((app.settings.pane, app.settings.row_index()), (pane, row), "{input}");
+            assert!(!app.gesture.coasting() && !app.coast_timer.running(), "{input}");
+            app.pointer_coast(0.016);
+        });
+        settle(&ui);
+        let seen = drawn(&ui, Zone::SettingsRows, at);
+        assert!(seen.contains(&row), "{input}: {row} of {seen:?}");
+    }
+}
+
+/// The rows of a settings category longer than the panel.
+#[test]
+fn quiet_wheel_walks_the_settings_rows() {
+    use crate::pointer::Zone;
+    let (ui, _scratch) = driven();
+    long_settings();
+    wheel_walks_the_focus(&ui, Zone::SettingsRows, 29, || app(|app| app.settings.row_index()));
+    // From the column the first detent goes into the rows, the rest on.
+    app(|app| {
+        app.settings.back();
+        app.settings.wheel_rows(3);
+        assert_eq!(app.settings.pane, crate::screens::settings::Pane::Rows);
+        assert_eq!(app.settings.row_index(), 2);
+    });
+}
+
+#[test]
+fn quiet_wheel_walks_a_long_wifi_list() {
+    use crate::pointer::Zone;
+    let (ui, _scratch) = driven();
+    with_radios();
+    wear(crate::layout::Layout::Quiet);
+    app(|app| app.open(crate::route::Route::Wifi));
+    // The switch, "Diğer ağlar"'s "Yenile", thirty networks, and the two
+    // rows under them; headings are stepped over.
+    wheel_walks_the_focus(&ui, Zone::WifiRows, 33, || app(|app| app.wifi.index));
+    // A network's page and the password are no list: their wheel is the
+    // arrows, at the remote's own pace, as it was.
+    app(|app| {
+        app.wifi.face = crate::screens::wireless::Face::Password;
+        app.paint();
+        assert_eq!(app.focus_list(), None);
+        app.wifi.face = crate::screens::wireless::Face::Details;
+        assert_eq!(app.focus_list(), None);
+    });
+}
+
+#[test]
+fn quiet_wheel_walks_the_bluetooth_list() {
+    use crate::pointer::Zone;
+    let (ui, _scratch) = driven();
+    with_radios();
+    wear(crate::layout::Layout::Quiet);
+    app(|app| app.open(crate::route::Route::Bluetooth));
+    wheel_walks_the_focus(&ui, Zone::BtRows, 25, || app(|app| app.bt.index));
+}
+
+/// The classic face's radios scroll under the wheel and keep the focus.
+#[test]
+fn the_classic_wheel_scrolls_the_radios_and_leaves_the_focus() {
+    use crate::pointer::{Phase, Scroll, Zone};
+    let (ui, _scratch) = driven();
+    with_radios();
+    for (route, zone) in [
+        (crate::route::Route::Wifi, Zone::WifiRows),
+        (crate::route::Route::Bluetooth, Zone::BtRows),
+    ] {
+        app(|app| app.open(route));
+        find(&ui, Some(zone));
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, 240.0));
+        let phase = app(|app| app.gesture.phase());
+        assert!(
+            matches!(phase, Phase::Wheeling { lane, .. } if lane.zone == zone),
+            "{phase:?}"
+        );
+        assert_eq!(app(|app| (app.wifi.index, app.bt.index)), (0, 0));
+    }
+}
+
+/// A list open over the settings takes the whole wheel: on it, its focus;
+/// beside it, its focus as well; the rows under it, never.
+#[test]
+fn quiet_wheel_stays_in_an_open_choice() {
+    use crate::pointer::{Scroll, Zone};
+    let (ui, _scratch) = driven();
+    wear(crate::layout::Layout::Quiet);
+    let wheel = |detents: i32| {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, f64::from(detents * 120)));
+    };
+    let choice = || app(|app| app.settings.choice_view().map(|view| view.focus));
+    let rows = app(|app| {
+        app.open(crate::route::Route::Settings);
+        let system = app.settings.groups.iter().position(|g| g.title == "Sistem").expect("Sistem");
+        app.settings.point_section(system);
+        app.settings.point_row(0);
+        app.settings.open_layout_choice();
+        app.settings.point_choice(0);
+        app.paint();
+        (app.settings.section, app.settings.row_index(), app.settings.pane)
+    });
+    let released = || {
+        let pan = ui.global::<PointerPan>();
+        (pan.get_release(), pan.get_release_surface().to_string())
+    };
+    let at = find(&ui, Some(Zone::SettingsChoice));
+    wheel(1);
+    assert_eq!(choice(), Some(1));
+    assert_eq!(released().1, "settings-choice", "only the list on top");
+    settle(&ui);
+    assert!(drawn(&ui, Zone::SettingsChoice, at).contains(&1));
+    wheel(3);
+    assert_eq!(choice(), Some(crate::layout::Layout::ALL.len() - 1));
+    wheel(-3);
+    assert_eq!(choice(), Some(0));
+    // Off the list, on the ground over the page: the arrows, as it was, and
+    // no list given back.
+    point(&ui, 4.0, H as f32 - 4.0);
+    let before = released();
+    wheel(1);
+    assert_eq!(choice(), Some(1));
+    assert_eq!(released(), before);
+    assert_eq!(
+        app(|app| (app.settings.section, app.settings.row_index(), app.settings.pane)),
+        rows,
+        "the rows under it stay"
+    );
+}
+
+/// An editor's cards and the list one opens, longer than its window: each
+/// detent a card, and an option, as the remote's keys have it.
+#[test]
+fn quiet_wheel_walks_an_editor_and_its_open_list() {
+    use crate::pointer::{Scroll, Zone};
+    use crate::screens::settings::Page;
+    let (ui, _scratch) = driven();
+    wear(crate::layout::Layout::Quiet);
+    let mut audio = crate::screens::audio::tests::status_for_tests(Default::default());
+    let device = audio.devices[0].clone();
+    audio.devices = (0..14)
+        .map(|n| {
+            let mut device = device.clone();
+            device.id = format!("usb:{n}");
+            device
+        })
+        .collect();
+    let status = serde_json::json!({
+        "audio": audio,
+        "output": crate::screens::output::tests::status_for_tests(),
+    });
+    let open = |page: Page| {
+        app(|app| {
+            app.open(crate::route::Route::Settings);
+            while app.settings.back() {}
+            app.settings.compose(Some(&status), None, None);
+            let (g, r) = (0..app.settings.groups.len())
+                .find_map(|g| {
+                    let rows = &app.settings.groups[g].rows;
+                    rows.iter().position(|row| row.page == Some(page)).map(|r| (g, r))
+                })
+                .expect("the page's card");
+            app.settings.point_section(g);
+            app.settings.point_row(r);
+            assert!(app.settings.open(page));
+            app.paint();
+        });
+    };
+    let lit = |zone: Zone| {
+        for y in (STEP / 2..H as usize).step_by(STEP) {
+            point(&ui, W as f32 * 0.6, y as f32);
+            if app(|app| app.pointer_lit.is_some_and(|(lit, _)| lit == zone)) {
+                return;
+            }
+        }
+        panic!("no {zone:?}");
+    };
+    let wheel = |detents: i32| {
+        crate::platform::hand_scroll(ui.window(), Scroll::Wheel(0.0, f64::from(detents * 120)));
+    };
+    open(Page::Audio);
+    lit(Zone::EditorCards);
+    let card = || app(|app| app.settings.audio.focused());
+    let first = card();
+    let mut walked = Vec::new();
+    for _ in 0..2 {
+        app(|app| app.act_on_settings(crate::actions::Intent::Move(0, 1)));
+        walked.push(card());
+    }
+    for _ in 0..2 {
+        app(|app| app.act_on_settings(crate::actions::Intent::Move(0, -1)));
+    }
+    assert_eq!(card(), first);
+    wheel(1);
+    assert_eq!(card(), walked[0], "as Down");
+    wheel(1);
+    assert_eq!(card(), walked[1], "and at once again, none dropped");
+    wheel(-2);
+    assert_eq!(card(), first, "two in one report");
+    app(|app| app.act_on_settings(crate::actions::Intent::Select));
+    let option = || {
+        app(|app| app.settings.audio.view())
+            .picker
+            .iter()
+            .position(|option| option.focused)
+            .unwrap()
+    };
+    app(|app| app.settings.point_editor(crate::screens::settings::EditorTarget::Picker(0)));
+    app(|app| app.paint());
+    wheel_walks_the_focus(&ui, Zone::EditorPicker, 14, option);
+    assert_eq!(card(), first, "the cards under it stay");
+
+    // The display's sizes on its advanced face, with the focus on them.
+    open(Page::Output);
+    app(|app| {
+        // The last card is the advanced face's.
+        for _ in 0..3 {
+            app.act_on_settings(crate::actions::Intent::Move(0, 1));
+        }
+        app.act_on_settings(crate::actions::Intent::Select);
+        app.paint();
+    });
+    let focus = || app(|app| app.settings.output.focus());
+    find(&ui, Some(Zone::OutputResolutions));
+    let (zone, at, ..) = focus();
+    wheel(if at == 0 { 1 } else { -1 });
+    assert_eq!((focus().0, focus().1.abs_diff(at)), (zone, 1), "a size a detent");
+    // With the focus on the rates, a wheel over the sizes leaves it there.
+    if focus().1 == 0 {
+        wheel(1);
+    }
+    app(|app| app.act_on_settings(crate::actions::Intent::Move(1, 0)));
+    assert_eq!(app(|app| app.focus_list()), Some(Zone::OutputRates));
+    let rates = focus();
+    for detents in [1, -1] {
+        wheel(detents);
+        assert_eq!(focus(), rates, "the focus keeps its column");
+    }
+}
+
 /// The Wi-Fi scan's spinner is drawn and runs on the animation clock: half
 /// an arc cycle (1333 ms) apart, its arc is another. The ring's own turn --
 /// 720 degrees every 4444 ms, on the arc's Path now that it is a child of
@@ -1130,4 +1752,302 @@ fn the_wifi_scan_spinner_runs_on_the_animation_clock() {
     let still = frame();
     std::thread::sleep(std::time::Duration::from_millis(667));
     assert_eq!(differ(&still, &frame()), 0, "no spinner, nothing moving");
+}
+
+
+/// Quiet OS is chosen where the classic face's settings are, takes the
+/// screen at once -- the same screen, the same row, no restart -- and is
+/// what the next start comes up in. Its launcher is a column: Down walks it.
+#[test]
+fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
+    use mediabox_core::InputAction;
+    let (ui, scratch) = driven();
+    // Paced as a hand presses: the dispatcher takes a repeat of a key this
+    // close to the last as one.
+    let key = |action| {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app(|app| {
+            app.remote_key(action, true, crate::input::Origin::Keyboard);
+            app.remote_key(action, false, crate::input::Origin::Keyboard);
+        });
+    };
+    assert_eq!(ui.get_layout(), "classic", "a box that never chose");
+    app(|app| app.open(crate::route::Route::Settings));
+    let system = app(|app| {
+        app.settings
+            .groups
+            .iter()
+            .position(|g| g.title == "Sistem")
+            .expect("Sistem")
+    });
+    app(|app| {
+        app.settings.point_section(system);
+        app.paint();
+    });
+    key(InputAction::Right);
+    let card = app(|app| app.settings.focused().map(|r| (r.label.clone(), r.value.clone())));
+    assert_eq!(card, Some(("Arayüz düzeni".into(), "Klasik MediaBox".into())));
+    key(InputAction::Ok);
+    assert!(ui.get_settings_choice_open(), "the two faces, as a list");
+    key(InputAction::Down);
+    key(InputAction::Ok);
+    assert!(!ui.get_settings_choice_open());
+    assert_eq!(ui.get_layout(), "quiet", "at once");
+    assert_eq!(ui.get_screen(), "settings", "on the same screen");
+    let place = app(|app| (app.settings.section, app.settings.pane, app.settings.row_index()));
+    assert_eq!(place.0, system, "in the same category");
+    assert_eq!(
+        app(|app| app.settings.focused().map(|r| r.value.clone())),
+        Some("Quiet OS".into()),
+        "on the same card, which says so"
+    );
+    // Kept, off the event loop.
+    let kept = scratch.0.join("interface-preferences.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::layout::read(&kept) != crate::layout::Layout::Quiet {
+        assert!(std::time::Instant::now() < deadline, "never kept");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // And the column of applications walks with Up and Down.
+    app(|app| {
+        let display = crate::model::DisplayStatus { owner: None, applications: Vec::new() };
+        app.home.set_apps(crate::state::app_tiles_from(&display));
+        app.go_home();
+    });
+    let first = app(|app| app.home.column());
+    key(InputAction::Down);
+    assert_eq!(app(|app| app.home.column()), first + 1);
+    key(InputAction::Up);
+    assert_eq!(app(|app| app.home.column()), first);
+    // Back the other way, from the Quiet face's own settings.
+    app(|app| app.open(crate::route::Route::Settings));
+    assert_eq!(app(|app| app.settings.focused().map(|r| r.label.clone())), Some("Arayüz düzeni".into()));
+    key(InputAction::Ok);
+    key(InputAction::Up);
+    key(InputAction::Ok);
+    assert_eq!(ui.get_layout(), "classic");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while crate::layout::read(&kept) != crate::layout::Layout::Classic {
+        assert!(std::time::Instant::now() < deadline, "never kept");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Pictures of both faces at the panel sizes the appliance drives, for a
+/// person to look at: 1080p (scale 1), 1440p and 4K (scale 2, as
+/// `platform::scale_factor` chooses). Only with MEDIABOX_TV_SHOTS set to a
+/// directory; the software renderer draws them, so a rotation or a
+/// GPU-only effect is not in them.
+#[test]
+#[ignore]
+fn shots() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else {
+        return;
+    };
+    std::fs::create_dir_all(&out).unwrap();
+    let (ui, _scratch) = driven();
+    let display = crate::model::DisplayStatus {
+        owner: None,
+        applications: serde_json::from_value(serde_json::json!([
+            {"id": "kodi", "name": "KODI", "summary": "Donanım kod çözücüyle oynatma", "installed": true}
+        ]))
+        .unwrap(),
+    };
+    let status = serde_json::json!({
+        "version": "3.0.0", "hostname": "mediabox", "uptime_seconds": 7260,
+        "leds": {"mode": "off"},
+        "fan": {
+            "available": true, "temperature_c": 52.4, "pwm": 50, "pwm_percent": 19.6,
+            "rpm_available": false, "control_backend": "kernel-pwm-fan",
+            "curve": mediabox_core::FanCurve::balanced(), "pending_reboot": false,
+            "board_fix": "active", "boot_config_ready": true,
+        },
+        "output": crate::screens::output::tests::status_for_tests(),
+        "audio": crate::screens::audio::tests::status_for_tests(Default::default()),
+    });
+    let vitals = || crate::VitalsModel {
+        time: "13:34".into(),
+        cpu_text: "%1".into(),
+        memory_text: "%5".into(),
+        storage_text: "5.5 / 56.7 GB".into(),
+        storage_free: "51.2 GB".into(),
+        network: "Ethernet".into(),
+        temperature: "56 °C".into(),
+        machine: "Orange Pi 5 Plus".into(),
+        eth_up: true,
+        ..Default::default()
+    };
+    let window = ui.window();
+    for (w, h, scale, name) in [(1920u32, 1080u32, 1.0f32, "1080p"), (2560, 1440, 2.0, "1440p"), (3840, 2160, 2.0, "4k")] {
+        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        window.set_size(slint::PhysicalSize::new(w, h));
+        let shoot = |file: String| {
+            ui.set_vitals(vitals());
+            slint::platform::update_timers_and_animations();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+            let rendered = SHOT_WINDOW.with(|slot| {
+                let slot = slot.borrow();
+                let window = slot.as_ref().expect("the software window");
+                window.request_redraw();
+                window.draw_if_needed(|renderer| {
+                    renderer.render(&mut pixels, w as usize);
+                })
+            });
+            assert!(rendered, "a frame");
+            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
+            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
+        };
+        for layout in [crate::layout::Layout::Classic, crate::layout::Layout::Quiet] {
+            app(|app| {
+                app.layout = layout;
+                app.settings.set_layout(layout);
+                app.home.set_apps(crate::state::app_tiles_from(&display));
+                ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+                app.settings.compose(Some(&status), None, None);
+                app.go_home();
+                app.home.point_at(2);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-home.png", layout.name()));
+            app(|app| {
+                app.home.point_at(0);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-home-media.png", layout.name()));
+            app(|app| {
+                app.open(crate::route::Route::Settings);
+                let system = app.settings.groups.iter().position(|g| g.title == "Sistem").unwrap();
+                app.settings.point_section(system);
+                app.settings.point_row(0);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings.png", layout.name()));
+            app(|app| {
+                app.settings.open_layout_choice();
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings-choice.png", layout.name()));
+            app(|app| {
+                app.settings.back();
+                let links = app.settings.groups.iter().position(|g| g.title == "Bağlantılar").unwrap();
+                app.settings.point_section(links);
+                app.paint();
+            });
+            shoot(format!("{name}-{}-settings-list.png", layout.name()));
+
+            // The editors, inside each face's frame: their panes are the
+            // classic ones on both (`QuietSettings` places them).
+            for (page, file) in [
+                (crate::screens::settings::Page::Output, "editor-output"),
+                (crate::screens::settings::Page::Cooling, "editor-cooling"),
+                (crate::screens::settings::Page::Audio, "editor-audio"),
+            ] {
+                let opened = app(|app| {
+                    app.open(crate::route::Route::Settings);
+                    while app.settings.back() {}
+                    let mut opened = false;
+                    for g in 0..app.settings.groups.len() {
+                        app.settings.point_section(g);
+                        if let Some(r) = app.settings.rows().iter().position(|row| row.page == Some(page)) {
+                            app.settings.point_row(r);
+                            opened = app.settings.open(page);
+                            break;
+                        }
+                    }
+                    app.paint();
+                    opened
+                });
+                assert!(opened, "{file}");
+                shoot(format!("{name}-{}-{file}.png", layout.name()));
+                app(|app| {
+                    while app.settings.back() {}
+                    app.paint();
+                });
+            }
+        }
+
+        // Quiet OS at its edges: a long name and summary, a long network
+        // name, twenty applications, none at all and no network.
+        let long = crate::model::DisplayStatus {
+            owner: None,
+            applications: serde_json::from_value(serde_json::json!([
+                {"id": "kodi", "name": "KODI", "summary": "Donanım kod çözücüyle oynatma", "installed": true},
+                {"id": "longname", "name": "Çok Uzun Adlı Bir Uygulama Örneği Gerçekten Uzun",
+                 "summary": "Bu açıklama, bir uygulamanın kendini anlatırken ne kadar uzun bir cümle kurabileceğini göstermek için yazıldı; üç satırı aşan metnin ekranda nasıl durduğunu gösterir.",
+                 "installed": true}
+            ]))
+            .unwrap(),
+        };
+        let many = crate::model::DisplayStatus {
+            owner: None,
+            applications: serde_json::from_value(serde_json::Value::Array(
+                (1..=16)
+                    .map(|n| serde_json::json!({"id": format!("app{n}"), "name": format!("Uygulama {n}"), "summary": "", "installed": true}))
+                    .collect(),
+            ))
+            .unwrap(),
+        };
+        let edge_vitals = |wifi: bool, online: bool| crate::VitalsModel {
+            time: "13:34".into(),
+            cpu_text: "%1".into(),
+            memory_text: "%5".into(),
+            storage_text: "5.5 / 56.7 GB".into(),
+            storage_free: "51.2 GB".into(),
+            network: if online { "Bağlı" } else { "Bağlı değil" }.into(),
+            temperature: "—".into(),
+            machine: "Orange Pi 5 Plus".into(),
+            wifi_up: online && wifi,
+            wifi_ssid: "Çok-Uzun-Kablosuz-Ağ-Adı-5GHz-Misafir-Katı-Ofis".into(),
+            eth_up: online && !wifi,
+            ..Default::default()
+        };
+        let edge_shoot = |file: String, vitals: crate::VitalsModel| {
+            slint::platform::update_timers_and_animations();
+            ui.set_vitals(vitals);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            slint::platform::update_timers_and_animations();
+            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+            let rendered = SHOT_WINDOW.with(|slot| {
+                let slot = slot.borrow();
+                let window = slot.as_ref().expect("the software window");
+                window.request_redraw();
+                window.draw_if_needed(|renderer| {
+                    renderer.render(&mut pixels, w as usize);
+                })
+            });
+            assert!(rendered, "a frame");
+            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
+            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
+        };
+        let home_with = |display: &crate::model::DisplayStatus, focus: usize| {
+            app(|app| {
+                app.layout = crate::layout::Layout::Quiet;
+                app.settings.set_layout(crate::layout::Layout::Quiet);
+                app.home.set_apps(crate::state::app_tiles_from(display));
+                ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+                app.go_home();
+                app.home.point_at(focus);
+                app.paint();
+            });
+        };
+        home_with(&long, 5);
+        edge_shoot(format!("{name}-quiet-edge-long.png"), edge_vitals(true, true));
+        home_with(&many, 17);
+        edge_shoot(format!("{name}-quiet-edge-many.png"), edge_vitals(false, true));
+        home_with(&crate::model::DisplayStatus { owner: None, applications: Vec::new() }, 0);
+        app(|app| {
+            app.home.set_apps(Vec::new());
+            ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+            app.paint();
+        });
+        edge_shoot(format!("{name}-quiet-edge-empty.png"), edge_vitals(false, false));
+    }
+}
+
+thread_local! {
+    static SHOT_WINDOW: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
 }

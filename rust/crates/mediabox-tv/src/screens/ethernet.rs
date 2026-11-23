@@ -12,7 +12,7 @@
 //! before anything reaches netplan.
 
 use super::settings::EditorTarget;
-use crate::pointer::Aim;
+use crate::pointer::{Aim, Zone};
 use std::net::Ipv4Addr;
 use std::time::{Duration, Instant};
 
@@ -498,6 +498,16 @@ impl Ethernet {
     /// Whether a list, the pad or the question is over the page.
     pub fn modal(&self) -> bool {
         self.sheet != Sheet::None
+    }
+
+    /// The list the focus is on, by its targets' zone; none under the pad or
+    /// the question, and on the buttons.
+    pub fn list(&self) -> Option<Zone> {
+        match self.sheet {
+            Sheet::None => (self.row < self.fields().len()).then_some(Zone::EditorCards),
+            Sheet::Pick { .. } => Some(Zone::EditorPicker),
+            Sheet::Entry(_) | Sheet::Confirm { .. } => None,
+        }
     }
 
     // ------------------------------------------------------------ pressing

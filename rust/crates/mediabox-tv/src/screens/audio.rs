@@ -13,7 +13,7 @@
 //! turned off during a film is the one the settings show off afterwards.
 
 use super::settings::EditorTarget;
-use crate::pointer::Aim;
+use crate::pointer::{Aim, Zone};
 use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioSetting, AudioStatus};
 
 /// The cards, top to bottom.
@@ -296,6 +296,11 @@ impl Audio {
     /// Whether the list is open over the page.
     pub fn modal(&self) -> bool {
         self.picker.is_some()
+    }
+
+    /// The list Up and Down walk, by its targets' zone.
+    pub fn list(&self) -> Zone {
+        if self.picker.is_some() { Zone::EditorPicker } else { Zone::EditorCards }
     }
 
     /// Back: a list closes; the page itself is the settings screen's.

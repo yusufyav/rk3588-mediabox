@@ -126,7 +126,7 @@ export component EthernetPane inherits Rectangle {
     in property <EthernetView> view;
     in property <bool> active-pane;
 
-    property <length> gap: Metrics.row-gap;
+    property <length> gap: Metrics.stack-gap;
     property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
 
     if !view.available: StateNote {
@@ -163,8 +163,8 @@ export component EthernetPane inherits Rectangle {
         }
 
         HorizontalLayout {
-            padding-top: gap * 1.4;
-            spacing: gap * 1.4;
+            padding-top: Metrics.row-gap * 1.4;
+            spacing: Metrics.row-gap * 1.4;
             alignment: start;
             for act[i] in view.actions: ActionButton {
                 label: act.label;

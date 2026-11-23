@@ -54,6 +54,9 @@ export struct AppTile {
     hue: float,
     ready: bool,
     note: string,
+    // One line on what it is for: Quiet OS's home screen shows it under the
+    // chosen application's name. "" when the interface does not know.
+    about: string,
 }
 
 // A label and a reading, with an optional verdict. Used by the technical panel,
@@ -122,7 +125,15 @@ export struct VitalsModel {
     memory-arc: string,
     memory-text: string,
     performance-note: string,
+    // The SoC's temperature, as "45 °C" or "—": Quiet OS's footer.
+    temperature: string,
     storage-text: string,
+    // What is left on the system volume, as "51.1 GB": Quiet OS's footer.
+    storage-free: string,
+    // Under a tenth of the volume left, and the SoC at its first passive trip
+    // point (75 °C): the two things Quiet OS's home says in the warning tone.
+    storage-low: bool,
+    temperature-warm: bool,
     storage-fraction: float,
     network: string,
     machine: string,

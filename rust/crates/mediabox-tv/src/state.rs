@@ -94,6 +94,9 @@ pub struct AppEntryTile {
     pub hue: f32,
     pub ready: bool,
     pub note: String,
+    /// What it is for, in a line: `about_of`, or the control plane's own
+    /// summary of an application it runs.
+    pub about: String,
     pub action: AppAction,
 }
 
@@ -147,6 +150,19 @@ fn app_mark(id: &str) -> (&'static str, f32) {
     }
 }
 
+/// One line on what this interface's own tiles are for, under the name
+/// where a face of the home screen has room for it (Quiet OS). Every other
+/// application says it itself, in the control plane's `summary`.
+fn about_of(id: &str) -> &'static str {
+    match id {
+        "media" => "Filmlerini, dizilerini ve izleme listeni keşfet.",
+        "livetv" => "Uydu yayınlarını ve kanal listesini izle.",
+        "browser" => "Web sitelerine ve çevrimiçi servislere eriş.",
+        "settings" => "Görüntü, ses, ağ ve cihaz tercihlerini yönet.",
+        _ => "",
+    }
+}
+
 fn tile(id: &str, name: &str, ready: bool, note: &str, action: AppAction) -> AppEntryTile {
     let (mark, hue) = app_mark(id);
     AppEntryTile {
@@ -156,6 +172,7 @@ fn tile(id: &str, name: &str, ready: bool, note: &str, action: AppAction) -> App
         hue,
         ready,
         note: note.to_string(),
+        about: about_of(id).to_string(),
         action,
     }
 }
@@ -201,13 +218,17 @@ pub fn app_tiles_from(display: &crate::model::DisplayStatus) -> Vec<AppEntryTile
                 } else {
                     entry.name.clone()
                 };
-                tile(
+                let mut tile = tile(
                     &entry.id,
                     &name,
                     entry.installed,
                     if entry.installed { "" } else { "kurulu değil" },
                     AppAction::Launch(entry.id.clone()),
-                )
+                );
+                if let Some(summary) = entry.summary.as_deref().filter(|s| !s.is_empty()) {
+                    tile.about = summary.to_string();
+                }
+                tile
             }),
     );
 
@@ -400,6 +421,7 @@ impl Home {
                     hue: tile.hue,
                     ready: tile.ready,
                     note: tile.note.clone().into(),
+                    about: tile.about.clone().into(),
                 })
                 .collect::<Vec<_>>(),
         );

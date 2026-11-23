@@ -19,6 +19,7 @@ mod hit;
 mod images;
 mod input;
 mod keyboard;
+mod layout;
 mod metrics;
 mod model;
 mod monitor;
@@ -128,6 +129,15 @@ fn prefs_file() -> std::path::PathBuf {
     }
 }
 
+/// Which face the home screen and the settings wear (`layout.rs`), beside
+/// the session file and apart from any application's own preferences.
+fn interface_file() -> std::path::PathBuf {
+    match std::env::var_os("MEDIABOX_TV_INTERFACE") {
+        Some(path) => path.into(),
+        None => std::path::Path::new(&state_file()).with_file_name("interface-preferences.json"),
+    }
+}
+
 fn snapshot_dir() -> String {
     std::env::var("MEDIABOX_TV_SNAPSHOTS").unwrap_or_else(|_| SNAPSHOT_DIR.to_string())
 }
@@ -223,6 +233,10 @@ struct App {
     /// over where it has no target: what a wheel moves.
     pointer_lit: Option<(pointer::Zone, usize)>,
     pointer_area: Option<pointer::Lanes>,
+    /// The target the arrow is over, lit or not: a hand that moved a surface
+    /// lights nothing, and the arrow may still be over the same target when
+    /// the wheel comes.
+    pointer_over: Option<(pointer::Zone, usize)>,
     /// Where a list drawn as a window of rows starts while a pointer is in
     /// use, apart from the remote's focus.
     windows: pointer::Windows,
@@ -254,6 +268,9 @@ struct App {
     /// What that screen keeps for itself: the player a source opens in,
     /// where a film left part-way starts, how the subtitle looks.
     prefs: prefs::MediaPreferences,
+    /// The face of the home screen and the settings, and where it is kept.
+    layout: layout::Layout,
+    interface: std::path::PathBuf,
     account: screens::account::Account,
     wifi: screens::wireless::Wifi,
     bt: screens::wireless::Bluetooth,
@@ -731,8 +748,14 @@ impl App {
 
     fn act_on_home(&mut self, intent: Intent) {
         match intent {
-            Intent::Move(dx, _) => {
-                if self.home.step(dx as isize) {
+            // The classic launcher is a row; Quiet OS's is a column, and
+            // either arrow along it walks the same list.
+            Intent::Move(dx, dy) => {
+                let along = match self.layout {
+                    layout::Layout::Classic => dx,
+                    layout::Layout::Quiet => if dy != 0 { dy } else { dx },
+                };
+                if self.home.step(along as isize) {
                     self.paint();
                 }
             }
@@ -817,6 +840,7 @@ impl App {
             self.pointer_end_gesture();
             self.pointer_unlight();
             self.pointer_area = None;
+            self.pointer_over = None;
             // A list over the screen drawn as a window of rows is another
             // list once the screen, or the list, is another.
             self.windows.clear();
@@ -977,6 +1001,15 @@ impl App {
             ),
         ] {
             if pixels == 0.0 && steps == 0 {
+                continue;
+            }
+            // Quiet OS's settings family: a detent walks the list's focus,
+            // a row each; part of one waits for the rest.
+            if axis == pointer::Axis::Vertical
+                && scrolled.eased
+                && let Some(list) = self.wheel_list(lanes)
+            {
+                self.wheel_walk(list, steps);
                 continue;
             }
             // Up and down on what scrolls up and down; on a single row that
@@ -1164,6 +1197,65 @@ impl App {
         }
     }
 
+    /// The vertical list of Quiet OS's settings family that the remote's Up
+    /// and Down walk now, by its targets' zone. None on the classic face, on
+    /// any other screen, under the box's sheet, and where they walk no list:
+    /// a network's page, the password, a number pad, a question.
+    fn focus_list(&self) -> Option<pointer::Zone> {
+        if self.layout != layout::Layout::Quiet || self.sheet.is_some() || self.here.is_some() {
+            return None;
+        }
+        match self.route() {
+            Route::Settings => self.settings.list(),
+            Route::Wifi => self.wifi.walks().then_some(pointer::Zone::WifiRows),
+            Route::Bluetooth => Some(pointer::Zone::BtRows),
+            _ => None,
+        }
+    }
+
+    /// The list a wheel walks: the one under the arrow, where it is the one
+    /// with the focus. A list with no surface of its own (an editor's cards)
+    /// is known by its target.
+    fn wheel_list(&self, lanes: pointer::Lanes) -> Option<pointer::Zone> {
+        let under = lanes
+            .vertical
+            .map(|lane| lane.zone)
+            .or(self.pointer_over.map(|(zone, index)| {
+                let lanes = zone.lanes(index);
+                lanes.vertical.map_or(zone, |lane| lane.zone)
+            }))?;
+        (self.focus_list() == Some(under) && pointer::accepts(self.pointer_context(), under))
+            .then_some(under)
+    }
+
+    /// The one rule of those lists: what a hand left running stops, the list
+    /// is the focus's again, and each detent is the remote's Up or Down on
+    /// the list's own focus -- so the focused row is always in view. A hand
+    /// keeps the list while the button is down, as `Gesture::wheel` has it.
+    fn wheel_walk(&mut self, list: pointer::Zone, steps: i32) {
+        if steps == 0 || !self.gesture.idle() {
+            return;
+        }
+        self.pointer_end_gesture();
+        self.pointer_release_named(pointer::zone_name(list), -1);
+        match list {
+            // From the column the first step goes into the rows.
+            pointer::Zone::SettingsRows => {
+                if self.settings.wheel_rows(steps) {
+                    self.paint();
+                }
+            }
+            // Not through the dispatcher, whose pace is for a held key: a
+            // report's detents are each a row.
+            _ => {
+                let key = if steps > 0 { InputAction::Down } else { InputAction::Up };
+                for _ in 0..steps.unsigned_abs() {
+                    self.act(key);
+                }
+            }
+        }
+    }
+
     fn pointer_shift(&mut self, lane: pointer::Lane, rows: i32) {
         if rows == 0 || !pointer::accepts(self.pointer_context(), lane.zone) {
             return;
@@ -1187,10 +1279,15 @@ impl App {
     }
 
     /// Whatever the button and the hand were doing is let go of: nothing
-    /// clicks, nothing coasts. A surface stays where the hand left it.
+    /// clicks, nothing coasts, and a move a surface has not been told of yet
+    /// is none: `PanState` would hear of it and of a release together, in no
+    /// order. A surface stays where the hand left it.
     fn pointer_end_gesture(&mut self) {
         self.gesture.cancel();
         self.coast_timer.stop();
+        if let Some(window) = self.window.upgrade() {
+            window.global::<PointerPan>().set_gesture(-1);
+        }
     }
 
     /// The remote is picked up again, or the pointer is gone: every surface
@@ -1254,11 +1351,40 @@ impl App {
         use screens::settings::EditorTarget;
         let (row, col) = pointer::cell(index);
         match zone {
-            Zone::HomeApps => self.home.point_at(index),
-            Zone::SettingsSections => self.settings.point_section(index),
+            Zone::HomeApps | Zone::QuietHome => self.home.point_at(index),
+            // Quiet OS keeps the categories on screen under a page; a click
+            // on one leaves the page the way Back does (each editor's own
+            // Back first: an open cell, a trial), and only once the page is
+            // gone does the category take the focus. The classic face draws
+            // no categories under a page.
+            Zone::SettingsSections => {
+                // From a radio, a page of "Bağlantılar": its own Back first
+                // (a network's page, the password), then out to the
+                // settings, where the category takes the focus.
+                for _ in 0..4 {
+                    match self.route() {
+                        Route::Wifi => self.act_on_wifi(Intent::Dismiss),
+                        Route::Bluetooth => self.act_on_bluetooth(Intent::Dismiss),
+                        _ => break,
+                    }
+                }
+                if self.route() != Route::Settings {
+                    return pointer::Aim::Refused;
+                }
+                if self.layout == layout::Layout::Quiet
+                    && self.settings.page().is_some()
+                    && !self.settings.modal()
+                {
+                    self.act_on_settings(Intent::Dismiss);
+                    if self.settings.page().is_some() {
+                        return pointer::Aim::Refused;
+                    }
+                }
+                self.settings.point_section(index)
+            }
             // A way back is no focus: a click on it is Back (or, out of a
             // film, Stop).
-            Zone::Back | Zone::PlayerExit => pointer::Aim::Here,
+            Zone::Back | Zone::GoHome | Zone::PlayerExit => pointer::Aim::Here,
             Zone::SettingsRows => self.settings.point_row(index),
             Zone::SettingsChoice => self.settings.point_choice(index),
             Zone::EditorCards => self.settings.point_editor(EditorTarget::Card(index)),
@@ -1558,8 +1684,12 @@ impl App {
             if self.pointer_lit == Some((zone, index)) {
                 self.pointer_unlight();
             }
+            if self.pointer_over == Some((zone, index)) {
+                self.pointer_over = None;
+            }
             return;
         }
+        self.pointer_over = Some((zone, index));
         if self.pointer_zone(pointer::zone_name(zone)).is_none()
             || !zone.lights()
             || !self.pointer_enabled(zone, index)
@@ -1795,6 +1925,7 @@ impl App {
         }
         self.pointer_unlight();
         self.pointer_area = None;
+        self.pointer_over = None;
         self.scroller.reset();
         self.pointer_release_views();
         if let Some(window) = self.window.upgrade() {
@@ -6290,6 +6421,21 @@ impl App {
                     self.paint();
                 }
             }
+            Action::ChooseLayout => {
+                if self.settings.open_layout_choice() {
+                    self.paint();
+                }
+            }
+            Action::SetLayout(layout) => {
+                // The same screen, the same row, the other face: nothing is
+                // restarted and no focus moves. Kept before it is drawn, so a
+                // restart after this frame comes back to it.
+                self.layout = layout;
+                self.settings.set_layout(layout);
+                layout::write(self.interface.clone(), layout);
+                self.clear_notice();
+                self.paint();
+            }
             Action::ChooseCecTarget => {
                 if self.settings.open_cec_choice() {
                     self.paint();
@@ -6857,6 +7003,7 @@ impl App {
             return;
         }
         window.set_screen(route.name().into());
+        window.set_layout(self.layout.name().into());
 
         self.paint_sheet(&window);
 
@@ -8576,6 +8723,7 @@ struct AppFiles {
     cache: String,
     state: String,
     prefs: std::path::PathBuf,
+    interface: std::path::PathBuf,
     live_kept: LiveKept,
 }
 
@@ -8585,6 +8733,7 @@ impl AppFiles {
             cache: cache_dir(),
             state: state_file(),
             prefs: prefs_file(),
+            interface: interface_file(),
             live_kept: read_live_kept(),
         }
     }
@@ -8593,6 +8742,9 @@ impl AppFiles {
 impl App {
     /// The interface's state, on `window`, before anything is shown.
     fn new(window: &MediaBoxWindow, started: Instant, trace_input: bool, files: AppFiles) -> Self {
+        let layout = layout::read(&files.interface);
+        let mut settings = screens::settings::Settings::new();
+        settings.set_layout(layout);
         App {
             window: window.as_weak(),
             stack: route::Stack::new(),
@@ -8603,6 +8755,7 @@ impl App {
             gesture: pointer::Gesture::default(),
             coast_timer: slint::Timer::default(),
             pointer_lit: None,
+            pointer_over: None,
             pointer_area: None,
             windows: pointer::Windows::default(),
             views: pointer::Views::default(),
@@ -8615,9 +8768,11 @@ impl App {
             search: screens::search::Search::new(),
             discover: screens::discover::Discover::new(),
             library: screens::library::Library::new(),
-            settings: screens::settings::Settings::new(),
+            settings,
             media_settings: screens::media_settings::MediaSettings::new(),
             prefs: prefs::read(&files.prefs),
+            layout,
+            interface: files.interface.clone(),
             account: screens::account::Account::new(),
             wifi: screens::wireless::Wifi::new(),
             bt: screens::wireless::Bluetooth::new(),

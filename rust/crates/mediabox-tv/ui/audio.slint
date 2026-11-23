@@ -43,7 +43,7 @@ export component AudioPane inherits Rectangle {
     in property <AudioView> view;
     in property <bool> active-pane;
 
-    property <length> gap: Metrics.row-gap;
+    property <length> gap: Metrics.stack-gap;
     property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
 
     if !view.available: StateNote {
@@ -63,7 +63,7 @@ export component AudioPane inherits Rectangle {
         alignment: start;
 
         for card[i] in view.cards: VerticalLayout {
-            spacing: gap * 0.5;
+            spacing: Theme.quiet ? Metrics.row-gap : gap * 0.5;
             // The volume stands apart from the choices above it.
             if i == 4: Rectangle { height: gap * 0.6; }
             SettingCard {
@@ -79,15 +79,15 @@ export component AudioPane inherits Rectangle {
             }
             // The level, drawn: a bar the remote's Left and Right move.
             if i == 4: Rectangle {
-                height: max(4px, Metrics.focus-w * 1.6);
+                height: Theme.quiet ? max(2px, 3px * Metrics.qu) : max(4px, Metrics.focus-w * 1.6);
                 border-radius: self.height / 2;
-                background: Theme.s-line;
+                background: Theme.quiet ? #ffffff14 : Theme.s-line;
                 Rectangle {
                     x: 0;
                     width: parent.width * view.volume / 100;
                     height: parent.height;
                     border-radius: parent.border-radius;
-                    background: view.muted ? Theme.dim : (view.volume-focused && active-pane ? Theme.focus : #c9ced8);
+                    background: view.muted ? Theme.dim : (view.volume-focused && active-pane ? Theme.focus : (Theme.quiet ? #9aa6ad : #c9ced8));
                     animate width { duration: Theme.t-focus; easing: Theme.ease; }
                 }
                 // Its lower and upper halves are Left and Right on the volume
@@ -95,17 +95,17 @@ export component AudioPane inherits Rectangle {
                 // bar, so a thin line can be hit.
                 PointerTarget {
                     x: 0;
-                    y: -gap * 0.5;
+                    y: -Metrics.row-gap * 0.5;
                     width: parent.width / 2;
-                    height: parent.height + gap;
+                    height: parent.height + Metrics.row-gap;
                     zone: "editor-volume";
                     index: 0;
                 }
                 PointerTarget {
                     x: parent.width / 2;
-                    y: -gap * 0.5;
+                    y: -Metrics.row-gap * 0.5;
                     width: parent.width / 2;
-                    height: parent.height + gap;
+                    height: parent.height + Metrics.row-gap;
                     zone: "editor-volume";
                     index: 1;
                 }
@@ -130,6 +130,7 @@ export component AudioPane inherits Rectangle {
         line: view.current-line;
         badges: view.current-badges;
         rows: view.current-rows;
+        fit-content: true;
     }
 
     if view.picker-open: ChoiceSheet {

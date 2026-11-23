@@ -395,7 +395,7 @@ component SimpleFace inherits Rectangle {
     in property <OutputView> view;
     in property <bool> active-pane;
 
-    property <length> gap: Metrics.row-gap;
+    property <length> gap: Metrics.stack-gap;
     property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
 
     VerticalLayout {
@@ -409,7 +409,7 @@ component SimpleFace inherits Rectangle {
             spacing: 0px;
             // The way into the advanced face stands apart from the three
             // settings above it.
-            if i == 3: Rectangle { height: gap * 1.4; }
+            if i == 3: Rectangle { height: Metrics.row-gap * 1.4; }
             SettingCard {
                 icon: card.icon;
                 label: card.label;
@@ -423,8 +423,8 @@ component SimpleFace inherits Rectangle {
         }
 
         HorizontalLayout {
-            padding-top: gap * 1.6;
-            spacing: gap * 1.4;
+            padding-top: Metrics.row-gap * 1.6;
+            spacing: Metrics.row-gap * 1.4;
             alignment: start;
             for act[i] in view.simple-actions: ActionButton {
                 label: act.label;
