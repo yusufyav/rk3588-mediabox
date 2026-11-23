@@ -24,7 +24,7 @@ use serde_json::Value;
 
 use crate::layout::Layout;
 use crate::model::DisplayStatus;
-use crate::pointer::Aim;
+use crate::pointer::{Aim, Zone};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -929,20 +929,40 @@ impl Settings {
         true
     }
 
-    /// Quiet OS's wheel and hand over the rows: the focus walks them a row a
-    /// step, as Down and Up do, and the list follows the focus, so the row
-    /// the remote is on is never scrolled out of sight. From the column the
-    /// first step goes into the rows. Not under an open list, nor on an
-    /// editor's page, whose own surfaces scroll.
+    /// The list Up and Down walk now, by its targets' zone: the short list a
+    /// card opened, the rows (which the column leads into), or what the open
+    /// editor says. None where they walk no list -- a number pad, a question,
+    /// the fan's table.
+    pub fn list(&self) -> Option<Zone> {
+        if self.choice.is_some() {
+            return Some(Zone::SettingsChoice);
+        }
+        match self.page() {
+            Some(Page::Audio) => Some(self.audio.list()),
+            Some(Page::Ethernet) => self.ethernet.list(),
+            Some(Page::Output) => self.output.list(),
+            Some(Page::Cooling) => None,
+            Some(Page::Playback | Page::Account | Page::Cec) | None => Some(Zone::SettingsRows),
+        }
+    }
+
+    /// Quiet OS's wheel over the rows: the focus walks them a row a step, as
+    /// Down and Up do. From the column the first step goes into the rows.
+    /// Not under an open list, nor on an editor's page, which has its own.
     pub fn wheel_rows(&mut self, steps: i32) -> bool {
         if steps == 0 || self.choice.is_some() || (self.pane == Pane::Page && !self.in_list_page()) {
             return false;
         }
-        if self.pane == Pane::Sections {
-            return self.enter_rows();
-        }
+        let mut left = steps.unsigned_abs();
         let mut moved = false;
-        for _ in 0..steps.unsigned_abs() {
+        if self.pane == Pane::Sections {
+            if !self.enter_rows() {
+                return false;
+            }
+            moved = true;
+            left -= 1;
+        }
+        for _ in 0..left {
             moved |= self.move_rows(steps.signum());
         }
         moved

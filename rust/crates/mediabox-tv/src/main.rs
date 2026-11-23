@@ -233,6 +233,10 @@ struct App {
     /// over where it has no target: what a wheel moves.
     pointer_lit: Option<(pointer::Zone, usize)>,
     pointer_area: Option<pointer::Lanes>,
+    /// The target the arrow is over, lit or not: a hand that moved a surface
+    /// lights nothing, and the arrow may still be over the same target when
+    /// the wheel comes.
+    pointer_over: Option<(pointer::Zone, usize)>,
     /// Where a list drawn as a window of rows starts while a pointer is in
     /// use, apart from the remote's focus.
     windows: pointer::Windows,
@@ -836,6 +840,7 @@ impl App {
             self.pointer_end_gesture();
             self.pointer_unlight();
             self.pointer_area = None;
+            self.pointer_over = None;
             // A list over the screen drawn as a window of rows is another
             // list once the screen, or the list, is another.
             self.windows.clear();
@@ -998,6 +1003,15 @@ impl App {
             if pixels == 0.0 && steps == 0 {
                 continue;
             }
+            // Quiet OS's settings family: a detent walks the list's focus,
+            // a row each; part of one waits for the rest.
+            if axis == pointer::Axis::Vertical
+                && scrolled.eased
+                && let Some(list) = self.wheel_list(lanes)
+            {
+                self.wheel_walk(list, steps);
+                continue;
+            }
             // Up and down on what scrolls up and down; on a single row that
             // only scrolls along, along it.
             let lane = lanes
@@ -1018,7 +1032,7 @@ impl App {
             match lane {
                 // A window of rows Rust keeps moves a row a detent; fingers
                 // are counted in rows by the list itself (`PanState`).
-                Some(lane) if (lane.stepped() || self.quiet_rows(lane)) && scrolled.eased => {
+                Some(lane) if lane.stepped() && scrolled.eased => {
                     if steps != 0 {
                         self.pointer_shift(lane, steps);
                     }
@@ -1183,24 +1197,67 @@ impl App {
         }
     }
 
-    /// Quiet OS's settings rows: a wheel's detents walk the focus there
-    /// (`Settings::wheel_rows`) instead of scrolling the rows away from it.
-    /// A hand moves the list itself, as on every other list.
-    fn quiet_rows(&self, lane: pointer::Lane) -> bool {
-        self.layout == layout::Layout::Quiet && lane.zone == pointer::Zone::SettingsRows
+    /// The vertical list of Quiet OS's settings family that the remote's Up
+    /// and Down walk now, by its targets' zone. None on the classic face, on
+    /// any other screen, under the box's sheet, and where they walk no list:
+    /// a network's page, the password, a number pad, a question.
+    fn focus_list(&self) -> Option<pointer::Zone> {
+        if self.layout != layout::Layout::Quiet || self.sheet.is_some() || self.here.is_some() {
+            return None;
+        }
+        match self.route() {
+            Route::Settings => self.settings.list(),
+            Route::Wifi => self.wifi.walks().then_some(pointer::Zone::WifiRows),
+            Route::Bluetooth => Some(pointer::Zone::BtRows),
+            _ => None,
+        }
+    }
+
+    /// The list a wheel walks: the one under the arrow, where it is the one
+    /// with the focus. A list with no surface of its own (an editor's cards)
+    /// is known by its target.
+    fn wheel_list(&self, lanes: pointer::Lanes) -> Option<pointer::Zone> {
+        let under = lanes
+            .vertical
+            .map(|lane| lane.zone)
+            .or(self.pointer_over.map(|(zone, index)| {
+                let lanes = zone.lanes(index);
+                lanes.vertical.map_or(zone, |lane| lane.zone)
+            }))?;
+        (self.focus_list() == Some(under) && pointer::accepts(self.pointer_context(), under))
+            .then_some(under)
+    }
+
+    /// The one rule of those lists: what a hand left running stops, the list
+    /// is the focus's again, and each detent is the remote's Up or Down on
+    /// the list's own focus -- so the focused row is always in view. A hand
+    /// keeps the list while the button is down, as `Gesture::wheel` has it.
+    fn wheel_walk(&mut self, list: pointer::Zone, steps: i32) {
+        if steps == 0 || !self.gesture.idle() {
+            return;
+        }
+        self.pointer_end_gesture();
+        self.pointer_release_named(pointer::zone_name(list), -1);
+        match list {
+            // From the column the first step goes into the rows.
+            pointer::Zone::SettingsRows => {
+                if self.settings.wheel_rows(steps) {
+                    self.paint();
+                }
+            }
+            // Not through the dispatcher, whose pace is for a held key: a
+            // report's detents are each a row.
+            _ => {
+                let key = if steps > 0 { InputAction::Down } else { InputAction::Up };
+                for _ in 0..steps.unsigned_abs() {
+                    self.act(key);
+                }
+            }
+        }
     }
 
     fn pointer_shift(&mut self, lane: pointer::Lane, rows: i32) {
         if rows == 0 || !pointer::accepts(self.pointer_context(), lane.zone) {
-            return;
-        }
-        if self.quiet_rows(lane) {
-            // A hand may have left the list away from the focus: the wheel
-            // walks the focus, so the list is the focus's again first.
-            self.pointer_release_named(pointer::zone_name(lane.zone), lane.lane);
-            if self.settings.wheel_rows(rows) {
-                self.paint();
-            }
             return;
         }
         match lane.zone {
@@ -1222,10 +1279,15 @@ impl App {
     }
 
     /// Whatever the button and the hand were doing is let go of: nothing
-    /// clicks, nothing coasts. A surface stays where the hand left it.
+    /// clicks, nothing coasts, and a move a surface has not been told of yet
+    /// is none: `PanState` would hear of it and of a release together, in no
+    /// order. A surface stays where the hand left it.
     fn pointer_end_gesture(&mut self) {
         self.gesture.cancel();
         self.coast_timer.stop();
+        if let Some(window) = self.window.upgrade() {
+            window.global::<PointerPan>().set_gesture(-1);
+        }
     }
 
     /// The remote is picked up again, or the pointer is gone: every surface
@@ -1622,8 +1684,12 @@ impl App {
             if self.pointer_lit == Some((zone, index)) {
                 self.pointer_unlight();
             }
+            if self.pointer_over == Some((zone, index)) {
+                self.pointer_over = None;
+            }
             return;
         }
+        self.pointer_over = Some((zone, index));
         if self.pointer_zone(pointer::zone_name(zone)).is_none()
             || !zone.lights()
             || !self.pointer_enabled(zone, index)
@@ -1859,6 +1925,7 @@ impl App {
         }
         self.pointer_unlight();
         self.pointer_area = None;
+        self.pointer_over = None;
         self.scroller.reset();
         self.pointer_release_views();
         if let Some(window) = self.window.upgrade() {
@@ -8688,6 +8755,7 @@ impl App {
             gesture: pointer::Gesture::default(),
             coast_timer: slint::Timer::default(),
             pointer_lit: None,
+            pointer_over: None,
             pointer_area: None,
             windows: pointer::Windows::default(),
             views: pointer::Views::default(),

@@ -598,6 +598,12 @@ impl Wifi {
 
     // -------------------------------------------------------------- moving
 
+    /// Whether Up and Down walk the list: not a network's page, nor the
+    /// password.
+    pub fn walks(&self) -> bool {
+        matches!(self.face, Face::List | Face::Saved)
+    }
+
     pub fn step(&mut self, dy: i32) {
         let last = match self.face {
             Face::List => self.focusable().len(),
