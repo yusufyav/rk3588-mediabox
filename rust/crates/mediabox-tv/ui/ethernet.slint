@@ -5,6 +5,9 @@ import {
     StateNote, ChoiceItem, ChoiceSheet, TrialSheet,
 } from "kit.slint";
 import { OutSimple, OutAction } from "output.slint";
+import { QuietChoice } from "quiet/controls.slint";
+import { LivingFocus } from "quiet/materials.slint";
+import { PortBand } from "quiet/instruments.slint";
 
 // One wired port's address: the display page's shape, for the same kind of
 // decision. Cards for what can be set, the port as it is now beside them, a
@@ -46,6 +49,10 @@ export struct EthernetView {
     trial: string,
     previous: string,
     trial-now: string,
+    link: bool,
+    addressed: bool,
+    fixed: bool,
+    gateway: string,
 }
 
 // The number pad, over the page: the field as typed so far, what it expects,
@@ -128,6 +135,34 @@ export component EthernetPane inherits Rectangle {
 
     property <length> gap: Metrics.stack-gap;
     property <length> info-x: Metrics.list-w + Metrics.card-pad * 1.6;
+    // Quiet OS: the port, its cable and the network, along the top.
+    property <length> band-h: Theme.quiet ? 150px * Metrics.qu : 0px;
+    property <length> top: Theme.quiet ? band-h + 14px * Metrics.qu : 0px;
+    property <length> lit-y;
+    property <length> lit-h;
+    // The remote is on the cards, not on the buttons under them.
+    property <bool> on-cards;
+
+    if Theme.quiet && view.available: PortBand {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: band-h;
+        link: view.link;
+        addressed: view.addressed;
+        fixed: view.fixed;
+        address: view.current-title;
+        gateway: view.gateway;
+    }
+    if Theme.quiet && view.available: LivingFocus {
+        x: 0;
+        y: root.top;
+        width: Metrics.list-w;
+        height: root.height - root.top;
+        shown: active-pane && on-cards && view.sheet == 0 && !view.picker-open && !view.entry-open;
+        to-y: lit-y;
+        to-h: lit-h;
+    }
 
     if !view.available: StateNote {
         x: 0;
@@ -140,16 +175,27 @@ export component EthernetPane inherits Rectangle {
 
     if view.available: VerticalLayout {
         x: 0;
-        y: 0;
+        y: root.top;
         width: Metrics.list-w;
         spacing: gap;
         alignment: start;
 
-        for card[i] in view.cards: VerticalLayout {
+        for card[i] in view.cards: slot := VerticalLayout {
             spacing: 0px;
+            property <bool> here: card.focused;
+            function lift() {
+                if here {
+                    root.on-cards = true;
+                    root.lit-h = one.height;
+                    root.lit-y = slot.y + one.y;
+                }
+            }
+            init => { lift(); }
+            changed here => { lift(); }
             // The written address stands apart from the choice above it.
             if i == 1: Rectangle { height: gap * 0.6; }
-            SettingCard {
+            one := SettingCard {
+                glide: Theme.quiet;
                 icon: card.icon;
                 label: card.label;
                 hint: card.hint;
@@ -167,6 +213,9 @@ export component EthernetPane inherits Rectangle {
             spacing: Metrics.row-gap * 1.4;
             alignment: start;
             for act[i] in view.actions: ActionButton {
+                property <bool> here: act.focused;
+                init => { if here { root.on-cards = false; } }
+                changed here => { if here { root.on-cards = false; } }
                 label: act.label;
                 enabled: act.enabled;
                 focused: active-pane && act.focused;
@@ -194,7 +243,7 @@ export component EthernetPane inherits Rectangle {
 
     if view.available && root.width - info-x > Metrics.t-primary * 9: InfoPanel {
         x: info-x;
-        y: 0;
+        y: root.top;
         width: root.width - info-x;
         caption: "Şu an";
         icon: "network";
@@ -205,7 +254,17 @@ export component EthernetPane inherits Rectangle {
     }
 
     // The lists and the pad cover the whole panel, as the display's do.
-    if view.picker-open && view.sheet == 0: ChoiceSheet {
+    if view.picker-open && view.sheet == 0 && Theme.quiet: QuietChoice {
+        x: -root.x;
+        y: -root.y;
+        width: Metrics.vw;
+        height: Metrics.vh;
+        title: view.picker-title;
+        items: view.picker;
+        focus-at: view.picker-focus;
+        pointer-zone: "editor-picker";
+    }
+    if view.picker-open && view.sheet == 0 && !Theme.quiet: ChoiceSheet {
         x: -root.x;
         y: -root.y;
         width: Metrics.vw;

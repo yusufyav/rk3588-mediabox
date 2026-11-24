@@ -16,7 +16,7 @@ import { QuietBar } from "quiet/controls.slint";
 import { QuietMotion, QuietReach, QuietRig, QuietCam } from "quiet/motion.slint";
 import { QuietMotionLab } from "quiet/lab.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
-import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
+import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple, OutScreen } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
 import { EthernetView } from "ethernet.slint";
 import { AudioView, AudioCard } from "audio.slint";
@@ -28,7 +28,7 @@ import { AccountChip } from "chrome.slint";
 import { PointerHub, PointerPan, PointerArrow } from "pointer.slint";
 export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietMotion, QuietReach, QuietCam }
 import {
-    RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
+    RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup, SocView,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
 } from "components.slint";
 
@@ -36,7 +36,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
-    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
+    OutSimple, OutScreen, SocView, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
     EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun, MsCategory, MsRow, MsNode, MsRate, MsRoute,
     LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow,
 }
@@ -220,6 +220,7 @@ export component MediaBoxWindow inherits Window {
     in property <bool> wifi-present;
     in property <bool> wifi-powered;
     in property <bool> wifi-busy;
+    in property <bool> wifi-scanning;
     in property <string> wifi-notice;
     /// "list" | "saved" | "details" | "password"
     in property <string> wifi-face;
@@ -250,6 +251,10 @@ export component MediaBoxWindow inherits Window {
     in property <bool> bt-known;
     in property <bool> bt-present;
     in property <string> bt-summary;
+    in property <bool> bt-powered;
+    in property <bool> bt-scanning;
+    in property <int> bt-linked;
+    in property <int> bt-paired;
     in property <string> bt-notice;
     in property <[WifiRow]> bt-rows;
     in property <int> bt-focus-flats;
@@ -481,6 +486,7 @@ export component MediaBoxWindow inherits Window {
     in property <bool> account-submit-ready;
 
     // ---- diagnostics
+    in property <SocView> diag-soc;
     in property <[DiagGroup]> diag-groups;
     in property <[SettingNav]> diag-nav;
     in property <int> diag-group;
@@ -801,6 +807,7 @@ export component MediaBoxWindow inherits Window {
             powered: root.wifi-powered;
             vitals: root.vitals;
             busy: root.wifi-busy;
+            scanning: root.wifi-scanning;
             notice: root.wifi-notice;
             face: root.wifi-face;
             title: root.wifi-title;
@@ -837,6 +844,10 @@ export component MediaBoxWindow inherits Window {
             summary: root.bt-summary;
             vitals: root.vitals;
             notice: root.bt-notice;
+            powered: root.bt-powered;
+            scanning: root.bt-scanning;
+            linked: root.bt-linked;
+            paired: root.bt-paired;
             rows: root.bt-rows;
             focus-flats: root.bt-focus-flats;
             focus-talls: root.bt-focus-talls;
@@ -876,6 +887,7 @@ export component MediaBoxWindow inherits Window {
             groups: root.diag-groups;
             nav: root.diag-nav;
             group: root.diag-group;
+            soc: root.diag-soc;
             vitals: root.vitals;
         }
 

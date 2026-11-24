@@ -6092,6 +6092,7 @@ impl App {
         window.set_wifi_powered(wifi.powered);
         window.set_wifi_busy(wifi.busy);
         window.set_wifi_notice(wifi.notice.clone().into());
+        window.set_wifi_scanning(wifi.scanning);
         window.set_wifi_face(
             match wifi.face {
                 Face::List => "list",
@@ -6328,6 +6329,10 @@ impl App {
         window.set_bt_present(bt.present);
         window.set_bt_notice(bt.notice.clone().into());
         window.set_bt_summary(bt.summary().into());
+        window.set_bt_powered(bt.powered);
+        window.set_bt_scanning(bt.scanning);
+        window.set_bt_linked(bt.devices.iter().filter(|device| device.connected).count() as i32);
+        window.set_bt_paired(bt.devices.iter().filter(|device| device.paired).count() as i32);
         let focused = bt.focused_row();
         let mut rows: Vec<WifiRow> = Vec::new();
         let mut slots = 0..;
@@ -8111,6 +8116,12 @@ impl App {
             volume: view.volume,
             muted: view.muted,
             volume_focused: view.volume_focused,
+            device_icon: view.device_icon.into(),
+            speakers: view.speakers,
+            source: view.source.into(),
+            form: view.form.into(),
+            bitstream: view.bitstream,
+            receiver_volume: view.receiver_volume,
         });
     }
 
@@ -8212,6 +8223,10 @@ impl App {
             trial: view.trial.into(),
             previous: view.previous.into(),
             trial_now: view.trial_now.into(),
+            link: view.link,
+            addressed: view.addressed,
+            fixed: view.fixed,
+            gateway: view.gateway.into(),
         });
     }
 
@@ -8272,6 +8287,9 @@ impl App {
             ),
             current_title: view.current_title.into(),
             current_line: view.current_line.into(),
+            wire: out_screen(&view.wire),
+            draft: out_screen(&view.draft),
+            unsaved: view.unsaved,
             current_badges: model(
                 view.current_badges
                     .into_iter()
@@ -8496,6 +8514,8 @@ impl App {
             ),
             prompt: view.prompt,
             prompt_focus: view.prompt_focus as i32,
+            celsius: view.celsius.unwrap_or(-1.0) as f32,
+            duty_at: view.duty_at.unwrap_or(-1.0) as f32,
         });
     }
 
@@ -8569,6 +8589,24 @@ impl App {
 
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
+        let soc = &self.diagnostics.soc;
+        let measured = |value: Option<f32>| value.unwrap_or(-1.0);
+        window.set_diag_soc(SocView {
+            known: soc.known,
+            cpu: measured(soc.cpu),
+            cores: soc.cores,
+            memory: measured(soc.memory),
+            memory_text: soc.memory_text.clone().into(),
+            storage: measured(soc.storage),
+            storage_text: soc.storage_text.clone().into(),
+            soc: measured(soc.soc),
+            big0: measured(soc.big0),
+            big1: measured(soc.big1),
+            little: measured(soc.little),
+            gpu: measured(soc.gpu),
+            npu: measured(soc.npu),
+            center: measured(soc.center),
+        });
         window.set_diag_nav(slint::ModelRc::new(slint::VecModel::from(
             self.diagnostics
                 .groups
@@ -8616,6 +8654,19 @@ fn refresh<T: Clone + PartialEq + 'static>(model: &slint::ModelRc<T>, rows: &[T]
         }
     }
     true
+}
+
+fn out_screen(view: &screens::output::ScreenView) -> OutScreen {
+    OutScreen {
+        known: view.known,
+        width: view.width,
+        height: view.height,
+        size: view.size.clone().into(),
+        rate: view.rate.clone().into(),
+        bits: view.bits,
+        chroma: view.chroma.clone().into(),
+        hdr: view.hdr,
+    }
 }
 
 /// The search's result shelves' artwork: around the focused shelf and its

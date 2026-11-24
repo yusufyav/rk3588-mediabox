@@ -283,6 +283,8 @@ export component QuietChoice inherits Rectangle {
     in property <[ChoiceItem]> items;
     in property <int> focus-at;
     in property <string> note;
+    // Its rows' zone and surface: the settings' own list, or an editor's.
+    in property <string> pointer-zone: "settings-choice";
 
     property <float> u: Quiet.u;
     property <length> pitch: 68px * u;
@@ -360,13 +362,13 @@ export component QuietChoice inherits Rectangle {
             clip: true;
 
             pan := PanState {
-                surface: "settings-choice";
+                surface: root.pointer-zone;
                 remote: clamp(focus-at * pitch - (list.height - pitch) / 2, 0px, self.limit);
                 limit: max(0px, total - list.height);
                 remote-duration: QuietMotion.t-move;
             }
 
-            PointerPanArea { surface: "settings-choice"; }
+            PointerPanArea { surface: root.pointer-zone; }
 
             Rectangle {
                 x: 0;
@@ -478,7 +480,7 @@ export component QuietChoice inherits Rectangle {
                     // are refused as the remote's are.
                     target := PointerTarget {
                         enabled: c.enabled;
-                        zone: c.enabled ? "settings-choice" : "";
+                        zone: c.enabled ? root.pointer-zone : "";
                         index: i;
                         veil: false;
                     }

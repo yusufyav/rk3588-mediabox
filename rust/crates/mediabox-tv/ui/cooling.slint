@@ -1,6 +1,7 @@
 import { PointerTarget, PointerShield, PointerSwallow, PointerClose } from "pointer.slint";
 import { Theme, Metrics } from "theme.slint";
 import { FocusRing, StateNote } from "kit.slint";
+import { CoolingStrip } from "quiet/instruments.slint";
 
 // The fan curve editor: what the SoC and the fan are doing, the curve as a
 // graph, and the curve's points as a table a remote can walk and a keyboard
@@ -99,6 +100,9 @@ export struct CoolingView {
     info: [CoolInfo],
     prompt: bool,
     prompt-focus: int,
+    // The readings as numbers (Celsius; the duty 0 to 1), -1 for none.
+    celsius: float,
+    duty-at: float,
 }
 
 // A button: the settings language's warm outline when the remote is on it,
@@ -351,7 +355,7 @@ export component CoolingPane inherits Rectangle {
     property <length> gap: rf * 0.9;
     property <length> head-h: rf * 2.9;
     property <length> read-y: head-h + rf * 0.7;
-    property <length> read-h: rf * 3.8;
+    property <length> read-h: Theme.quiet ? rf * 5 : rf * 3.8;
     property <length> main-y: read-y + read-h + gap;
     property <length> act-h: rf * 3.1;
     property <length> act-y: root.height - act-h;
@@ -421,7 +425,22 @@ export component CoolingPane inherits Rectangle {
 
     // -------------------------------------------------------------- readings
 
-    if view.available: HorizontalLayout {
+    if view.available && Theme.quiet: CoolingStrip {
+        x: 0;
+        y: read-y;
+        width: root.width;
+        height: read-h;
+        temperature: view.temperature;
+        celsius: view.celsius;
+        duty: view.duty;
+        duty-raw: view.duty-raw;
+        duty-at: view.duty-at;
+        curve: view.curve;
+        profile: view.profile;
+        state: view.state;
+        state-tone: view.state-tone;
+    }
+    if view.available && !Theme.quiet: HorizontalLayout {
         x: 0;
         y: read-y;
         width: root.width;

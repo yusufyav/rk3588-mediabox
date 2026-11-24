@@ -1,6 +1,9 @@
 import { Theme, Metrics } from "theme.slint";
 import { KeyRow, KeyCap, Keyboard } from "components.slint";
 import { PointerTarget } from "pointer.slint";
+import { Quiet } from "quiet/core.slint";
+import { QuietGround } from "quiet/materials.slint";
+import { Overline } from "quiet/controls.slint";
 
 // Signing in to a Stremio account from the sofa.
 //
@@ -50,6 +53,12 @@ export component Account inherits Rectangle {
     background: Theme.bg;
     clip: true;
 
+    if Theme.quiet: QuietGround {
+        width: 100%;
+        height: 100%;
+        strength: 0.4;
+    }
+
     VerticalLayout {
         x: col-x;
         y: Metrics.topbar + Metrics.block-gap * 0.6;
@@ -57,11 +66,16 @@ export component Account inherits Rectangle {
         spacing: Metrics.block-gap * 0.45;
         alignment: start;
 
+        if Theme.quiet: Overline {
+            text: "AYARLAR  /  HESAP";
+            color: Quiet.warm;
+        }
         Text {
             text: "Stremio hesabı";
             color: Theme.text;
             font-size: Metrics.title-screen * 0.62;
-            font-weight: 760;
+            font-weight: Theme.quiet ? 560 : 760;
+            letter-spacing: Theme.quiet ? -Metrics.title-screen * 0.62 * 0.045 : 0px;
         }
 
         Text {
@@ -88,7 +102,7 @@ export component Account inherits Rectangle {
             property <bool> active: editing == "email";
             height: field-h;
             PointerTarget { zone: "account-form"; index: 0; }
-            border-radius: Theme.radius * 0.7;
+            border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.7;
             background: focused ? Theme.focus-fill : #ffffff0d;
             border-width: focused || active ? 2px : 1px;
             border-color: focused ? Theme.focus-ring : (active ? #ffffff40 : Theme.line);
@@ -96,7 +110,7 @@ export component Account inherits Rectangle {
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
             if email == "": Text {
-                x: Metrics.root-font * 0.7;
+                x: Metrics.root-font * (Theme.quiet ? 1.1 : 0.7);
                 width: parent.width - Metrics.root-font * 2.0;
                 height: 100%;
                 text: "ornek@eposta.com";
@@ -111,7 +125,7 @@ export component Account inherits Rectangle {
             // The text, with the caret standing between its two halves, so it
             // can sit in the middle of a word rather than only at the end.
             if email != "": HorizontalLayout {
-                x: Metrics.root-font * 0.7;
+                x: Metrics.root-font * (Theme.quiet ? 1.1 : 0.7);
                 width: parent.width - Metrics.root-font * 1.4;
                 height: 100%;
                 alignment: start;
@@ -165,7 +179,7 @@ export component Account inherits Rectangle {
             height: field-h;
             // First, so the switch inside the field takes its own click.
             PointerTarget { zone: "account-form"; index: 1; }
-            border-radius: Theme.radius * 0.7;
+            border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.7;
             background: focused ? Theme.focus-fill : #ffffff0d;
             border-width: focused || active ? 2px : 1px;
             border-color: focused ? Theme.focus-ring : (active ? #ffffff40 : Theme.line);
@@ -181,8 +195,8 @@ export component Account inherits Rectangle {
                 height: parent.height - Metrics.root-font * 0.55;
                 x: parent.width - self.width - Metrics.root-font * 0.3;
                 y: (parent.height - self.height) / 2;
-                border-radius: Theme.radius * 0.5;
-                background: on ? #ffffff : #ffffff14;
+                border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.5;
+                background: on ? (Theme.quiet ? #f2e5d0 : #ffffff) : #ffffff14;
                 border-width: on ? 0px : 1px;
                 border-color: #ffffff2a;
                 animate background { duration: Theme.focus-in; easing: Theme.ease; }
@@ -197,7 +211,7 @@ export component Account inherits Rectangle {
 
             // Bullets and a length. Whatever was typed is not in this file.
             if password-mask == "": Text {
-                x: Metrics.root-font * 0.7;
+                x: Metrics.root-font * (Theme.quiet ? 1.1 : 0.7);
                 width: parent.width - Metrics.root-font * 5.2;
                 height: 100%;
                 text: "••••••••";
@@ -210,7 +224,7 @@ export component Account inherits Rectangle {
             }
 
             if password-mask != "": HorizontalLayout {
-                x: Metrics.root-font * 0.7;
+                x: Metrics.root-font * (Theme.quiet ? 1.1 : 0.7);
                 width: parent.width - Metrics.root-font * 5.2;
                 height: 100%;
                 alignment: start;
@@ -267,7 +281,7 @@ export component Account inherits Rectangle {
         Rectangle {
             property <bool> focused: focus-at == "submit";
             height: field-h;
-            border-radius: Theme.radius * 0.7;
+            border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.7;
             background: focused
                 ? (submit-ready ? Theme.accent : Theme.focus-fill)
                 : #ffffff12;

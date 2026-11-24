@@ -88,6 +88,25 @@ export struct SettingRow {
     n-card: int,
 }
 
+// The SoC, as numbers, for Quiet OS's picture of it: shares 0 to 1 and
+// Celsius, -1 where the machine gave no reading.
+export struct SocView {
+    known: bool,
+    cpu: float,
+    cores: int,
+    memory: float,
+    memory-text: string,
+    storage: float,
+    storage-text: string,
+    soc: float,
+    big0: float,
+    big1: float,
+    little: float,
+    gpu: float,
+    npu: float,
+    center: float,
+}
+
 export struct DiagGroup {
     title: string,
     rows: [TechRow],
@@ -185,18 +204,18 @@ export component Keyboard inherits VerticalLayout {
             property <bool> on: active && r == key-row && c == key-col;
 
             width: Metrics.key-w * cap.span + Metrics.key-gap * (cap.span - 1);
-            border-radius: Metrics.key-h * 0.26;
+            border-radius: Metrics.key-h * (Theme.quiet ? 0.5 : 0.26);
             background: on
-                ? #ffffff
-                : (wide ? #ffffff16 : #ffffff0b);
-            border-width: on ? 0px : 1px;
+                ? (Theme.quiet ? #f2e5d0 : #ffffff)
+                : (wide ? (Theme.quiet ? #ffffff0f : #ffffff16) : (Theme.quiet ? #ffffff07 : #ffffff0b));
+            border-width: on || Theme.quiet ? 0px : 1px;
             border-color: wide ? #ffffff2a : #ffffff1c;
 
             animate background { duration: Theme.focus-in; easing: Theme.ease; }
 
             // A soft ring under the focused key, so it reads as lifted rather
             // than merely inverted.
-            if on: Rectangle {
+            if on && !Theme.quiet: Rectangle {
                 x: -3px;
                 y: -3px;
                 width: parent.width + 6px;

@@ -14,7 +14,7 @@
 
 use super::settings::EditorTarget;
 use crate::pointer::{Aim, Zone};
-use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioMode, AudioSetting, AudioStatus};
+use mediabox_core::{AudioCodec, AudioDeviceChoice, AudioKind, AudioMode, AudioSetting, AudioStatus};
 
 /// The cards, top to bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,8 +526,52 @@ impl Audio {
             volume: i32::from(setting.volume),
             muted: setting.muted,
             volume_focused: self.picker.is_none() && self.focused() == Card::Volume,
+            device_icon: device
+                .map(|device| match device.kind {
+                    AudioKind::Hdmi | AudioKind::DisplayPort => "monitor",
+                    AudioKind::Bluetooth => "headphones",
+                    AudioKind::Usb | AudioKind::Analog | AudioKind::Other => "speaker",
+                })
+                .unwrap_or_default()
+                .into(),
+            speakers: device
+                .and_then(|device| device.sink.as_ref())
+                .map(|sink| speaker_bits(&sink.speakers))
+                .unwrap_or_default(),
+            source: status
+                .stream
+                .as_ref()
+                .map(|stream| match &stream.codec {
+                    Some(codec) => {
+                        format!("{} {}", codec.to_uppercase(), stream.channels.clone().unwrap_or_default()).trim().to_string()
+                    }
+                    None => "Ses".into(),
+                })
+                .unwrap_or_default(),
+            form: match &status.stream {
+                Some(stream) => stream.summary.clone(),
+                None if plan.ac3_encode.is_some() => "Dolby Digital'e dönüştürme hazır".into(),
+                None if !plan.passthrough.is_empty() => "Doğrudan geçiş hazır".into(),
+                None => "PCM".into(),
+            },
+            bitstream: status.stream.as_ref().is_some_and(|stream| stream.bitstream),
+            receiver_volume: match &status.stream {
+                Some(stream) => stream.bitstream,
+                None => plan.bitstream(),
+            },
         }
     }
+}
+
+/// The speakers a sink declares (`FL/FR`, `LFE`, ...) as the bits Quiet OS's
+/// room is lit by (ui/quiet/instruments.slint, `SpeakerSpot`).
+fn speaker_bits(declared: &[String]) -> i32 {
+    const PLACES: [&str; 9] = ["FL", "FR", "FC", "LFE", "RL", "RR", "RC", "RLC", "RRC"];
+    declared
+        .iter()
+        .flat_map(|pair| pair.split('/'))
+        .filter_map(|name| PLACES.iter().position(|place| *place == name))
+        .fold(0, |bits, at| bits | 1 << at)
 }
 
 /// `after` to be sent, or nothing when it is what is kept already.
@@ -789,6 +833,16 @@ pub struct View {
     pub volume: i32,
     pub muted: bool,
     pub volume_focused: bool,
+    /// For Quiet OS's picture of the way the sound goes: the device's kind as
+    /// an icon's name ("" for none), the speakers its sink declares, what
+    /// plays now ("" for nothing), the form it leaves in, whether that is a
+    /// bitstream, and whether the receiver keeps the volume.
+    pub device_icon: String,
+    pub speakers: i32,
+    pub source: String,
+    pub form: String,
+    pub bitstream: bool,
+    pub receiver_volume: bool,
 }
 
 #[cfg(test)]
