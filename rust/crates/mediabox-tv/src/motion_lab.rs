@@ -4,7 +4,7 @@
 //! parameters it turns (`QuietMotion` in ui/quiet/motion.slint) are part of
 //! every build, because they are the same properties the product animates
 //! with; what keeps the lab out of the product is that nothing opens it
-//! unless the interface was started with MEDIABOX_TV_MOTION_LAB set. Nothing
+//! unless the interface was started with MEDIABOX_TV_MOTION_LAB=1. Nothing
 //! it turns is written anywhere: a restart is the product's motion again.
 //!
 //! On Quiet OS's home screen the Menu key opens and closes it. While it is
@@ -26,11 +26,11 @@ pub struct Lab {
 impl Lab {
     pub fn from_env() -> Self {
         Self {
-            enabled: std::env::var_os("MEDIABOX_TV_MOTION_LAB").is_some(),
+            enabled: std::env::var("MEDIABOX_TV_MOTION_LAB").is_ok_and(|value| asked(&value)),
         }
     }
 
-    /// As if started with MEDIABOX_TV_MOTION_LAB.
+    /// As if started with MEDIABOX_TV_MOTION_LAB=1.
     #[cfg(test)]
     pub fn enabled() -> Self {
         Self { enabled: true }
@@ -69,6 +69,12 @@ impl Lab {
     }
 }
 
+/// What MEDIABOX_TV_MOTION_LAB has to say: a yes. Set to nothing, to "0" or
+/// to anything else, it was not asked for.
+fn asked(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
 /// One step of a parameter, kept within what still reads as motion.
 fn turn(motion: &QuietMotion<'_>, row: i32, dx: i32) {
     let clamp = |value: f32, lo: f32, hi: f32| {
@@ -83,5 +89,18 @@ fn turn(motion: &QuietMotion<'_>, row: i32, dx: i32) {
         5 => motion.set_profile((motion.get_profile() + dx).rem_euclid(3)),
         6 => motion.set_reduced(!motion.get_reduced()),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_lab_is_asked_for_with_a_yes_and_nothing_else() {
+        for yes in ["1", "true", "ON", " yes "] {
+            assert!(super::asked(yes), "{yes:?}");
+        }
+        for no in ["", "0", "false", "off", "no", "2"] {
+            assert!(!super::asked(no), "{no:?}");
+        }
     }
 }

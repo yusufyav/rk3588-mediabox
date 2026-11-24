@@ -13,7 +13,7 @@
 
 use std::rc::Rc;
 
-use slint::VecModel;
+use slint::{Model, VecModel};
 
 use crate::AppTile;
 use crate::model::{LibraryListing, MetaPreview};
@@ -411,20 +411,24 @@ impl Home {
         let holding = self.focused_app().map(|tile| tile.id.clone());
         self.apps = apps;
 
-        self.app_tiles.set_vec(
-            self.apps
-                .iter()
-                .map(|tile| AppTile {
-                    id: tile.id.clone().into(),
-                    name: tile.name.clone().into(),
-                    mark: tile.mark.into(),
-                    hue: tile.hue,
-                    ready: tile.ready,
-                    note: tile.note.clone().into(),
-                    about: tile.about.clone().into(),
-                })
-                .collect::<Vec<_>>(),
-        );
+        let tiles: Vec<AppTile> = self
+            .apps
+            .iter()
+            .map(|tile| AppTile {
+                id: tile.id.clone().into(),
+                name: tile.name.clone().into(),
+                mark: tile.mark.into(),
+                hue: tile.hue,
+                ready: tile.ready,
+                note: tile.note.clone().into(),
+                about: tile.about.clone().into(),
+            })
+            .collect();
+        // The same launcher polled again is not a new one: a reset model
+        // has Slint build every row, name and scene over again.
+        if !self.app_tiles.iter().eq(tiles.iter().cloned()) {
+            self.app_tiles.set_vec(tiles);
+        }
 
         self.column = holding
             .and_then(|id| self.apps.iter().position(|tile| tile.id == id))

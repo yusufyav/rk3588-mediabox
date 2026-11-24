@@ -750,8 +750,11 @@ impl App {
     }
 
     fn act_on_home(&mut self, intent: Intent) {
-        if let Some(window) = self.window.upgrade().filter(|w| self.lab.is_open(w)) {
+        if self.lab_open()
+            && let Some(window) = self.window.upgrade()
+        {
             self.lab.act(&window, intent);
+            self.paint();
             return;
         }
         match intent {
@@ -809,6 +812,7 @@ impl App {
                     .live
                     .as_ref()
                     .is_some_and(|live| live.layer != screens::live::Layer::None),
+                Route::Home => self.lab_open(),
                 _ => false,
             } || (self.on_search_box() && self.account_focus > 0)
             {
@@ -819,6 +823,11 @@ impl App {
             film,
             handed_over: self.handed_over,
         }
+    }
+
+    /// Quiet OS's Motion Lab is over the home screen.
+    fn lab_open(&self) -> bool {
+        self.layout == layout::Layout::Quiet && self.window.upgrade().is_some_and(|window| self.lab.is_open(&window))
     }
 
     fn pointer_policy(&self) -> pointer::Policy {
@@ -1065,7 +1074,8 @@ impl App {
         if (dx, dy) == (0, 0) {
             return;
         }
-        if pointer::wheel_is_along(self.route()) {
+        // The lab's rows are a column, whatever the launcher under it is.
+        if pointer::wheel_is_along(self.route()) && !self.lab_open() {
             (dx, dy) = (dx + dy, 0);
         }
         let steps = [
@@ -6655,6 +6665,7 @@ impl App {
         {
             if let Some(window) = self.window.upgrade() {
                 self.lab.toggle(&window);
+                self.paint();
             }
             return;
         }
@@ -8001,9 +8012,12 @@ impl App {
         let (title, blurb) = self.settings.heading();
         window.set_settings_title(title.into());
         window.set_settings_blurb(blurb.into());
-        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(setting_rows(
-            self.settings.rows(),
-        ))));
+        let rows = setting_rows(self.settings.rows());
+        // Quiet OS keeps the rows it has and changes what changed: a switch
+        // whose row is built over again has nothing to slide from.
+        if self.layout != layout::Layout::Quiet || !refresh(&window.get_settings_rows(), &rows) {
+            window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        }
         let choice = self.settings.choice_view();
         window.set_settings_choice_open(choice.is_some());
         if let Some(choice) = choice {
@@ -8587,6 +8601,21 @@ impl App {
                 .collect::<Vec<_>>(),
         )));
     }
+}
+
+/// Brings a model to `rows` by writing only the rows that differ; false where
+/// it cannot (another length, or not a model of ours), and a new one is due.
+fn refresh<T: Clone + PartialEq + 'static>(model: &slint::ModelRc<T>, rows: &[T]) -> bool {
+    use slint::Model;
+    if model.row_count() != rows.len() || model.as_any().downcast_ref::<slint::VecModel<T>>().is_none() {
+        return false;
+    }
+    for (at, row) in rows.iter().enumerate() {
+        if model.row_data(at).as_ref() != Some(row) {
+            model.set_row_data(at, row.clone());
+        }
+    }
+    true
 }
 
 /// The search's result shelves' artwork: around the focused shelf and its

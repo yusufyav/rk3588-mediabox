@@ -1,7 +1,7 @@
 import { AppTile, VitalsModel } from "../components.slint";
 import { PointerTarget, PointerPanArea, PanState } from "../pointer.slint";
 import { Quiet } from "core.slint";
-import { QuietMotion, QuietCurves } from "motion.slint";
+import { QuietMotion, QuietCurves, QuietCam, QuietReach } from "motion.slint";
 import { QuietGround, LivingFocus } from "materials.slint";
 import { Scene } from "scenes.slint";
 import { Overline, KeyCap, QuietBar } from "controls.slint";
@@ -12,9 +12,10 @@ export global QuietPlaces {
     out property <length> stage-x: 1201px * Quiet.u;
     out property <length> stage-y: 150px * Quiet.u;
     out property <length> stage-size: 650px * Quiet.u;
-    out property <length> emblem-x: 1592px * Quiet.u;
-    out property <length> emblem-y: 196px * Quiet.u;
-    out property <length> emblem-size: 228px * Quiet.u;
+    // Smaller, beside an editor's heading (`QuietCam.shrink`).
+    public pure function emblem-x(shrink: float) -> length { return (1592px + 132px * shrink) * Quiet.u; }
+    public pure function emblem-y(shrink: float) -> length { return (196px - 80px * shrink) * Quiet.u; }
+    public pure function emblem-size(shrink: float) -> length { return (228px - 132px * shrink) * Quiet.u; }
 }
 
 // The chosen application's name, set as large as the reference sets it, and
@@ -25,7 +26,17 @@ component NameBlock inherits Rectangle {
     in property <AppTile> tile;
     in property <float> d;
     property <float> u: Quiet.u;
-    property <float> f: QuietMotion.fade(d, 0.55);
+    // The one chosen, which its word's strength follows (QuietMotion.word).
+    in property <bool> here: true;
+    property <bool> snap: true;
+    property <float> lead;
+    animate lead { duration: snap ? 0ms : QuietMotion.t-wash; easing: QuietCurves.ease; }
+    init => {
+        lead = here ? 1 : 0;
+        snap = false;
+    }
+    changed here => { lead = here ? 1 : 0; }
+    property <float> f: QuietMotion.word(d, lead);
 
     measure := Text {
         visible: false;
@@ -64,7 +75,17 @@ component AboutBlock inherits Rectangle {
     in property <AppTile> tile;
     in property <float> d;
     property <float> u: Quiet.u;
-    property <float> f: QuietMotion.fade(d, 0.5);
+    // The one chosen, which its word's strength follows (QuietMotion.word).
+    in property <bool> here: true;
+    property <bool> snap: true;
+    property <float> lead;
+    animate lead { duration: snap ? 0ms : QuietMotion.t-wash; easing: QuietCurves.ease; }
+    init => {
+        lead = here ? 1 : 0;
+        snap = false;
+    }
+    changed here => { lead = here ? 1 : 0; }
+    property <float> f: QuietMotion.word(d, lead);
 
     VerticalLayout {
         y: d * 34px * u * QuietMotion.travel;
@@ -146,73 +167,53 @@ export component QuietHome inherits Rectangle {
     // Up to where the scene begins.
     property <length> spot-w: 540px * u;
 
-    // ---- the camera
+    // ---- the camera (the window's QuietRig): which row it goes to, and how.
     //
-    // Five copies of where the list is, each assigned (not bound) so that a
-    // jump can be made without animating: `snap` zeroes the durations for
-    // one assignment (Slint starts an assigned animation from the value the
-    // property has at that moment, so a zero-length one lands at once). The
-    // scene's planes read `cam-far`, `cam` and `cam-near`; the name reads
-    // `cam-type` and what it says `cam-late`.
-    property <bool> snap: true;
-    property <float> cam;
-    property <float> cam-far;
-    property <float> cam-near;
-    property <float> cam-type;
-    property <float> cam-late;
-    animate cam { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
-    animate cam-far { duration: snap ? 0ms : QuietMotion.t-camera-far; easing: QuietCurves.camera; }
-    animate cam-near { duration: snap ? 0ms : QuietMotion.t-camera-near; easing: QuietCurves.camera; }
-    animate cam-type { duration: snap ? 0ms : QuietMotion.t-type; easing: QuietCurves.glide; }
-    animate cam-late { duration: snap ? 0ms : QuietMotion.t-type-late; easing: QuietCurves.glide; }
-    // How far the chosen scene still has to come as the screen opens: from
-    // ahead of the camera (`arrive`), or from the settings' emblem (`fly`).
-    property <float> arrive;
-    property <float> fly;
-    animate arrive { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
-    animate fly { duration: snap ? 0ms : QuietMotion.t-shared; easing: QuietCurves.camera; }
-
-    function aim(from: float, back: bool) {
-        snap = true;
-        cam = from;
-        cam-far = from;
-        cam-near = from;
-        cam-type = from;
-        cam-late = from;
-        if back {
-            fly = 1;
-            arrive = 0;
-        } else {
-            fly = 0;
-            arrive = 0.6;
+    // A launcher that changed under the focus -- an application added above
+    // it, one removed, the list reordered -- keeps the same application
+    // chosen under another row: nothing moved for the person, and the camera
+    // is simply there.
+    in property <QuietCam> camera;
+    callback travel(int);
+    callback land(int, bool);
+    callback fly(float, bool);
+    callback rest();
+    callback replayed();
+    in-out property <string> stood-before;
+    property <string> id: chosen.id;
+    property <string> last-id;
+    function follow() {
+        if focus-row != camera.row {
+            if id == last-id {
+                root.land(focus-row, false);
+            } else {
+                root.travel(focus-row);
+            }
         }
-        snap = false;
-        cam = focus-row;
-        cam-far = focus-row;
-        cam-near = focus-row;
-        cam-type = focus-row;
-        cam-late = focus-row;
-        fly = 0;
-        arrive = 0;
+        last-id = id;
+        stood-before = id;
     }
     init => {
         count = listed;
         about-y = about-at;
         about-snap = false;
-        aim(focus-row, came-from == "settings" && chosen.id == "settings");
+        last-id = id;
+        // Back from the settings: their emblem flies home into its scene,
+        // from wherever its own flight had got to.
+        if (came-from == "settings" || came-from == "diagnostics") && id == "settings" && stood-before == "settings"
+            && focus-row == camera.row {
+            root.fly(0, false);
+        } else {
+            root.land(focus-row, true);
+        }
+        stood-before = id;
     }
-    changed focus-row => {
-        cam = focus-row;
-        cam-far = focus-row;
-        cam-near = focus-row;
-        cam-type = focus-row;
-        cam-late = focus-row;
-    }
-    // The Motion Lab's replay: from one application back, again.
-    changed replay => {
-        aim(max(0, focus-row - 1), false);
-    }
+    changed focus-row => { follow(); }
+    changed id => { follow(); }
     property <int> replay: QuietMotion.replay;
+    changed replay => { root.replayed(); }
+    property <bool> moving: QuietMotion.on;
+    changed moving => { if !moving { root.rest(); } }
 
     clip: true;
 
@@ -225,25 +226,25 @@ export component QuietHome inherits Rectangle {
     // ---- the scene: one per application near the camera, none at rest but
     // the chosen one.
     stage := Rectangle {
-        x: QuietPlaces.stage-x + (QuietPlaces.emblem-x - QuietPlaces.stage-x) * fly;
-        y: QuietPlaces.stage-y + (QuietPlaces.emblem-y - QuietPlaces.stage-y) * fly;
-        width: QuietPlaces.stage-size + (QuietPlaces.emblem-size - QuietPlaces.stage-size) * fly;
+        property <float> fly: camera.flight;
+        x: QuietPlaces.stage-x + (QuietPlaces.emblem-x(camera.shrink) - QuietPlaces.stage-x) * fly;
+        y: QuietPlaces.stage-y + (QuietPlaces.emblem-y(camera.shrink) - QuietPlaces.stage-y) * fly;
+        width: QuietPlaces.stage-size + (QuietPlaces.emblem-size(camera.shrink) - QuietPlaces.stage-size) * fly;
         height: self.width;
 
         for tile[i] in apps: Rectangle {
-            property <float> near: min(abs(i - cam), min(abs(i - cam-far), abs(i - cam-near)));
-            property <float> extra: i == focus-row ? arrive : 0;
             width: 100%;
             height: 100%;
-            if near < 1.05 || (i == focus-row && arrive > 0): Scene {
+            if QuietReach.scene(camera, i): Scene {
+                property <float> extra: i == focus-row ? camera.arrive : 0;
                 width: 100%;
                 height: 100%;
                 id: tile.id;
                 mark: tile.mark;
-                d: i - cam + extra;
-                d-far: i - cam-far + extra * 0.6;
-                d-near: i - cam-near + extra * 1.4;
-                presence: 0.9;
+                d: i - camera.cam + extra;
+                d-far: i - camera.cam-far + extra * 0.6;
+                d-near: i - camera.cam-near + extra * 1.4;
+                presence: 0.9 - 0.35 * stage.fly;
             }
         }
     }
@@ -410,8 +411,8 @@ export component QuietHome inherits Rectangle {
     // Kinetic typography: the ordinal rolls like a counter, the name moves
     // toward where the list went while the next one comes from where it came
     // from, and what it says follows a beat later -- each one only a short
-    // distance and crossing at no more than half strength, so a word is
-    // legible at every frame of it.
+    // distance, the chosen word legible from the first frames and the one
+    // it replaces out of its way (`QuietMotion.word`).
     if count > 0: HorizontalLayout {
         x: spot-x;
         y: 294px * u;
@@ -437,8 +438,8 @@ export component QuietHome inherits Rectangle {
                     text: Quiet.two(count);
                 }
                 for tile[i] in apps: Rectangle {
-                    property <float> d: i - cam-type;
-                    if abs(d) < 1: Overline {
+                    property <float> d: i - camera.cam-type;
+                    if QuietReach.words(camera, i, false): Overline {
                         y: d * parent.height * 1.1;
                         width: parent.width;
                         height: parent.height;
@@ -461,8 +462,9 @@ export component QuietHome inherits Rectangle {
         width: spot-w;
         height: 860px * u - self.y;
         for tile[i] in apps: Rectangle {
-            property <float> d: i - cam-type;
-            if abs(d) < 0.6: NameBlock {
+            property <float> d: i - camera.cam-type;
+            if QuietReach.words(camera, i, false): NameBlock {
+                here: i == focus-row;
                 width: spot-w;
                 height: parent.height;
                 tile: tile;
@@ -488,8 +490,9 @@ export component QuietHome inherits Rectangle {
         width: spot-w;
         height: 860px * u - self.y;
         for tile[i] in apps: Rectangle {
-            property <float> d: i - cam-late;
-            if abs(d) < 0.5: AboutBlock {
+            property <float> d: i - camera.cam-late;
+            if QuietReach.words(camera, i, true): AboutBlock {
+                here: i == focus-row;
                 width: spot-w;
                 height: parent.height;
                 tile: tile;

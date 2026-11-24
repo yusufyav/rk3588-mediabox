@@ -6,7 +6,7 @@ import { OutputPane, OutputView } from "../output.slint";
 import { EthernetPane, EthernetView } from "../ethernet.slint";
 import { AudioPane, AudioView } from "../audio.slint";
 import { Quiet } from "core.slint";
-import { QuietMotion, QuietCurves } from "motion.slint";
+import { QuietMotion, QuietCurves, QuietCam } from "motion.slint";
 import { QuietGround, LivingFocus } from "materials.slint";
 import { SettingsScene } from "scenes.slint";
 import { Overline, HomeCrumb, QuietBar, QuietToggle, QuietChoice } from "controls.slint";
@@ -30,30 +30,39 @@ component SettingsEmblem inherits Rectangle {
     // The category, as a number: it turns when this does.
     in property <float> turn;
     in property <bool> small;
-    // 1 where the home screen's scene stood, 0 in place.
-    in property <float> fly;
     property <float> u: Quiet.u;
+    // Where the window's camera has it; in its place, on a screen that does
+    // not move it.
+    in property <QuietCam> camera: { flight: 1 };
+    callback shrink-to(float);
+    property <float> fly: 1 - camera.flight;
 
-    property <float> notch: turn;
-    animate notch { duration: QuietMotion.t-camera; easing: QuietCurves.camera; }
-    property <length> ex: small ? 1724px * u : QuietPlaces.emblem-x;
-    property <length> ey: small ? 116px * u : QuietPlaces.emblem-y;
-    property <length> es: small ? 96px * u : QuietPlaces.emblem-size;
-    animate ex, ey, es { duration: QuietMotion.t-shared; easing: QuietCurves.camera; }
+    property <bool> snap: true;
+    property <float> notch;
+    animate notch { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    init => {
+        notch = turn;
+        snap = false;
+        root.shrink-to(small ? 1 : 0);
+    }
+    changed turn => { notch = turn; }
+    changed small => { root.shrink-to(small ? 1 : 0); }
 
-    x: ex + (QuietPlaces.stage-x - ex) * fly;
-    y: ey + (QuietPlaces.stage-y - ey) * fly;
-    width: es + (QuietPlaces.stage-size - es) * fly;
+    x: QuietPlaces.emblem-x(camera.shrink) + (QuietPlaces.stage-x - QuietPlaces.emblem-x(camera.shrink)) * fly;
+    y: QuietPlaces.emblem-y(camera.shrink) + (QuietPlaces.stage-y - QuietPlaces.emblem-y(camera.shrink)) * fly;
+    width: QuietPlaces.emblem-size(camera.shrink) + (QuietPlaces.stage-size - QuietPlaces.emblem-size(camera.shrink)) * fly;
     height: self.width;
 
+    // What the home screen's camera still had to travel when it was left.
+    property <float> owed: camera.settings ? camera.row - camera.cam + camera.arrive : 0;
     property <float> d: clamp((notch - turn) * 0.3, -0.45, 0.45);
     SettingsScene {
         width: 100%;
         height: 100%;
         tint: Quiet.aura("settings");
-        d: root.d;
-        d-far: root.d * 0.7;
-        d-near: root.d * 1.3;
+        d: root.d + root.owed;
+        d-far: root.d * 0.7 + root.owed;
+        d-near: root.d * 1.3 + root.owed;
         presence: 0.55 + 0.35 * fly;
     }
 }
@@ -92,6 +101,33 @@ component SwapText inherits Rectangle {
 
     changed text => {
         if (on-a && text == a-text) || (!on-a && text == b-text) {
+            return;
+        }
+        // Back to the word still on its way out: it turns round.
+        if on-a && b > 0.02 && text == b-text {
+            on-a = false;
+            b = 1;
+            a = 0;
+            last = order;
+            return;
+        }
+        if !on-a && a > 0.02 && text == a-text {
+            on-a = true;
+            a = 1;
+            b = 0;
+            last = order;
+            return;
+        }
+        // Still coming in: it goes on coming in, as the new word. Taking the
+        // other slot would drop a word that is still half there.
+        if on-a && a < 0.6 {
+            a-text = text;
+            last = order;
+            return;
+        }
+        if !on-a && b < 0.6 {
+            b-text = text;
+            last = order;
             return;
         }
         let dir = order >= last ? 1 : -1;
@@ -239,6 +275,8 @@ export component QuietFrame inherits Rectangle {
     in property <int> current;
     in property <bool> active;
     in property <string> pointer-zone;
+    // Off where the screen draws an instrument of its own in its place.
+    in property <bool> emblem: true;
     in property <string> page-label;
     in property <string> page-icon;
     in property <string> overline;
@@ -262,7 +300,7 @@ export component QuietFrame inherits Rectangle {
         vitals: root.vitals;
         crumb: root.crumb;
     }
-    SettingsEmblem {
+    if emblem: SettingsEmblem {
         turn: root.current;
     }
 
@@ -421,26 +459,30 @@ export component QuietSettings inherits Rectangle {
 
     // ---- arriving
     //
-    // `fly`: the emblem's way in from the home screen's scene. `enter`: the
-    // rows settling after a category or a page changed, from the side the
-    // column moved to (assigned with `snap`, see home.slint's camera).
+    // The emblem's way in from the home screen's scene (QuietCam.flight),
+    // and `enter`: the rows settling after a category or a page changed,
+    // from the side the column moved to. A change while they are still
+    // settling does not start them over, so a held key never holds the list
+    // away from its place.
+    in property <QuietCam> camera;
+    callback fly(float, bool);
+    callback shrink-to(float);
     property <bool> snap: true;
-    property <float> fly;
     property <float> enter;
     property <float> last-order;
-    animate fly { duration: snap ? 0ms : QuietMotion.t-shared; easing: QuietCurves.camera; }
     animate enter { duration: snap ? 0ms : QuietMotion.t-enter; easing: QuietCurves.glide; }
     init => {
         last-order = order;
-        fly = came-from == "home" ? 1 : 0;
         snap = false;
-        fly = 0;
+        root.fly(1, !(came-from == "home" && camera.settings));
     }
     changed order => {
-        snap = true;
-        enter = order > last-order ? 1 : -1;
-        snap = false;
-        enter = 0;
+        if abs(enter) < 0.1 {
+            snap = true;
+            enter = order > last-order ? 1 : -1;
+            snap = false;
+            enter = 0;
+        }
         last-order = order;
     }
 
@@ -465,7 +507,8 @@ export component QuietSettings inherits Rectangle {
     SettingsEmblem {
         turn: root.order;
         small: editor;
-        fly: root.fly;
+        camera: root.camera;
+        shrink-to(to) => { root.shrink-to(to); }
     }
 
     // ---- the way home
@@ -636,7 +679,7 @@ export component QuietSettings inherits Rectangle {
                 // Settling after a change of category, each row a little
                 // further than the one above it, so the list fans in.
                 property <length> settle: enter * (16px + min(i, 8) * 7px) * u;
-                property <float> seen: 1 - abs(enter) * 0.8;
+                property <float> seen: 1 - abs(enter) * 0.55;
                 y: y-of(entry) + settle;
                 width: parent.width;
                 height: h-of(entry);
