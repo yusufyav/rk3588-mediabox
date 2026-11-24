@@ -35,7 +35,9 @@ component NameBlock inherits Rectangle {
         letter-spacing: -108px * u * 0.06;
     }
     property <float> fit: max(0.52, min(1, root.width / max(1px, measure.preferred-width)));
-    property <bool> two-lines: measure.preferred-width * fit > root.width;
+    // With a pixel's grace: at a fractional scale the fitted width lands a
+    // hair over the column and a name that fits was set on two lines.
+    property <bool> two-lines: measure.preferred-width * fit > root.width + 1px;
     out property <length> name-h: two-lines ? 2 * 108px * u * fit * 1.42 : 121px * u;
 
     Text {
@@ -117,7 +119,12 @@ export component QuietHome inherits Rectangle {
     in property <string> came-from;
 
     property <float> u: Quiet.u;
-    property <int> count: apps.length;
+    // How many there are, assigned when the number changes: the model is
+    // replaced on every poll of the control plane, and nothing that moves
+    // should be told it changed when it did not (QuietGround).
+    property <int> count;
+    property <int> listed: apps.length;
+    changed listed => { count = listed; }
     property <int> focus-row: max(0, min(focus-col, count - 1));
     property <AppTile> chosen: count > 0 ? apps[focus-row] : { name: "", ready: true };
     property <color> aura: Quiet.aura(chosen.id);
@@ -189,6 +196,9 @@ export component QuietHome inherits Rectangle {
         arrive = 0;
     }
     init => {
+        count = listed;
+        about-y = about-at;
+        about-snap = false;
         aim(focus-row, came-from == "settings" && chosen.id == "settings");
     }
     changed focus-row => {
@@ -467,8 +477,11 @@ export component QuietHome inherits Rectangle {
         height: 0;
         tile: chosen;
     }
-    property <length> about-y: names.y + chosen-measure.name-h + 16px * u;
-    animate about-y { duration: QuietMotion.t-type-late; easing: QuietCurves.glide; }
+    property <length> about-at: names.y + chosen-measure.name-h + 16px * u;
+    property <length> about-y;
+    animate about-y { duration: about-snap ? 0ms : QuietMotion.t-type-late; easing: QuietCurves.glide; }
+    property <bool> about-snap: true;
+    changed about-at => { about-y = about-at; }
     Rectangle {
         x: spot-x - 4px * u;
         y: about-y;

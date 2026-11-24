@@ -1938,6 +1938,72 @@ fn a_screen_comes_up_knowing_the_one_it_replaced() {
     assert_eq!(ui.get_came_from(), "settings");
 }
 
+/// Quiet OS at rest asks for no frames when the control plane is polled
+/// again: the launcher's applications and the settings' rows arrive as new
+/// models with the same contents, and nothing that moves may take that for
+/// a change (measured on the Ultra: a bound colour replayed its 900 ms on
+/// every poll, ~12 frames a second at rest).
+#[test]
+fn quiet_rests_when_the_same_data_is_polled_again() {
+    use slint::platform::software_renderer::PremultipliedRgbaColor;
+    let (ui, _scratch) = driven();
+    wear(crate::layout::Layout::Quiet);
+    let frame = || {
+        slint::platform::update_timers_and_animations();
+        SHOT_WINDOW.with(|slot| {
+            let slot = slot.borrow();
+            let window = slot.as_ref().expect("the software window");
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                let mut pixels = vec![PremultipliedRgbaColor::default(); (W * H) as usize];
+                renderer.render(&mut pixels, W as usize);
+            });
+        });
+    };
+    let settle = || {
+        for _ in 0..4 {
+            frame();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        frame();
+    };
+    let none = crate::model::DisplayStatus {
+        owner: None,
+        applications: Vec::new(),
+    };
+    let poll = || {
+        app(|app| {
+            app.home.set_apps(crate::state::app_tiles_from(&none));
+            ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+            app.paint();
+        });
+        frame();
+        frame();
+    };
+    poll();
+    app(|app| {
+        app.go_home();
+        app.home.point_at(3);
+        app.paint();
+    });
+    settle();
+    assert!(!ui.window().has_active_animations(), "the home screen came to rest");
+    poll();
+    assert!(!ui.window().has_active_animations(), "home: the same applications again");
+
+    app(|app| {
+        app.open(crate::route::Route::Settings);
+        let system = app.settings.groups.iter().position(|g| g.title == "Sistem").unwrap();
+        app.settings.point_section(system);
+        app.settings.point_row(0);
+        app.paint();
+    });
+    settle();
+    assert!(!ui.window().has_active_animations(), "the settings came to rest");
+    poll();
+    assert!(!ui.window().has_active_animations(), "settings: the same rows again");
+}
+
 /// Pictures of both faces at the panel sizes the appliance drives, for a
 /// person to look at: 1080p (scale 1), 1440p and 4K (scale 2, as
 /// `platform::scale_factor` chooses). Only with MEDIABOX_TV_SHOTS set to a

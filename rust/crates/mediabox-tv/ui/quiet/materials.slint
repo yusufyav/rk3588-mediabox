@@ -26,8 +26,17 @@ export component QuietGround inherits Rectangle {
     // full strength, lower on a screen that is read rather than browsed.
     in property <float> strength: 1;
 
-    property <color> light: aura;
-    animate light { duration: QuietMotion.t-aura; easing: QuietCurves.ease; }
+    // Assigned on a change of value, not bound: the launcher's model is
+    // replaced on every poll of the control plane, and a bound animation
+    // would play (to the same colour) each time, asking for frames at rest.
+    property <bool> snap: true;
+    property <color> light;
+    animate light { duration: snap ? 0ms : QuietMotion.t-aura; easing: QuietCurves.ease; }
+    init => {
+        light = aura;
+        snap = false;
+    }
+    changed aura => { light = aura; }
     property <float> a: min(0.42, 0.2 * strength * QuietMotion.glow);
 
     background: @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%);
@@ -89,25 +98,48 @@ export component LivingFocus inherits Rectangle {
     // is (negative: the list's width less the inset).
     in property <length> inset: 0px;
     in property <length> to-w: -1px;
-    property <length> w: to-w < 0 ? root.width - inset * 2 : to-w;
-    animate w { duration: QuietMotion.t-trail; easing: QuietCurves.glide; }
 
-    property <length> lead-top: to-y;
-    property <length> lead-bot: to-y + to-h;
-    property <length> trail-top: to-y;
-    property <length> trail-bot: to-y + to-h;
-    animate lead-top, lead-bot { duration: QuietMotion.t-lead; easing: QuietCurves.glide; }
-    animate trail-top, trail-bot { duration: QuietMotion.t-trail; easing: QuietCurves.glide; }
+    // Assigned on a change of value, not bound (see QuietGround): a list's
+    // model is replaced when its data is polled, and a bound animation would
+    // play to where it already is, asking for frames at rest.
+    property <bool> snap: true;
+    property <length> lead-top;
+    property <length> lead-bot;
+    property <length> trail-top;
+    property <length> trail-bot;
+    property <length> w;
+    property <float> a;
+    property <color> c;
+    animate lead-top, lead-bot { duration: snap ? 0ms : QuietMotion.t-lead; easing: QuietCurves.glide; }
+    animate trail-top, trail-bot, w { duration: snap ? 0ms : QuietMotion.t-trail; easing: QuietCurves.glide; }
+    animate a { duration: snap ? 0ms : QuietMotion.t-wash; easing: QuietCurves.ease; }
+    animate c { duration: snap ? 0ms : QuietMotion.t-aura; easing: QuietCurves.ease; }
+    function aim() {
+        lead-top = to-y;
+        lead-bot = to-y + to-h;
+        trail-top = to-y;
+        trail-bot = to-y + to-h;
+        w = to-w < 0 ? root.width - inset * 2 : to-w;
+    }
+    init => {
+        aim();
+        a = shown ? strength : 0;
+        c = tint;
+        snap = false;
+    }
+    changed to-y => { aim(); }
+    changed to-h => { aim(); }
+    changed to-w => { aim(); }
+    changed width => { aim(); }
+    changed shown => { a = shown ? strength : 0; }
+    changed strength => { a = shown ? strength : 0; }
+    changed tint => { c = tint; }
 
     property <length> top: min(lead-top, trail-top);
     property <length> bot: max(lead-bot, trail-bot);
     property <length> stretch: max(0px, bot - top - to-h);
     property <length> pinch: min(stretch * 0.025, 7px * Quiet.u);
 
-    property <float> a: shown ? strength : 0;
-    animate a { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
-    property <color> c: tint;
-    animate c { duration: QuietMotion.t-aura; easing: QuietCurves.ease; }
 
     body := Rectangle {
         x: inset + pinch;
