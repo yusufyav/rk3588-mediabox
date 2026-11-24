@@ -1963,6 +1963,8 @@ mod tests {
             ("cooling", include_str!("../ui/cooling.slint")),
             ("live", include_str!("../ui/live.slint")),
             ("player", include_str!("../ui/player.slint")),
+            ("quiet choice", include_str!("../ui/quiet/controls.slint")),
+            ("motion lab", include_str!("../ui/quiet/lab.slint")),
         ] {
             assert!(
                 source.contains("PointerShield"),
