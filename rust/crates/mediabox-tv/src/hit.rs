@@ -1833,6 +1833,111 @@ fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
     }
 }
 
+/// Quiet OS's Motion Lab is a development tool: without
+/// MEDIABOX_TV_MOTION_LAB the Menu key on the home screen does what it did
+/// (nothing), and the launcher keeps the remote. With it, Menu opens the
+/// panel, which then takes the remote -- the launcher's focus stays where it
+/// was -- turns its parameters within their bounds, replays, and closes on
+/// Back. Nothing it turns outlives the process.
+#[test]
+fn the_motion_lab_is_inert_unless_asked_for_and_owns_the_remote_while_open() {
+    use crate::QuietMotion;
+    use mediabox_core::InputAction;
+    let (ui, _scratch) = driven();
+    let key = |action| {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app(|app| {
+            app.remote_key(action, true, crate::input::Origin::Keyboard);
+            app.remote_key(action, false, crate::input::Origin::Keyboard);
+        });
+    };
+    let motion = ui.global::<QuietMotion>();
+    wear(crate::layout::Layout::Quiet);
+    app(|app| {
+        let none = crate::model::DisplayStatus {
+            owner: None,
+            applications: Vec::new(),
+        };
+        app.home.set_apps(crate::state::app_tiles_from(&none));
+        ui.set_apps(slint::ModelRc::from(app.home.app_tiles.clone()));
+        app.go_home();
+    });
+    let first = app(|app| app.home.column());
+
+    key(InputAction::Menu);
+    assert!(
+        !motion.get_lab_open(),
+        "not asked for: Menu means nothing here"
+    );
+    key(InputAction::Down);
+    assert_ne!(
+        app(|app| app.home.column()),
+        first,
+        "the launcher kept the remote"
+    );
+    key(InputAction::Up);
+
+    app(|app| app.lab = crate::motion_lab::Lab::enabled());
+    key(InputAction::Menu);
+    assert!(motion.get_lab_open(), "Menu opens it");
+    assert_eq!(ui.get_screen(), "home");
+    key(InputAction::Down);
+    assert_eq!(motion.get_lab_row(), 1, "Down chooses the next parameter");
+    assert_eq!(
+        app(|app| app.home.column()),
+        first,
+        "the launcher did not move"
+    );
+    key(InputAction::Up);
+    for _ in 0..40 {
+        key(InputAction::Right);
+    }
+    assert_eq!(motion.get_pace(), 3.0, "turned no further than its bound");
+    key(InputAction::Up);
+    assert_eq!(motion.get_lab_row(), 7, "the rows wrap");
+    let replay = motion.get_replay();
+    key(InputAction::Ok);
+    assert_eq!(motion.get_replay(), replay + 1, "Ok on its row replays");
+    assert_eq!(ui.get_screen(), "home", "and opens nothing");
+    key(InputAction::Up);
+    key(InputAction::Left);
+    assert!(
+        motion.get_reduced() && !motion.get_on(),
+        "reduced motion, from the lab"
+    );
+    key(InputAction::Back);
+    assert!(!motion.get_lab_open(), "Back closes it");
+    key(InputAction::Down);
+    assert_ne!(
+        app(|app| app.home.column()),
+        first,
+        "the launcher has the remote again"
+    );
+}
+
+/// The interface is told which screen a screen replaced, with the screen
+/// itself, so Quiet OS can carry the settings' emblem between the home
+/// screen and the settings in both directions.
+#[test]
+fn a_screen_comes_up_knowing_the_one_it_replaced() {
+    let (ui, _scratch) = driven();
+    wear(crate::layout::Layout::Quiet);
+    app(|app| app.go_home());
+    app(|app| app.open(crate::route::Route::Settings));
+    assert_eq!(
+        (ui.get_screen().as_str(), ui.get_came_from().as_str()),
+        ("settings", "home")
+    );
+    app(|app| app.go_home());
+    assert_eq!(
+        (ui.get_screen().as_str(), ui.get_came_from().as_str()),
+        ("home", "settings")
+    );
+    // A repaint of the same screen is not a change of screen.
+    app(|app| app.paint());
+    assert_eq!(ui.get_came_from(), "settings");
+}
+
 /// Pictures of both faces at the panel sizes the appliance drives, for a
 /// person to look at: 1080p (scale 1), 1440p and 4K (scale 2, as
 /// `platform::scale_factor` chooses). Only with MEDIABOX_TV_SHOTS set to a
@@ -1882,10 +1987,28 @@ fn shots() {
     for (w, h, scale, name) in [(1920u32, 1080u32, 1.0f32, "1080p"), (2560, 1440, 2.0, "1440p"), (3840, 2160, 2.0, "4k")] {
         window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
         window.set_size(slint::PhysicalSize::new(w, h));
+        // Long enough for Quiet OS's slowest move (the far plane, 760 ms) to
+        // come to rest: these are pictures of where things settle.
+        let settle = std::time::Duration::from_millis(900);
+        // A screen's conditional component is built by the first frame
+        // that draws it, and its entrance starts there: one frame first,
+        // then the wait.
+        let prime = || {
+            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
+            SHOT_WINDOW.with(|slot| {
+                let slot = slot.borrow();
+                let window = slot.as_ref().expect("the software window");
+                window.request_redraw();
+                window.draw_if_needed(|renderer| {
+                    renderer.render(&mut pixels, w as usize);
+                })
+            })
+        };
         let shoot = |file: String| {
             ui.set_vitals(vitals());
             slint::platform::update_timers_and_animations();
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            prime();
+            std::thread::sleep(settle);
             slint::platform::update_timers_and_animations();
             window.request_redraw();
             let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
@@ -1918,6 +2041,16 @@ fn shots() {
                 app.paint();
             });
             shoot(format!("{name}-{}-home-media.png", layout.name()));
+            // Quiet OS: every application's own scene, at rest.
+            if layout == crate::layout::Layout::Quiet {
+                for (at, id) in [(1, "livetv"), (3, "settings"), (4, "kodi")] {
+                    app(|app| {
+                        app.home.point_at(at);
+                        app.paint();
+                    });
+                    shoot(format!("{name}-quiet-home-{id}.png"));
+                }
+            }
             app(|app| {
                 app.open(crate::route::Route::Settings);
                 let system = app.settings.groups.iter().position(|g| g.title == "Sistem").unwrap();
@@ -2008,7 +2141,8 @@ fn shots() {
         let edge_shoot = |file: String, vitals: crate::VitalsModel| {
             slint::platform::update_timers_and_animations();
             ui.set_vitals(vitals);
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            prime();
+            std::thread::sleep(settle);
             slint::platform::update_timers_and_animations();
             let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
             let rendered = SHOT_WINDOW.with(|slot| {

@@ -30,6 +30,12 @@ impl Lab {
         }
     }
 
+    /// As if started with MEDIABOX_TV_MOTION_LAB.
+    #[cfg(test)]
+    pub fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
     pub fn is_open(&self, ui: &MediaBoxWindow) -> bool {
         self.enabled && ui.global::<QuietMotion>().get_lab_open()
     }
