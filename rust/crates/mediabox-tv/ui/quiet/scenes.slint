@@ -23,8 +23,8 @@ import { QuietMotion } from "motion.slint";
 // function of `d`, and `d` stops when the camera does.
 //
 // Cost. Every element is a stroked or filled path, a gradient or a small
-// rectangle; fades are each leaf's own `opacity` (no offscreen layer, see
-// materials.slint). A scene is only instantiated while one of its planes is
+// rectangle; fades are each leaf's own `opacity`, or, on one that turns, its
+// colours' alpha (no offscreen layer, see materials.slint). A scene is only instantiated while one of its planes is
 // within reach of the camera (home.slint), so at rest one scene exists.
 
 // One plane of a scene, carried by the camera: further down the list it is
@@ -401,10 +401,9 @@ export component LiveScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.glow.with-alpha(0.13);
+            stroke: root.glow.with-alpha(0.13 * root.f-near);
             stroke-width: root.line;
             stroke-line-cap: round;
-            opacity: root.f-near;
             transform-rotation: root.d-near * -24deg;
             commands: "M60 470A300 300 0 0 1 120 120M590 180A300 300 0 0 1 530 530";
         }
@@ -449,9 +448,8 @@ export component GlobeScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.ink.with-alpha(0.18);
+            stroke: root.ink.with-alpha(0.18 * root.f-far);
             stroke-width: root.fine;
-            opacity: root.f-far;
             transform-rotation: root.d-far * 18deg;
             commands: "M615.1 230.7A305 120 -18 1 1 34.9 419.3A305 120 -18 1 1 615.1 230.7ZM600 325A275 275 0 1 1 50 325A275 275 0 1 1 600 325Z";
         }
@@ -553,10 +551,9 @@ export component GlobeScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.glow.with-alpha(0.2);
+            stroke: root.glow.with-alpha(0.2 * root.f-near);
             stroke-width: root.line;
             stroke-line-cap: round;
-            opacity: root.f-near;
             transform-rotation: root.d-near * 30deg;
             commands: "M40 520Q300 40 640 250";
         }
@@ -581,10 +578,9 @@ export component SettingsScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.ink.with-alpha(0.32);
+            stroke: root.ink.with-alpha(0.32 * root.f-far);
             stroke-width: root.fine;
             stroke-line-cap: round;
-            opacity: root.f-far;
             transform-rotation: root.d-far * -24deg;
             commands: "M325 29L325 11M350.8 30.1L351.5 22.2M376.4 33.5L377.8 25.6M401.6 39.1L403.7 31.4M426.2 46.9L429 39.3M450.1 56.7L453.5 49.5M473 68.7L482 53.1M494.8 82.5L499.4 76M515.3 98.3L520.4 92.1M534.3 115.7L540 110M551.7 134.7L557.9 129.6M567.5 155.2L574 150.6M581.3 177L596.9 168M593.3 199.9L600.5 196.5M603.1 223.8L610.7 221M610.9 248.4L618.6 246.3M616.5 273.6L624.4 272.2M619.9 299.2L627.8 298.5M621 325L639 325M619.9 350.8L627.8 351.5M616.5 376.4L624.4 377.8M610.9 401.6L618.6 403.7M603.1 426.2L610.7 429M593.3 450.1L600.5 453.5M581.3 473L596.9 482M567.5 494.8L574 499.4M551.7 515.3L557.9 520.4M534.3 534.3L540 540M515.3 551.7L520.4 557.9M494.8 567.5L499.4 574M473 581.3L482 596.9M450.1 593.3L453.5 600.5M426.2 603.1L429 610.7M401.6 610.9L403.7 618.6M376.4 616.5L377.8 624.4M350.8 619.9L351.5 627.8M325 621L325 639M299.2 619.9L298.5 627.8M273.6 616.5L272.2 624.4M248.4 610.9L246.3 618.6M223.8 603.1L221 610.7M199.9 593.3L196.5 600.5M177 581.3L168 596.9M155.2 567.5L150.6 574M134.7 551.7L129.6 557.9M115.7 534.3L110 540M98.3 515.3L92.1 520.4M82.5 494.8L76 499.4M68.7 473L53.1 482M56.7 450.1L49.5 453.5M46.9 426.2L39.3 429M39.1 401.6L31.4 403.7M33.5 376.4L25.6 377.8M30.1 350.8L22.2 351.5M29 325L11 325M30.1 299.2L22.2 298.5M33.5 273.6L25.6 272.2M39.1 248.4L31.4 246.3M46.9 223.8L39.3 221M56.7 199.9L49.5 196.5M68.7 177L53.1 168M82.5 155.2L76 150.6M98.3 134.7L92.1 129.6M115.7 115.7L110 110M134.7 98.3L129.6 92.1M155.2 82.5L150.6 76M177 68.7L168 53.1M199.9 56.7L196.5 49.5M223.8 46.9L221 39.3M248.4 39.1L246.3 31.4M273.6 33.5L272.2 25.6M299.2 30.1L298.5 22.2";
         }
@@ -612,10 +608,9 @@ export component SettingsScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.glow.with-alpha(0.6);
+            stroke: root.glow.with-alpha(0.6 * root.f-main);
             stroke-width: root.line * 2;
             stroke-line-cap: round;
-            opacity: root.f-main;
             transform-rotation: root.d * 34deg;
             commands: "M273.7 119.3A212 212 0 0 1 376.3 119.3M530.7 273.7A212 212 0 0 1 530.7 376.3M376.3 530.7A212 212 0 0 1 273.7 530.7M119.3 376.3A212 212 0 0 1 119.3 273.7";
         }
@@ -628,11 +623,10 @@ export component SettingsScene inherits SceneBase {
             viewbox-width: 24;
             viewbox-height: 24;
             commands: Quiet.gear;
-            fill: root.tint.with-alpha(0.05);
-            stroke: root.glow.with-alpha(0.66);
+            fill: root.tint.with-alpha(0.05 * root.f-main);
+            stroke: root.glow.with-alpha(0.66 * root.f-main);
             stroke-width: root.line;
             stroke-line-join: round;
-            opacity: root.f-main;
             transform-rotation: root.d * -45deg;
         }
         // The inner dial and its index.
@@ -642,10 +636,9 @@ export component SettingsScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.ink.with-alpha(0.4);
+            stroke: root.ink.with-alpha(0.4 * root.f-main);
             stroke-width: root.fine;
             stroke-line-cap: round;
-            opacity: root.f-main;
             transform-rotation: root.d * 90deg;
             commands: "M429 325A104 104 0 1 1 221 325A104 104 0 1 1 429 325ZM325 214L325 236M325 213L325 205M354 216.8L356.1 209.1M381 228L385 221.1M404.2 245.8L409.9 240.1M422 269L428.9 265M433.2 296L440.9 293.9M437 325L445 325M433.2 354L440.9 356.1M422 381L428.9 385M404.2 404.2L409.9 409.9M381 422L385 428.9M354 433.2L356.1 440.9M325 437L325 445M296 433.2L293.9 440.9M269 422L265 428.9M245.8 404.2L240.1 409.9M228 381L221.1 385M216.8 354L209.1 356.1M213 325L205 325M216.8 296L209.1 293.9M228 269L221.1 265M245.8 245.8L240.1 240.1M269 228L265 221.1M296 216.8L293.9 209.1";
         }
@@ -662,10 +655,9 @@ export component SettingsScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.glow.with-alpha(0.3);
+            stroke: root.glow.with-alpha(0.3 * root.f-near);
             stroke-width: root.fine;
             stroke-line-cap: round;
-            opacity: root.f-near;
             transform-rotation: root.d-near * 22deg;
             commands: "M233.3 576.8A268 268 0 0 1 59.6 362.3M416.7 73.2A268 268 0 0 1 565.9 207.5M414.6 78.8L418.7 67.5M456 98.1L462 87.7M493.4 124.3L501.1 115.1M525.7 156.6L534.9 148.9M551.9 194L562.3 188M235.4 571.2L231.3 582.5M194 551.9L188 562.3M156.6 525.7L148.9 534.9M124.3 493.4L115.1 501.1M98.1 456L87.7 462M78.8 414.6L67.5 418.7M67 370.5L55.2 372.6";
         }
@@ -728,9 +720,8 @@ export component CrystalScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.ink.with-alpha(0.13);
+            stroke: root.ink.with-alpha(0.13 * root.f-far);
             stroke-width: root.fine;
-            opacity: root.f-far;
             transform-rotation: root.d-far * 12deg;
             commands: "M302 46.1L279 86L233 86L210 46.1M440 46.1L417 86L371 86L348 46.1M164 125.8L141 165.7L95 165.7L72 125.8M233 86L210 125.8L164 125.8L141 86M302 125.8L279 165.7L233 165.7L210 125.8M371 86L348 125.8L302 125.8L279 86M440 125.8L417 165.7L371 165.7L348 125.8M509 86L486 125.8L440 125.8L417 86M578 125.8L555 165.7L509 165.7L486 125.8M164 205.5L141 245.3L95 245.3L72 205.5M233 165.7L210 205.5L164 205.5L141 165.7M302 205.5L279 245.3L233 245.3L210 205.5M371 165.7L348 205.5L302 205.5L279 165.7M440 205.5L417 245.3L371 245.3L348 205.5M509 165.7L486 205.5L440 205.5L417 165.7M578 205.5L555 245.3L509 245.3L486 205.5M95 245.3L72 285.2L26 285.2L3 245.3M164 285.2L141 325L95 325L72 285.2M233 245.3L210 285.2L164 285.2L141 245.3M302 285.2L279 325L233 325L210 285.2M371 245.3L348 285.2L302 285.2L279 245.3M440 285.2L417 325L371 325L348 285.2M509 245.3L486 285.2L440 285.2L417 245.3M578 285.2L555 325L509 325L486 285.2M647 245.3L624 285.2L578 285.2L555 245.3M95 325L72 364.8L26 364.8L3 325M164 364.8L141 404.7L95 404.7L72 364.8M233 325L210 364.8L164 364.8L141 325M302 364.8L279 404.7L233 404.7L210 364.8M371 325L348 364.8L302 364.8L279 325M440 364.8L417 404.7L371 404.7L348 364.8M509 325L486 364.8L440 364.8L417 325M578 364.8L555 404.7L509 404.7L486 364.8M647 325L624 364.8L578 364.8L555 325M95 404.7L72 444.5L26 444.5L3 404.7M164 444.5L141 484.3L95 484.3L72 444.5M233 404.7L210 444.5L164 444.5L141 404.7M302 444.5L279 484.3L233 484.3L210 444.5M371 404.7L348 444.5L302 444.5L279 404.7M440 444.5L417 484.3L371 484.3L348 444.5M509 404.7L486 444.5L440 444.5L417 404.7M578 444.5L555 484.3L509 484.3L486 444.5M647 404.7L624 444.5L578 444.5L555 404.7M164 524.2L141 564L95 564L72 524.2M233 484.3L210 524.2L164 524.2L141 484.3M302 524.2L279 564L233 564L210 524.2M371 484.3L348 524.2L302 524.2L279 484.3M440 524.2L417 564L371 564L348 524.2M509 484.3L486 524.2L440 524.2L417 484.3M578 524.2L555 564L509 564L486 524.2M233 564L210 603.9L164 603.9L141 564M302 603.9L279 643.7L233 643.7L210 603.9M371 564L348 603.9L302 603.9L279 564M440 603.9L417 643.7L371 643.7L348 603.9M509 564L486 603.9L440 603.9L417 564";
         }
@@ -787,11 +778,10 @@ export component CrystalScene inherits SceneBase {
             height: 100%;
             viewbox-width: 650;
             viewbox-height: 650;
-            fill: root.tint.with-alpha(0.06);
-            stroke: root.glow.with-alpha(0.32);
+            fill: root.tint.with-alpha(0.06 * root.f-near);
+            stroke: root.glow.with-alpha(0.32 * root.f-near);
             stroke-width: root.fine;
             stroke-line-join: round;
-            opacity: root.f-near;
             transform-rotation: root.d-near * -30deg;
             commands: "M96 150L120 110L144 150L120 205ZM540 470L558 440L576 470L558 512ZM505 92L517 72L529 92L517 120Z";
         }
@@ -864,10 +854,9 @@ export component MarkScene inherits SceneBase {
             viewbox-width: 650;
             viewbox-height: 650;
             fill: transparent;
-            stroke: root.glow.with-alpha(0.18);
+            stroke: root.glow.with-alpha(0.18 * root.f-near);
             stroke-width: root.fine;
             stroke-line-cap: round;
-            opacity: root.f-near;
             transform-rotation: root.d-near * 28deg;
             commands: "M325 40A285 285 0 0 1 586 210M325 610A285 285 0 0 1 64 440";
         }

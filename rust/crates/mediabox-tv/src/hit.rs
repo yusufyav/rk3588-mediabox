@@ -2393,6 +2393,12 @@ fn the_settings_emblem_turns_round_where_it_is() {
         step(&ui);
     };
     let flight = || ui.get_quiet_camera().flight;
+    // Where it was is where it is, but for what it moved since it was read:
+    // a busy machine may take its time between the two.
+    let taken_up = |was: f32, read: std::time::Instant, now: f32| {
+        let since = read.elapsed().as_secs_f32();
+        assert!((now - was).abs() < 0.12 + since * 10.0, "left at {was}, taken up at {now} after {since} s");
+    };
     tick(10);
     tick(900);
     assert_eq!(flight(), 0.0, "home");
@@ -2400,17 +2406,17 @@ fn the_settings_emblem_turns_round_where_it_is() {
         app(|app| app.open(crate::route::Route::Settings));
         step(&ui);
         tick(200);
-        let out = flight();
+        let (out, read) = (flight(), std::time::Instant::now());
         assert!(out > 0.0 && out < 1.0, "on its way: {out}");
         app(|app| app.go_home());
         step(&ui);
-        assert!((flight() - out).abs() < 0.12, "left at {out}, taken up at {}", flight());
+        taken_up(out, read, flight());
         tick(120);
-        let back = flight();
+        let (back, read) = (flight(), std::time::Instant::now());
         assert!(back < out, "on its way back");
         app(|app| app.open(crate::route::Route::Settings));
         step(&ui);
-        assert!((flight() - back).abs() < 0.12, "left at {back}, taken up at {}", flight());
+        taken_up(back, read, flight());
         tick(700);
         assert_eq!(flight(), 1.0);
         app(|app| app.go_home());
@@ -2431,11 +2437,11 @@ fn the_settings_emblem_turns_round_where_it_is() {
     });
     step(&ui);
     tick(150);
-    let owed = 3.0 - ui.get_quiet_camera().cam;
+    let (owed, read) = (3.0 - ui.get_quiet_camera().cam, std::time::Instant::now());
     assert!(owed > 0.05, "{owed}");
     app(|app| app.open(crate::route::Route::Settings));
     step(&ui);
-    assert!((3.0 - ui.get_quiet_camera().cam - owed).abs() < 0.12, "carried across the screens");
+    taken_up(owed, read, 3.0 - ui.get_quiet_camera().cam);
 }
 
 /// A word is legible all through a change: the chosen one before it is half
@@ -2600,6 +2606,45 @@ fn the_motion_lab_keeps_a_pointer_to_itself() {
     click(300.0, 800.0);
     assert!(motion.get_lab_open(), "a click on the panel is nothing");
     assert_eq!((ui.get_screen().as_str(), app(|app| app.home.column())), ("home", focus));
+}
+
+/// No element of Quiet OS both fades by `opacity` and has a `transform-*`:
+/// Slint wraps it as `Opacity { Transform { leaf } }`, which is an offscreen
+/// layer per element per frame (ui/quiet/materials.slint). Five of them were
+/// three quarters of a category step's first frame.
+#[test]
+fn nothing_in_quiet_fades_and_turns_at_once() {
+    for (file, source) in [
+        ("controls", include_str!("../ui/quiet/controls.slint")),
+        ("home", include_str!("../ui/quiet/home.slint")),
+        ("instruments", include_str!("../ui/quiet/instruments.slint")),
+        ("lab", include_str!("../ui/quiet/lab.slint")),
+        ("materials", include_str!("../ui/quiet/materials.slint")),
+        ("scenes", include_str!("../ui/quiet/scenes.slint")),
+        ("settings", include_str!("../ui/quiet/settings.slint")),
+    ] {
+        // What each open element has said of itself: (its line, fades, turns).
+        let mut open: Vec<(usize, bool, bool)> = Vec::new();
+        for (at, line) in source.lines().enumerate() {
+            let code = line.split("//").next().unwrap_or_default();
+            let said = code.trim_start();
+            if let Some(element) = open.last_mut() {
+                element.1 |= said.starts_with("opacity:");
+                element.2 |= said.starts_with("transform-rotation:") || said.starts_with("transform-scale");
+                assert!(!(element.1 && element.2), "quiet/{file}.slint:{}: fades and turns", element.0);
+            }
+            for c in code.chars() {
+                match c {
+                    '{' => open.push((at + 1, false, false)),
+                    '}' => {
+                        open.pop();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert!(open.is_empty(), "{file}");
+    }
 }
 
 /// Every screen of the settings family, in the states a person meets them

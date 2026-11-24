@@ -10,8 +10,11 @@ import { QuietMotion, QuietCurves } from "motion.slint";
 // per frame on this GPU), no backdrop refraction (Slint has none), no image.
 // And no `opacity` on an element with children: in Slint 1.17 that renders
 // the whole subtree into an offscreen layer first (core `Opacity::need_layer`,
-// femtovg `render_and_blend_layer`). Fading is done with each leaf's own
-// alpha instead.
+// femtovg `render_and_blend_layer`). Nor on a leaf that also has a
+// `transform-*`: the compiler puts the transform between the two, the leaf
+// counts as a child with a child, and it is a layer all the same -- cached at
+// rest and drawn again for every frame it turns. Fading is a leaf's own
+// `opacity`, or, on one that turns, its colours' alpha.
 
 // The ground every Quiet screen stands on: a slate gradient, a neutral pool
 // of light at the top left and the chosen application's light (`aura`)
