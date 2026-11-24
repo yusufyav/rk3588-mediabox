@@ -1089,7 +1089,7 @@ export component Backdrop inherits Rectangle {
         height: parent.height * 0.9;
         background: @radial-gradient(circle, #17345640 0%, #17345600 62%);
     }
-    // Quiet OS's two soft pools (quiet.slint, `QuietGround`).
+    // Quiet OS's two soft pools (quiet/materials.slint, `QuietGround`).
     if Theme.quiet: Rectangle {
         x: parent.width * 0.83 - self.width / 2;
         y: parent.height * 0.5 - self.height / 2;

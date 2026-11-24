@@ -6960,6 +6960,15 @@ impl App {
     // ------------------------------------------------------------- the drawing
 
     fn paint(&mut self) {
+        /// A screen onto the panel, and which one it replaced (`came-from`)
+        /// before it, so the screen coming up knows where the eye was.
+        fn show(window: &MediaBoxWindow, screen: &str) {
+            let was = window.get_screen();
+            if was != screen {
+                window.set_came_from(was);
+                window.set_screen(screen.into());
+            }
+        }
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -6982,7 +6991,7 @@ impl App {
         // Live television is a film too, with its own overlays rather than a
         // film's controls.
         if route == Route::Live && self.live.is_some() {
-            window.set_screen("live".into());
+            show(&window, "live");
             self.paint_live(&window);
             self.paint_sheet(&window);
             return;
@@ -6992,7 +7001,7 @@ impl App {
         // the film's own controls and nothing else. No screen answers to
         // "film", which is how the rest of the interface is kept off the panel.
         if self.here.is_some() {
-            window.set_screen("film".into());
+            show(&window, "film");
             let open = self.controls_open();
             window.set_film_controls(open);
             if std::env::var_os("MEDIABOX_TV_TRACE_INPUT").is_some() {
@@ -7002,7 +7011,7 @@ impl App {
             self.paint_sheet(&window);
             return;
         }
-        window.set_screen(route.name().into());
+        show(&window, route.name());
         window.set_layout(self.layout.name().into());
 
         self.paint_sheet(&window);

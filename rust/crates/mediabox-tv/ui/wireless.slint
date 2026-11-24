@@ -1,5 +1,7 @@
 import { Theme, Metrics } from "theme.slint";
-import { Quiet, QuietFrame } from "quiet.slint";
+import { Quiet } from "quiet/core.slint";
+import { LivingFocus } from "quiet/materials.slint";
+import { QuietFrame } from "quiet/settings.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
 import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import {
@@ -270,7 +272,7 @@ component Frame inherits Rectangle {
     in property <[SettingNav]> sections;
     in property <int> section;
 
-    // Quiet OS: the settings' own frame (quiet.slint), the list in its
+    // Quiet OS: the settings' own frame (quiet/settings.slint), the list in its
     // content column.
     if Theme.quiet: QuietFrame {
         width: 100%;
@@ -441,16 +443,14 @@ component RadioList inherits Rectangle {
             // Quiet OS: the focus is one capsule travelling from row to
             // row, as on the settings list; only over a row, not over a
             // heading's "Yenile" or a network's (i), which light their own.
-            if Theme.quiet: Rectangle {
+            if Theme.quiet: LivingFocus {
                 x: 0;
-                y: focus-y;
-                width: parent.width;
-                height: focus-tall ? Metrics.set-h : Metrics.set-h-flat;
-                border-radius: self.height / 2;
-                background: Theme.s-card-hi;
-                opacity: root.glide-on ? 1 : 0;
-                animate y, height { duration: Theme.motion ? 230ms : 0ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
-                animate opacity { duration: Theme.t-focus; easing: Theme.ease; }
+                y: 0;
+                width: 100%;
+                height: 100%;
+                shown: root.glide-on;
+                to-y: focus-y;
+                to-h: focus-tall ? Metrics.set-h : Metrics.set-h-flat;
             }
 
             for row in rows: Rectangle {

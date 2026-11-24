@@ -1773,7 +1773,9 @@ mod tests {
             include_str!("../ui/now_playing.slint"),
             include_str!("../ui/player.slint"),
             include_str!("../ui/live.slint"),
-            include_str!("../ui/quiet.slint"),
+            include_str!("../ui/quiet/home.slint"),
+            include_str!("../ui/quiet/settings.slint"),
+            include_str!("../ui/quiet/controls.slint"),
         ]
         .concat();
         for zone in ALL_ZONES {
@@ -3156,7 +3158,9 @@ mod tests {
             include_str!("../ui/detail.slint"),
             include_str!("../ui/player.slint"),
             include_str!("../ui/live.slint"),
-            include_str!("../ui/quiet.slint"),
+            include_str!("../ui/quiet/home.slint"),
+            include_str!("../ui/quiet/settings.slint"),
+            include_str!("../ui/quiet/controls.slint"),
         ]
         .concat();
         for zone in ALL_ZONES {

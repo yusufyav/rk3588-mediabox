@@ -1,0 +1,516 @@
+import { AppTile, VitalsModel } from "../components.slint";
+import { PointerTarget, PointerPanArea, PanState } from "../pointer.slint";
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+import { QuietGround, LivingFocus } from "materials.slint";
+import { Scene } from "scenes.slint";
+import { Overline, KeyCap, QuietBar } from "controls.slint";
+
+// Where the settings' emblem stands (settings.slint, `SettingsEmblem`), so
+// the home screen can take its scene back from there.
+export global QuietPlaces {
+    out property <length> stage-x: 1201px * Quiet.u;
+    out property <length> stage-y: 150px * Quiet.u;
+    out property <length> stage-size: 650px * Quiet.u;
+    out property <length> emblem-x: 1592px * Quiet.u;
+    out property <length> emblem-y: 196px * Quiet.u;
+    out property <length> emblem-size: 228px * Quiet.u;
+}
+
+// The chosen application's name, set as large as the reference sets it, and
+// smaller only for a name that would otherwise run into the scene -- down to
+// about half, and past that on two lines rather than smaller still. What it
+// is and what it says are `AboutBlock`, which follows it a beat later.
+component NameBlock inherits Rectangle {
+    in property <AppTile> tile;
+    in property <float> d;
+    property <float> u: Quiet.u;
+    property <float> f: QuietMotion.fade(d, 0.55);
+
+    measure := Text {
+        visible: false;
+        text: tile.name;
+        font-size: Quiet.t-display;
+        font-weight: 560;
+        letter-spacing: -108px * u * 0.06;
+    }
+    property <float> fit: max(0.52, min(1, root.width / max(1px, measure.preferred-width)));
+    property <bool> two-lines: measure.preferred-width * fit > root.width;
+    out property <length> name-h: two-lines ? 2 * 108px * u * fit * 1.42 : 121px * u;
+
+    Text {
+        x: 0;
+        // Toward where it is going: up when the list moves down, and back.
+        y: d * 64px * u * QuietMotion.travel;
+        width: parent.width;
+        // Two of the font's own lines (its line height is about 1.4 of its
+        // size), from the top.
+        height: name-h;
+        text: tile.name;
+        color: Quiet.ink;
+        opacity: f;
+        font-size: Quiet.t-display * fit;
+        font-weight: 560;
+        letter-spacing: -108px * u * fit * 0.06;
+        vertical-alignment: two-lines ? top : center;
+        wrap: word-wrap;
+        overflow: elide;
+    }
+}
+
+component AboutBlock inherits Rectangle {
+    in property <AppTile> tile;
+    in property <float> d;
+    property <float> u: Quiet.u;
+    property <float> f: QuietMotion.fade(d, 0.5);
+
+    VerticalLayout {
+        y: d * 34px * u * QuietMotion.travel;
+        width: parent.width;
+        alignment: start;
+        if tile.about != "": HorizontalLayout {
+            padding-left: 4px * u;
+            alignment: start;
+            Text {
+                width: 400px * u;
+                max-height: 4 * 21px * u * 1.35;
+                text: tile.about;
+                color: #a5b1ba;
+                opacity: f;
+                font-size: 21px * u;
+                letter-spacing: -21px * u * 0.012;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+        }
+        if tile.about != "" && tile.note != "": Rectangle { height: 22px * u; }
+        if tile.note != "": HorizontalLayout {
+            padding-left: 4px * u;
+            Text {
+                text: tile.note;
+                color: Quiet.warm-dim;
+                opacity: f;
+                font-size: 15px * u;
+                font-weight: 600;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+// The home screen, quietly: the applications down the left, the chosen one
+// named large in the middle and its scene on the right, and how the box is
+// doing at the top.
+//
+// Up and Down (or Left and Right) walk the same list the classic launcher's
+// row is (src/main.rs, `act_on_home`); Ok opens it; a pointer lights and
+// takes a row through the same focus (`quiet-home`: the "home" zone's
+// tiles, on a column that scrolls). Everything that moves here follows
+// `focus-col` and nothing else: the list, the names and the light answer it
+// at once, and the camera behind them catches up.
+export component QuietHome inherits Rectangle {
+    in property <[AppTile]> apps;
+    in property <VitalsModel> vitals;
+    in property <int> focus-col;
+    // The screen the panel showed before this one (src/main.rs, `show`):
+    // back from the settings, their emblem flies home into its scene.
+    in property <string> came-from;
+
+    property <float> u: Quiet.u;
+    property <int> count: apps.length;
+    property <int> focus-row: max(0, min(focus-col, count - 1));
+    property <AppTile> chosen: count > 0 ? apps[focus-row] : { name: "", ready: true };
+    property <color> aura: Quiet.aura(chosen.id);
+
+    property <length> list-x: 123px * u;
+    property <length> list-w: 490px * u;
+    property <length> list-y: 268px * u;
+    // Every row keeps the reference's height and type, however many
+    // applications there are: a launcher that grew past what the column
+    // holds scrolls (the focused row kept in view, a hand and a wheel
+    // through the same surface every list has) rather than closing its rows
+    // up into something nobody can read or hit.
+    property <length> pitch: 83px * u;
+    property <length> row-h: pitch - 7px * u;
+    property <length> view-h: 860px * u - list-y;
+    property <length> content-h: count * pitch;
+
+    property <length> spot-x: 739px * u;
+    // Up to where the scene begins.
+    property <length> spot-w: 540px * u;
+
+    // ---- the camera
+    //
+    // Five copies of where the list is, each assigned (not bound) so that a
+    // jump can be made without animating: `snap` zeroes the durations for
+    // one assignment (Slint starts an assigned animation from the value the
+    // property has at that moment, so a zero-length one lands at once). The
+    // scene's planes read `cam-far`, `cam` and `cam-near`; the name reads
+    // `cam-type` and what it says `cam-late`.
+    property <bool> snap: true;
+    property <float> cam;
+    property <float> cam-far;
+    property <float> cam-near;
+    property <float> cam-type;
+    property <float> cam-late;
+    animate cam { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    animate cam-far { duration: snap ? 0ms : QuietMotion.t-camera-far; easing: QuietCurves.camera; }
+    animate cam-near { duration: snap ? 0ms : QuietMotion.t-camera-near; easing: QuietCurves.camera; }
+    animate cam-type { duration: snap ? 0ms : QuietMotion.t-type; easing: QuietCurves.glide; }
+    animate cam-late { duration: snap ? 0ms : QuietMotion.t-type-late; easing: QuietCurves.glide; }
+    // How far the chosen scene still has to come as the screen opens: from
+    // ahead of the camera (`arrive`), or from the settings' emblem (`fly`).
+    property <float> arrive;
+    property <float> fly;
+    animate arrive { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    animate fly { duration: snap ? 0ms : QuietMotion.t-shared; easing: QuietCurves.camera; }
+
+    function aim(from: float, back: bool) {
+        snap = true;
+        cam = from;
+        cam-far = from;
+        cam-near = from;
+        cam-type = from;
+        cam-late = from;
+        if back {
+            fly = 1;
+            arrive = 0;
+        } else {
+            fly = 0;
+            arrive = 0.6;
+        }
+        snap = false;
+        cam = focus-row;
+        cam-far = focus-row;
+        cam-near = focus-row;
+        cam-type = focus-row;
+        cam-late = focus-row;
+        fly = 0;
+        arrive = 0;
+    }
+    init => {
+        aim(focus-row, came-from == "settings" && chosen.id == "settings");
+    }
+    changed focus-row => {
+        cam = focus-row;
+        cam-far = focus-row;
+        cam-near = focus-row;
+        cam-type = focus-row;
+        cam-late = focus-row;
+    }
+    // The Motion Lab's replay: from one application back, again.
+    changed replay => {
+        aim(max(0, focus-row - 1), false);
+    }
+    property <int> replay: QuietMotion.replay;
+
+    clip: true;
+
+    QuietGround {
+        width: 100%;
+        height: 100%;
+        aura: count > 0 ? root.aura : Quiet.aura("");
+    }
+
+    // ---- the scene: one per application near the camera, none at rest but
+    // the chosen one.
+    stage := Rectangle {
+        x: QuietPlaces.stage-x + (QuietPlaces.emblem-x - QuietPlaces.stage-x) * fly;
+        y: QuietPlaces.stage-y + (QuietPlaces.emblem-y - QuietPlaces.stage-y) * fly;
+        width: QuietPlaces.stage-size + (QuietPlaces.emblem-size - QuietPlaces.stage-size) * fly;
+        height: self.width;
+
+        for tile[i] in apps: Rectangle {
+            property <float> near: min(abs(i - cam), min(abs(i - cam-far), abs(i - cam-near)));
+            property <float> extra: i == focus-row ? arrive : 0;
+            width: 100%;
+            height: 100%;
+            if near < 1.05 || (i == focus-row && arrive > 0): Scene {
+                width: 100%;
+                height: 100%;
+                id: tile.id;
+                mark: tile.mark;
+                d: i - cam + extra;
+                d-far: i - cam-far + extra * 0.6;
+                d-near: i - cam-near + extra * 1.4;
+                presence: 0.9;
+            }
+        }
+    }
+
+    QuietBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 104px * u;
+        vitals: root.vitals;
+        details: true;
+    }
+
+    // ---- the applications
+    Overline {
+        x: list-x;
+        y: 227px * u;
+        height: 15px * u;
+        text: "UYGULAMALAR";
+    }
+    Text {
+        x: list-x + list-w - self.width;
+        y: 227px * u;
+        height: 15px * u;
+        width: self.preferred-width;
+        text: Quiet.two(min(focus-col + 1, count)) + " / " + Quiet.two(count);
+        color: #6f808c;
+        font-size: 12px * u;
+        letter-spacing: 12px * u * 0.15;
+        vertical-alignment: center;
+    }
+
+    // The column: a window onto the rows, as tall as the reference's.
+    Rectangle {
+        x: list-x;
+        y: list-y;
+        width: list-w;
+        height: view-h;
+        clip: true;
+
+        pan := PanState {
+            surface: "quiet-home";
+            remote: clamp(focus-row * pitch - (view-h - pitch) / 2, 0px, max(0px, content-h - view-h));
+            limit: max(0px, content-h - view-h);
+            remote-duration: QuietMotion.t-move;
+        }
+
+        PointerPanArea { surface: "quiet-home"; }
+
+        Rectangle {
+            x: 0;
+            y: -pan.value;
+            width: parent.width;
+            height: max(content-h, parent.height);
+            animate y { duration: pan.duration; easing: QuietCurves.ease; }
+
+            // The one chosen: the Living Focus, warmed toward the chosen
+            // application's light. No edge, no bar: the lift and the brighter
+            // name are the focus.
+            LivingFocus {
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                shown: count > 0;
+                to-y: focus-row * pitch;
+                to-h: row-h;
+                tint: Quiet.warm.mix(root.aura, 0.65);
+            }
+
+            for tile[i] in apps: Rectangle {
+                property <bool> here: i == focus-col;
+                x: 0;
+                y: i * pitch;
+                width: parent.width;
+                height: row-h;
+                border-radius: self.height / 2;
+                background: target.lit && !here ? Quiet.hover : transparent;
+                animate background { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+
+                Path {
+                    x: 19px * u;
+                    y: (parent.height - self.height) / 2;
+                    width: 26px * u;
+                    height: 26px * u;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Quiet.mark(tile.id, tile.mark);
+                    fill: transparent;
+                    stroke: here ? Quiet.warm-hi : Quiet.app;
+                    stroke-width: 1.45px * u;
+                    stroke-line-cap: round;
+                    stroke-line-join: round;
+                    opacity: tile.ready ? 1.0 : 0.5;
+                }
+                Text {
+                    x: 66px * u;
+                    width: parent.width - self.x - 60px * u;
+                    height: parent.height;
+                    text: tile.name;
+                    color: here ? Quiet.warm-hi : Quiet.app;
+                    opacity: tile.ready ? 1.0 : 0.5;
+                    font-size: 22px * u;
+                    font-weight: 520;
+                    letter-spacing: -22px * u * 0.025;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                    animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+                }
+                Text {
+                    x: parent.width - 19px * u - self.width;
+                    width: self.preferred-width;
+                    height: parent.height;
+                    text: Quiet.two(i + 1);
+                    color: here ? Quiet.warm-dim : Quiet.faint;
+                    opacity: tile.ready ? 1.0 : 0.5;
+                    font-size: 11px * u;
+                    letter-spacing: 11px * u * 0.08;
+                    vertical-alignment: center;
+                }
+
+                target := PointerTarget {
+                    zone: "quiet-home";
+                    index: i;
+                    veil: false;
+                }
+            }
+        }
+
+        // More above or below the window: a hairline fades in at that edge.
+        Rectangle {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: Quiet.hairline;
+            background: @linear-gradient(90deg, #dfc9a560 0%, #dfc9a500 100%);
+            opacity: pan.value > 1px ? 1 : 0;
+            animate opacity { duration: QuietMotion.t-move; }
+        }
+        Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: parent.width;
+            height: Quiet.hairline;
+            background: @linear-gradient(90deg, #dfc9a560 0%, #dfc9a500 100%);
+            opacity: pan.value < content-h - view-h - 1px ? 1 : 0;
+            animate opacity { duration: QuietMotion.t-move; }
+        }
+    }
+
+    if count == 0: Text {
+        x: list-x + 19px * u;
+        y: list-y;
+        height: row-h;
+        text: "Uygulama yok";
+        color: Quiet.faint;
+        font-size: 22px * u;
+        vertical-alignment: center;
+    }
+
+    // ---- the one chosen, named
+    //
+    // Kinetic typography: the ordinal rolls like a counter, the name moves
+    // toward where the list went while the next one comes from where it came
+    // from, and what it says follows a beat later -- each one only a short
+    // distance and crossing at no more than half strength, so a word is
+    // legible at every frame of it.
+    if count > 0: HorizontalLayout {
+        x: spot-x;
+        y: 294px * u;
+        height: 15px * u;
+        spacing: 14px * u;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 34px * u;
+                height: Quiet.hairline;
+                background: Quiet.warm;
+            }
+        }
+        HorizontalLayout {
+            // The counter: the numbers either side of the camera, in a
+            // window one line tall.
+            Rectangle {
+                width: digits.preferred-width;
+                clip: true;
+                digits := Overline {
+                    visible: false;
+                    text: Quiet.two(count);
+                }
+                for tile[i] in apps: Rectangle {
+                    property <float> d: i - cam-type;
+                    if abs(d) < 1: Overline {
+                        y: d * parent.height * 1.1;
+                        width: parent.width;
+                        height: parent.height;
+                        text: Quiet.two(i + 1);
+                        color: Quiet.warm;
+                        opacity: QuietMotion.fade(d, 0.8);
+                    }
+                }
+            }
+            Overline {
+                text: " / " + Quiet.two(count) + "  —  SEÇİLİ UYGULAMA";
+                color: Quiet.warm;
+            }
+        }
+    }
+
+    names := Rectangle {
+        x: spot-x - 4px * u;
+        y: 330px * u;
+        width: spot-w;
+        height: 860px * u - self.y;
+        for tile[i] in apps: Rectangle {
+            property <float> d: i - cam-type;
+            if abs(d) < 0.6: NameBlock {
+                width: spot-w;
+                height: parent.height;
+                tile: tile;
+                d: d;
+            }
+        }
+    }
+    // What the chosen one is, under however many lines its name took.
+    chosen-measure := NameBlock {
+        visible: false;
+        width: spot-w;
+        height: 0;
+        tile: chosen;
+    }
+    property <length> about-y: names.y + chosen-measure.name-h + 16px * u;
+    animate about-y { duration: QuietMotion.t-type-late; easing: QuietCurves.glide; }
+    Rectangle {
+        x: spot-x - 4px * u;
+        y: about-y;
+        width: spot-w;
+        height: 860px * u - self.y;
+        for tile[i] in apps: Rectangle {
+            property <float> d: i - cam-late;
+            if abs(d) < 0.5: AboutBlock {
+                width: spot-w;
+                height: parent.height;
+                tile: tile;
+                d: d;
+            }
+        }
+    }
+
+    // ---- what the keys do here
+    HorizontalLayout {
+        x: spot-x;
+        y: 886px * u;
+        height: 27px * u;
+        spacing: 13px * u;
+        alignment: start;
+        HorizontalLayout {
+            spacing: 5px * u;
+            KeyCap { mark: "M12 19V5 M6 11l6-6 6 6"; }
+            KeyCap { mark: "M12 5v14 M6 13l6 6 6-6"; }
+        }
+        Text {
+            text: "Uygulama seç";
+            color: #aeb9bf;
+            font-size: 13px * u;
+            font-weight: 550;
+            vertical-alignment: center;
+        }
+        Rectangle { width: 6px * u; }
+        KeyCap { mark: "M19 5v7a3 3 0 0 1-3 3H6 M10 11l-4 4 4 4"; }
+        Text {
+            text: chosen.id == "settings" ? "Ayarlar'a gir" : "Uygulamayı aç";
+            color: #82929d;
+            font-size: 13px * u;
+            vertical-alignment: center;
+        }
+    }
+}

@@ -1,0 +1,90 @@
+import { Theme } from "../theme.slint";
+
+// Quiet OS's motion: every duration and curve its screens animate with, and
+// the few parameters the Motion Lab (lab.slint, src/motion_lab.rs) may turn
+// on a television. The defaults are the product's values; nothing but the
+// lab ever writes them.
+//
+// One technique throughout, and it is easing, not physics: a Slint property
+// animation that is retargeted whenever its binding changes. A new target
+// starts from wherever the value is at that moment, so a press never waits
+// for the last one to finish and animations never queue -- but the velocity
+// is not carried over, which is what a spring would do. Where the eye should
+// read weight (the focus capsule, the camera), two or three copies of one
+// value animate with different durations and the drawing is made from their
+// difference: the leading copy arrives first and the trailing one follows,
+// so the shape stretches toward where it is going and settles. Nothing here
+// runs while nothing changes: an animation that has reached its target asks
+// for no more frames.
+//
+// Reduced motion is `Theme.motion`: every duration below is zero without it.
+
+export global QuietMotion {
+    // ---- what the Motion Lab may turn (src/motion_lab.rs owns the ranges)
+    // Every duration, multiplied.
+    in-out property <float> pace: 1.0;
+    // How far into depth a scene recedes and how much it scales.
+    in-out property <float> depth: 1.0;
+    // How far the camera travels between two applications.
+    in-out property <float> travel: 1.0;
+    // How strongly the ground takes the chosen application's light.
+    in-out property <float> glow: 1.0;
+    // How far apart the far, main and near layers of a scene move.
+    in-out property <float> parallax: 1.0;
+    // The easing profile: 0 the product's, 1 swifter, 2 softer.
+    in-out property <int> profile: 0;
+    // Bumped by the lab's replay: the home screen's camera jumps back one
+    // application and travels again (home.slint, `changed replay`).
+    in-out property <int> replay: 0;
+    // Reduced motion, from the lab: Quiet OS's durations only.
+    in-out property <bool> reduced: false;
+    // The lab panel's own state, drawn by lab.slint.
+    in-out property <bool> lab-open: false;
+    in-out property <int> lab-row: 0;
+
+    out property <bool> on: Theme.motion && !reduced;
+    property <float> k: on ? max(0.05, pace) : 0;
+
+    // ---- the focus: a capsule with a leading and a trailing edge
+    out property <duration> t-lead: 140ms * k;
+    out property <duration> t-trail: 290ms * k;
+    // A list scrolling under the focus, and a surface's own wash.
+    out property <duration> t-move: 180ms * k;
+    out property <duration> t-wash: 120ms * k;
+    // ---- the camera between applications: main, far and near layers
+    out property <duration> t-camera: 560ms * k;
+    out property <duration> t-camera-far: 760ms * k;
+    out property <duration> t-camera-near: 420ms * k;
+    // ---- the type that names what is chosen: the name, then what it is
+    out property <duration> t-type: 300ms * k;
+    out property <duration> t-type-late: 440ms * k;
+    // ---- the light
+    out property <duration> t-aura: 900ms * k;
+    // ---- a page arriving, an element carried from one screen to the next
+    out property <duration> t-enter: 320ms * k;
+    out property <duration> t-shared: 560ms * k;
+    // ---- a control's own state: a switch, a level, a sheet
+    out property <duration> t-control: 200ms * k;
+    out property <duration> t-sheet: 260ms * k;
+
+    // How visible something is at a camera offset `d` (0 here, 1 one
+    // application away): full at rest, gone well before the next one is.
+    public pure function fade(d: float, reach: float) -> float {
+        return max(0, 1 - abs(d) / max(0.01, reach));
+    }
+}
+
+// The curves, apart from the parameters above: Slint cannot hand a property
+// of type easing to Rust, so the global Rust writes holds none.
+export global QuietCurves {
+    // Quick to leave and slow to settle, as a thing with weight does.
+    out property <easing> glide: QuietMotion.profile == 1 ? cubic-bezier(0.3, 1, 0.4, 1)
+        : QuietMotion.profile == 2 ? cubic-bezier(0.45, 0.05, 0.25, 1)
+        : cubic-bezier(0.22, 1, 0.36, 1);
+    // The camera: a dolly that accelerates out of rest and eases into it.
+    out property <easing> camera: QuietMotion.profile == 1 ? cubic-bezier(0.25, 0.9, 0.3, 1)
+        : QuietMotion.profile == 2 ? cubic-bezier(0.6, 0, 0.3, 1)
+        : cubic-bezier(0.45, 0, 0.2, 1);
+    // Ordinary changes of state.
+    out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}

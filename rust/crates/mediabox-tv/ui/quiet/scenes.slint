@@ -1,0 +1,913 @@
+import { Quiet } from "core.slint";
+import { QuietMotion } from "motion.slint";
+
+// Cinematic Spatial Scenes: what stands behind the chosen application.
+//
+// Each scene is three planes -- far, main, near -- in one 650-unit box (every
+// Path's viewbox), and a camera that travels along the launcher's list. A
+// plane is told its own camera offset `d`: 0 when its application is the one
+// chosen, +1 one application further down the list, -1 one back. The home
+// screen animates three copies of the camera (home.slint: far slowest, near
+// quickest), so the planes move independently and the scene separates into
+// depth while it travels, then closes up again at rest.
+//
+// The technique, named honestly. Slint 1.17 has 2D affine transforms on any
+// element (`transform-rotation`, `transform-scale`, `transform-origin`) and
+// nothing in 3D: no perspective matrix, no depth buffer, no shader. So depth
+// here is layered 2.5D parallax -- each plane translated and scaled by its
+// own offset -- and, where a scene has a solid in it, real projection worked
+// out in the scene itself: the film strips are pinhole-perspective projections
+// of quads on a plane, the globe's meridians and the crystals are orthographic
+// projections of a rotating sphere and bipyramid, drawn with bound `MoveTo` /
+// `LineTo` / `ArcTo` coordinates. None of it moves at rest: every motion is a
+// function of `d`, and `d` stops when the camera does.
+//
+// Cost. Every element is a stroked or filled path, a gradient or a small
+// rectangle; fades are each leaf's own `opacity` (no offscreen layer, see
+// materials.slint). A scene is only instantiated while one of its planes is
+// within reach of the camera (home.slint), so at rest one scene exists.
+
+// One plane of a scene, carried by the camera: further down the list it is
+// smaller and lower (ahead of the camera), further back it is larger and
+// higher (passed by it). `layer` is how much it moves relative to the main
+// plane: under 1 behind, over 1 in front; the lab's `parallax` spreads or
+// closes that difference.
+component Plane inherits Rectangle {
+    in property <float> d;
+    in property <float> layer: 1;
+    property <float> spread: max(0, 1 + (layer - 1) * QuietMotion.parallax);
+    property <float> k: QuietMotion.depth * spread;
+    y: self.height * d * 0.34 * spread * QuietMotion.travel;
+    transform-scale: d >= 0 ? max(0.25, 1 - d * 0.32 * k) : 1 + (0 - d) * 0.42 * k;
+}
+
+// The parts every scene shares: its colour, its line weights and how its
+// three planes fade with distance.
+component SceneBase inherits Rectangle {
+    in property <float> d;
+    in property <float> d-far;
+    in property <float> d-near;
+    in property <color> tint;
+    // The whole scene's presence, for a scene drawn as an emblem or while
+    // the screen arrives.
+    in property <float> presence: 1;
+
+    // A viewbox unit, on this panel and at this scene's size.
+    out property <length> vu: self.width / 650;
+    out property <length> line: max(1px, 1.3 * vu);
+    out property <length> fine: max(1px, 0.9 * vu);
+    out property <float> f-main: QuietMotion.fade(d, 0.9) * presence;
+    out property <float> f-far: QuietMotion.fade(d-far, 1.0) * presence;
+    out property <float> f-near: QuietMotion.fade(d-near, 0.65) * presence;
+    out property <color> ink: Quiet.ink.mix(tint, 0.55);
+    out property <color> glow: tint.mix(#ffffff, 0.8);
+}
+
+// ---------------------------------------------------------------- Filmler
+//
+// Two strips of film in perspective, crossing: each a ribbon of frames and
+// sprocket holes on a plane below or above the eye, projected through a
+// pinhole and rolled about the vanishing point, so one runs from the lower
+// left into the distance and the other, further back, from the upper left.
+// In front, the rim of a lens and an anamorphic streak of light. As the
+// camera travels the strips run through the gate; at rest they are still.
+export component FilmScene inherits SceneBase {
+    // The pinhole: focal length and vanishing point, in viewbox units.
+    property <float> f: 520;
+    property <float> cx: 372;
+    property <float> cy: 282;
+    out property <float> pitch: 230;
+    out property <float> span: pitch * 6;
+    out property <float> roll: (root.d + 4) * pitch * 1.25;
+    out property <float> roll-far: (4 - root.d-far) * pitch * 0.9;
+
+    // A point (x, y) at depth z on a strip, through the pinhole, with the
+    // picture rolled by `a` about the vanishing point.
+    pure public function px(x: float, y: float, z: float, a: angle) -> float {
+        return cx + (x * cos(a) - y * sin(a)) * f / (f + z);
+    }
+    pure public function py(x: float, y: float, z: float, a: angle) -> float {
+        return cy + (x * sin(a) + y * cos(a)) * f / (f + z);
+    }
+    // A frame's depth, wrapped so the strip never ends.
+    pure public function zk(k: int, at: float) -> float {
+        return mod(k * pitch + at, span) - 60;
+    }
+    // Faded in where a frame enters at the near edge and out toward the
+    // vanishing point, so the wrap is never seen.
+    pure public function fz(z: float) -> float {
+        return clamp((z + 60) / 140, 0, 1) * clamp((span - 60 - z) / 480, 0, 1);
+    }
+
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.3);
+            stroke-width: root.fine;
+            stroke-line-cap: round;
+            opacity: root.f-far;
+            MoveTo { x: root.px(-92, -190, 20, 24deg); y: root.py(-92, -190, 20, 24deg); }
+            LineTo { x: root.px(-92, -190, root.span, 24deg); y: root.py(-92, -190, root.span, 24deg); }
+            MoveTo { x: root.px(92, -190, 20, 24deg); y: root.py(92, -190, 20, 24deg); }
+            LineTo { x: root.px(92, -190, root.span, 24deg); y: root.py(92, -190, root.span, 24deg); }
+        }
+        for k in 6: strip-far := Path {
+            property <float> z0: root.zk(k, root.roll-far);
+            property <float> z1: z0 + root.pitch * 0.8;
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: root.tint.with-alpha(0.04);
+            stroke: root.ink.with-alpha(0.32);
+            stroke-width: root.fine;
+            stroke-line-join: round;
+            opacity: root.f-far * root.fz(strip-far.z0);
+            MoveTo { x: root.px(-72, -190, strip-far.z0, 24deg); y: root.py(-72, -190, strip-far.z0, 24deg); }
+            LineTo { x: root.px(72, -190, strip-far.z0, 24deg); y: root.py(72, -190, strip-far.z0, 24deg); }
+            LineTo { x: root.px(72, -190, strip-far.z1, 24deg); y: root.py(72, -190, strip-far.z1, 24deg); }
+            LineTo { x: root.px(-72, -190, strip-far.z1, 24deg); y: root.py(-72, -190, strip-far.z1, 24deg); }
+            Close { }
+            MoveTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * 0.12, 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * 0.12, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * 0.12, 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * 0.12, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); }
+            LineTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); }
+            Close { }
+            MoveTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * 0.44, 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * 0.44, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * 0.44, 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * 0.44, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); }
+            LineTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); }
+            Close { }
+            MoveTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * 0.76, 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * 0.76, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * 0.76, 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * 0.76, 24deg); }
+            LineTo { x: root.px(-76, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); y: root.py(-76, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); }
+            LineTo { x: root.px(-86, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); y: root.py(-86, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); }
+            Close { }
+            MoveTo { x: root.px(76, -190, strip-far.z0 + root.pitch * 0.12, 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * 0.12, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * 0.12, 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * 0.12, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); }
+            LineTo { x: root.px(76, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * (0.12 + 0.1), 24deg); }
+            Close { }
+            MoveTo { x: root.px(76, -190, strip-far.z0 + root.pitch * 0.44, 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * 0.44, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * 0.44, 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * 0.44, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); }
+            LineTo { x: root.px(76, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * (0.44 + 0.1), 24deg); }
+            Close { }
+            MoveTo { x: root.px(76, -190, strip-far.z0 + root.pitch * 0.76, 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * 0.76, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * 0.76, 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * 0.76, 24deg); }
+            LineTo { x: root.px(86, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); y: root.py(86, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); }
+            LineTo { x: root.px(76, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); y: root.py(76, -190, strip-far.z0 + root.pitch * (0.76 + 0.1), 24deg); }
+            Close { }
+        }
+    }
+
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.45);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            opacity: root.f-main;
+            MoveTo { x: root.px(-160, 220, 20, -30deg); y: root.py(-160, 220, 20, -30deg); }
+            LineTo { x: root.px(-160, 220, root.span, -30deg); y: root.py(-160, 220, root.span, -30deg); }
+            MoveTo { x: root.px(160, 220, 20, -30deg); y: root.py(160, 220, 20, -30deg); }
+            LineTo { x: root.px(160, 220, root.span, -30deg); y: root.py(160, 220, root.span, -30deg); }
+        }
+        for k in 6: strip := Path {
+            property <float> z0: root.zk(k, root.roll);
+            property <float> z1: z0 + root.pitch * 0.8;
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: root.tint.with-alpha(0.08);
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            stroke-line-join: round;
+            opacity: root.f-main * root.fz(strip.z0);
+            MoveTo { x: root.px(-124, 220, strip.z0, -30deg); y: root.py(-124, 220, strip.z0, -30deg); }
+            LineTo { x: root.px(124, 220, strip.z0, -30deg); y: root.py(124, 220, strip.z0, -30deg); }
+            LineTo { x: root.px(124, 220, strip.z1, -30deg); y: root.py(124, 220, strip.z1, -30deg); }
+            LineTo { x: root.px(-124, 220, strip.z1, -30deg); y: root.py(-124, 220, strip.z1, -30deg); }
+            Close { }
+            MoveTo { x: root.px(-148, 220, strip.z0 + root.pitch * 0.12, -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * 0.12, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * 0.12, -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * 0.12, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); }
+            LineTo { x: root.px(-148, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); }
+            Close { }
+            MoveTo { x: root.px(-148, 220, strip.z0 + root.pitch * 0.44, -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * 0.44, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * 0.44, -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * 0.44, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); }
+            LineTo { x: root.px(-148, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); }
+            Close { }
+            MoveTo { x: root.px(-148, 220, strip.z0 + root.pitch * 0.76, -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * 0.76, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * 0.76, -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * 0.76, -30deg); }
+            LineTo { x: root.px(-132, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); y: root.py(-132, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); }
+            LineTo { x: root.px(-148, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); y: root.py(-148, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); }
+            Close { }
+            MoveTo { x: root.px(132, 220, strip.z0 + root.pitch * 0.12, -30deg); y: root.py(132, 220, strip.z0 + root.pitch * 0.12, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * 0.12, -30deg); y: root.py(148, 220, strip.z0 + root.pitch * 0.12, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); y: root.py(148, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); }
+            LineTo { x: root.px(132, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); y: root.py(132, 220, strip.z0 + root.pitch * (0.12 + 0.1), -30deg); }
+            Close { }
+            MoveTo { x: root.px(132, 220, strip.z0 + root.pitch * 0.44, -30deg); y: root.py(132, 220, strip.z0 + root.pitch * 0.44, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * 0.44, -30deg); y: root.py(148, 220, strip.z0 + root.pitch * 0.44, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); y: root.py(148, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); }
+            LineTo { x: root.px(132, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); y: root.py(132, 220, strip.z0 + root.pitch * (0.44 + 0.1), -30deg); }
+            Close { }
+            MoveTo { x: root.px(132, 220, strip.z0 + root.pitch * 0.76, -30deg); y: root.py(132, 220, strip.z0 + root.pitch * 0.76, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * 0.76, -30deg); y: root.py(148, 220, strip.z0 + root.pitch * 0.76, -30deg); }
+            LineTo { x: root.px(148, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); y: root.py(148, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); }
+            LineTo { x: root.px(132, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); y: root.py(132, 220, strip.z0 + root.pitch * (0.76 + 0.1), -30deg); }
+            Close { }
+        }
+    }
+
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        // The lens: two rims, very faint.
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.14);
+            stroke-width: root.line;
+            opacity: root.f-near;
+            commands: "M612 325A287 287 0 1 1 38 325A287 287 0 1 1 612 325ZM590 325A265 265 0 1 1 60 325A265 265 0 1 1 590 325Z";
+        }
+        // The anamorphic streak across the picture, through the vanishing
+        // point, where the light is.
+        Rectangle {
+            x: 0;
+            y: root.vu * root.cy;
+            width: root.width;
+            height: max(1px, 1.6 * root.vu);
+            background: @linear-gradient(90deg, #ffffff00 0%, root.glow.with-alpha(0.24 * root.f-near) 57%, #ffffff00 100%);
+        }
+    }
+}
+
+// -------------------------------------------------------------- Canlı TV
+//
+// A dish on its mount, aimed up and to the right; the wavefronts leaving its
+// feed; the satellite it is aimed at on its orbit behind. The waves travel
+// and the satellite moves along its orbit only while the camera does.
+export component LiveScene inherits SceneBase {
+    // The feed, and the direction the dish looks (its axis, -48 degrees).
+    property <float> fx: 331.8;
+    property <float> fy: 333;
+    property <float> wave: (root.d + 4) * 0.9;
+    property <float> orbit: 200 + root.d-far * 70;
+
+    pure function phase(j: int) -> float {
+        return mod(j / 3 + wave, 1);
+    }
+
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.45;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.3);
+            stroke-width: root.fine;
+            opacity: root.f-far;
+            // Two orbits, tilted 20 degrees: (cx 430, cy 210; 200 x 66) and a
+            // wider one. Drawn as the rotated ellipse's own arcs.
+            commands: "M618 141.6A200 66 -20 1 1 242 278.4A200 66 -20 1 1 618 141.6ZM664.9 124.5A250 86 -20 1 1 195.1 295.5A250 86 -20 1 1 664.9 124.5Z";
+        }
+        // The satellite on the inner orbit: a body and two panels.
+        Path {
+            property <float> sx: 430 + 200 * cos(orbit * 1deg) * cos(-20deg) - 66 * sin(orbit * 1deg) * sin(-20deg);
+            property <float> sy: 210 + 200 * cos(orbit * 1deg) * sin(-20deg) + 66 * sin(orbit * 1deg) * cos(-20deg);
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: root.tint.with-alpha(0.2);
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            stroke-line-join: round;
+            opacity: root.f-far;
+            MoveTo { x: sx - 7; y: sy - 7; }
+            LineTo { x: sx + 7; y: sy - 7; }
+            LineTo { x: sx + 7; y: sy + 7; }
+            LineTo { x: sx - 7; y: sy + 7; }
+            Close { }
+            MoveTo { x: sx - 36; y: sy - 4; }
+            LineTo { x: sx - 12; y: sy - 4; }
+            LineTo { x: sx - 12; y: sy + 4; }
+            LineTo { x: sx - 36; y: sy + 4; }
+            Close { }
+            MoveTo { x: sx + 12; y: sy - 4; }
+            LineTo { x: sx + 36; y: sy - 4; }
+            LineTo { x: sx + 36; y: sy + 4; }
+            LineTo { x: sx + 12; y: sy + 4; }
+            Close { }
+        }
+    }
+
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        // The dish: a parabola (focal length 70 units) seen side on, its rim,
+        // the struts to the feed and the mount.
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: root.tint.with-alpha(0.06);
+            stroke: root.glow.with-alpha(0.7);
+            stroke-width: root.line * 1.2;
+            stroke-line-join: round;
+            stroke-line-cap: round;
+            opacity: root.f-main;
+            commands: "M227.3 224.9L228 242.8L229.4 259.9L231.6 276.1L234.6 291.5L238.3 306.1L242.7 319.9L247.9 332.8L253.8 344.9L260.5 356.2L267.9 366.6L276.1 376.2L285 385L294.7 392.9L305.1 400.1L316.2 406.4L328.1 411.8L340.8 416.5L354.2 420.3L368.3 423.2L383.2 425.4L398.8 426.7L415.2 427.2L432.4 426.8L450.2 425.7Z";
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.45);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            opacity: root.f-main;
+            commands: "M227.3 224.9L331.8 333M450.2 425.7L331.8 333M285 385L275 520M215 522L335 522";
+        }
+        Rectangle {
+            x: root.vu * fx - self.width / 2;
+            y: root.vu * fy - self.height / 2;
+            width: max(3px, 9 * root.vu);
+            height: self.width;
+            border-radius: self.width / 2;
+            background: root.glow;
+            opacity: root.f-main;
+        }
+        // Three wavefronts leaving the feed along its axis.
+        for j in 3: Path {
+            property <float> p: phase(j);
+            property <float> r: 46 + p * 230;
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.55);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            opacity: root.f-main * (1 - p) * min(1, p * 5);
+            MoveTo { x: fx + r * cos(-76deg); y: fy + r * sin(-76deg); }
+            ArcTo { x: fx + r * cos(-20deg); y: fy + r * sin(-20deg); radius-x: r; radius-y: r; sweep: true; }
+        }
+    }
+
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.6;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.13);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            opacity: root.f-near;
+            transform-rotation: root.d-near * -24deg;
+            commands: "M60 470A300 300 0 0 1 120 120M590 180A300 300 0 0 1 530 530";
+        }
+    }
+}
+
+// --------------------------------------------------------------- Tarayıcı
+//
+// A globe, its axis tilted in the picture plane, turning: its meridians are
+// the orthographic projection of a sphere's (ellipses R by R|sin φ|), the
+// half nearer the viewer drawn brighter. Five places on it are joined by the
+// lines a network is; behind, its orbits of connection; in front, one long
+// arc of link swinging past.
+export component GlobeScene inherits SceneBase {
+    property <float> radius: 190;
+    // Degrees of turn: still at rest, turning while the camera travels.
+    property <float> spin: 30 + (root.d + 3) * 70;
+
+    pure function lon(k: int) -> float {
+        return mod(k * 30 + spin, 180);
+    }
+    // Where a place at (latitude, longitude) on the turning sphere falls,
+    // and whether it faces the viewer.
+    pure function px(lat: float, at: float) -> float {
+        return 325 + radius * cos(lat * 1deg) * sin((at + spin) * 1deg);
+    }
+    pure function py(lat: float) -> float {
+        return 325 - radius * sin(lat * 1deg);
+    }
+    pure function face(lat: float, at: float) -> float {
+        return clamp(cos(lat * 1deg) * cos((at + spin) * 1deg) * 3, 0, 1);
+    }
+
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.18);
+            stroke-width: root.fine;
+            opacity: root.f-far;
+            transform-rotation: root.d-far * 18deg;
+            commands: "M615.1 230.7A305 120 -18 1 1 34.9 419.3A305 120 -18 1 1 615.1 230.7ZM600 325A275 275 0 1 1 50 325A275 275 0 1 1 600 325Z";
+        }
+    }
+
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            transform-rotation: -16deg;
+            // The rim and the parallels (with the axis in the picture plane a
+            // parallel projects to a straight chord).
+            Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 650;
+                viewbox-height: 650;
+                fill: root.tint.with-alpha(0.04);
+                stroke: root.glow.with-alpha(0.55);
+                stroke-width: root.line * 1.2;
+                opacity: root.f-main;
+                commands: "M515 325A190 190 0 1 1 135 325A190 190 0 1 1 515 325ZM135 325L515 325M160.5 230L489.5 230M160.5 420L489.5 420M230 160.5L420 160.5M230 489.5L420 489.5";
+            }
+            for k in 6: Path {
+                property <float> phi: lon(k);
+                property <float> rx: radius * abs(sin(phi * 1deg));
+                width: 100%;
+                height: 100%;
+                viewbox-width: 650;
+                viewbox-height: 650;
+                fill: transparent;
+                stroke: root.glow.with-alpha(0.12 + 0.48 * max(0, cos(phi * 1deg)));
+                stroke-width: root.line;
+                opacity: root.f-main;
+                MoveTo { x: 325; y: 325 - radius; }
+                ArcTo { x: 325; y: 325 + radius; radius-x: rx; radius-y: radius; sweep: true; }
+            }
+            for k in 6: Path {
+                property <float> phi: lon(k);
+                property <float> rx: radius * abs(sin(phi * 1deg));
+                width: 100%;
+                height: 100%;
+                viewbox-width: 650;
+                viewbox-height: 650;
+                fill: transparent;
+                stroke: root.glow.with-alpha(0.12 + 0.48 * max(0, 0 - cos(phi * 1deg)));
+                stroke-width: root.line;
+                opacity: root.f-main;
+                MoveTo { x: 325; y: 325 - radius; }
+                ArcTo { x: 325; y: 325 + radius; radius-x: rx; radius-y: radius; sweep: false; }
+            }
+            // The network: five places and the links between them, each as
+            // bright as the nearer of its ends faces the viewer.
+            for link[i] in [
+                { a-lat: 41, a-lon: 29, b-lat: 52, b-lon: -10 },
+                { a-lat: 52, a-lon: -10, b-lat: 35, b-lon: -60 },
+                { a-lat: 41, a-lon: 29, b-lat: 1, b-lon: 70 },
+                { a-lat: 1, a-lon: 70, b-lat: -30, b-lon: 20 },
+                { a-lat: -30, a-lon: 20, b-lat: 41, b-lon: 29 },
+                { a-lat: 35, a-lon: -60, b-lat: -30, b-lon: 20 },
+            ]: Path {
+                width: 100%;
+                height: 100%;
+                viewbox-width: 650;
+                viewbox-height: 650;
+                fill: transparent;
+                stroke: root.glow.with-alpha(0.7);
+                stroke-width: root.fine;
+                opacity: root.f-main * min(face(link.a-lat, link.a-lon), face(link.b-lat, link.b-lon));
+                MoveTo { x: px(link.a-lat, link.a-lon); y: py(link.a-lat); }
+                LineTo { x: px(link.b-lat, link.b-lon); y: py(link.b-lat); }
+            }
+            for node in [
+                { lat: 41, lon: 29 }, { lat: 52, lon: -10 }, { lat: 35, lon: -60 },
+                { lat: 1, lon: 70 }, { lat: -30, lon: 20 },
+            ]: Rectangle {
+                x: root.vu * px(node.lat, node.lon) - self.width / 2;
+                y: root.vu * py(node.lat) - self.height / 2;
+                width: max(3px, 8 * root.vu);
+                height: self.width;
+                border-radius: self.width / 2;
+                background: root.glow;
+                opacity: root.f-main * face(node.lat, node.lon);
+            }
+        }
+    }
+
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.2);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            opacity: root.f-near;
+            transform-rotation: root.d-near * 30deg;
+            commands: "M40 520Q300 40 640 250";
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Ayarlar
+//
+// A mechanism in titanium: a graduated outer ring, a bezel with four notches,
+// the gear, an inner dial with its index, and two precision arcs in front.
+// Neighbouring parts turn in opposite directions and at different rates as
+// the camera travels, as meshed parts do, and lock into their rest pose.
+export component SettingsScene inherits SceneBase {
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.32);
+            stroke-width: root.fine;
+            stroke-line-cap: round;
+            opacity: root.f-far;
+            transform-rotation: root.d-far * -24deg;
+            commands: "M325 29L325 11M350.8 30.1L351.5 22.2M376.4 33.5L377.8 25.6M401.6 39.1L403.7 31.4M426.2 46.9L429 39.3M450.1 56.7L453.5 49.5M473 68.7L482 53.1M494.8 82.5L499.4 76M515.3 98.3L520.4 92.1M534.3 115.7L540 110M551.7 134.7L557.9 129.6M567.5 155.2L574 150.6M581.3 177L596.9 168M593.3 199.9L600.5 196.5M603.1 223.8L610.7 221M610.9 248.4L618.6 246.3M616.5 273.6L624.4 272.2M619.9 299.2L627.8 298.5M621 325L639 325M619.9 350.8L627.8 351.5M616.5 376.4L624.4 377.8M610.9 401.6L618.6 403.7M603.1 426.2L610.7 429M593.3 450.1L600.5 453.5M581.3 473L596.9 482M567.5 494.8L574 499.4M551.7 515.3L557.9 520.4M534.3 534.3L540 540M515.3 551.7L520.4 557.9M494.8 567.5L499.4 574M473 581.3L482 596.9M450.1 593.3L453.5 600.5M426.2 603.1L429 610.7M401.6 610.9L403.7 618.6M376.4 616.5L377.8 624.4M350.8 619.9L351.5 627.8M325 621L325 639M299.2 619.9L298.5 627.8M273.6 616.5L272.2 624.4M248.4 610.9L246.3 618.6M223.8 603.1L221 610.7M199.9 593.3L196.5 600.5M177 581.3L168 596.9M155.2 567.5L150.6 574M134.7 551.7L129.6 557.9M115.7 534.3L110 540M98.3 515.3L92.1 520.4M82.5 494.8L76 499.4M68.7 473L53.1 482M56.7 450.1L49.5 453.5M46.9 426.2L39.3 429M39.1 401.6L31.4 403.7M33.5 376.4L25.6 377.8M30.1 350.8L22.2 351.5M29 325L11 325M30.1 299.2L22.2 298.5M33.5 273.6L25.6 272.2M39.1 248.4L31.4 246.3M46.9 223.8L39.3 221M56.7 199.9L49.5 196.5M68.7 177L53.1 168M82.5 155.2L76 150.6M98.3 134.7L92.1 129.6M115.7 115.7L110 110M134.7 98.3L129.6 92.1M155.2 82.5L150.6 76M177 68.7L168 53.1M199.9 56.7L196.5 49.5M223.8 46.9L221 39.3M248.4 39.1L246.3 31.4M273.6 33.5L272.2 25.6M299.2 30.1L298.5 22.2";
+        }
+    }
+
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        // The bezel and its notches.
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.36);
+            stroke-width: root.fine;
+            opacity: root.f-main;
+            commands: "M557 325A232 232 0 1 1 93 325A232 232 0 1 1 557 325ZM547 325A222 222 0 1 1 103 325A222 222 0 1 1 547 325Z";
+        }
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line * 2;
+            stroke-line-cap: round;
+            opacity: root.f-main;
+            transform-rotation: root.d * 34deg;
+            commands: "M273.7 119.3A212 212 0 0 1 376.3 119.3M530.7 273.7A212 212 0 0 1 530.7 376.3M376.3 530.7A212 212 0 0 1 273.7 530.7M119.3 376.3A212 212 0 0 1 119.3 273.7";
+        }
+        // The gear, turning against the bezel.
+        Path {
+            x: root.width * 165 / 650;
+            y: root.height * 165 / 650;
+            width: root.width * 320 / 650;
+            height: self.width;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: Quiet.gear;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.66);
+            stroke-width: root.line;
+            stroke-line-join: round;
+            opacity: root.f-main;
+            transform-rotation: root.d * -45deg;
+        }
+        // The inner dial and its index.
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.4);
+            stroke-width: root.fine;
+            stroke-line-cap: round;
+            opacity: root.f-main;
+            transform-rotation: root.d * 90deg;
+            commands: "M429 325A104 104 0 1 1 221 325A104 104 0 1 1 429 325ZM325 214L325 236M325 213L325 205M354 216.8L356.1 209.1M381 228L385 221.1M404.2 245.8L409.9 240.1M422 269L428.9 265M433.2 296L440.9 293.9M437 325L445 325M433.2 354L440.9 356.1M422 381L428.9 385M404.2 404.2L409.9 409.9M381 422L385 428.9M354 433.2L356.1 440.9M325 437L325 445M296 433.2L293.9 440.9M269 422L265 428.9M245.8 404.2L240.1 409.9M228 381L221.1 385M216.8 354L209.1 356.1M213 325L205 325M216.8 296L209.1 293.9M228 269L221.1 265M245.8 245.8L240.1 240.1M269 228L265 221.1M296 216.8L293.9 209.1";
+        }
+    }
+
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.6;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.3);
+            stroke-width: root.fine;
+            stroke-line-cap: round;
+            opacity: root.f-near;
+            transform-rotation: root.d-near * 22deg;
+            commands: "M233.3 576.8A268 268 0 0 1 59.6 362.3M416.7 73.2A268 268 0 0 1 565.9 207.5M414.6 78.8L418.7 67.5M456 98.1L462 87.7M493.4 124.3L501.1 115.1M525.7 156.6L534.9 148.9M551.9 194L562.3 188M235.4 571.2L231.3 582.5M194 551.9L188 562.3M156.6 525.7L148.9 534.9M124.3 493.4L115.1 501.1M98.1 456L87.7 462M78.8 414.6L67.5 418.7M67 370.5L55.2 372.6";
+        }
+    }
+}
+
+// A bipyramid crystal, rotating about its vertical axis and tilted toward
+// the viewer: the orthographic projection of its six vertices, joined by its
+// twelve edges.
+component Crystal inherits Path {
+    in property <float> radius;
+    in property <float> tall: 1.5;
+    in property <angle> yaw;
+    in property <angle> tilt: 18deg;
+    pure function ox(x: float, z: float) -> float {
+        return 325 + radius * (x * cos(yaw) + z * sin(yaw));
+    }
+    pure function oy(x: float, y: float, z: float) -> float {
+        return 325 - radius * (y * cos(tilt) - (z * cos(yaw) - x * sin(yaw)) * sin(tilt));
+    }
+    viewbox-width: 650;
+    viewbox-height: 650;
+    stroke-line-join: round;
+    // The girdle.
+    MoveTo { x: ox(1, 0); y: oy(1, 0, 0); }
+    LineTo { x: ox(0, 1); y: oy(0, 0, 1); }
+    LineTo { x: ox(-1, 0); y: oy(-1, 0, 0); }
+    LineTo { x: ox(0, -1); y: oy(0, 0, -1); }
+    Close { }
+    // The crown and the pavilion.
+    MoveTo { x: ox(1, 0); y: oy(1, 0, 0); }
+    LineTo { x: ox(0, 0); y: oy(0, tall, 0); }
+    LineTo { x: ox(-1, 0); y: oy(-1, 0, 0); }
+    LineTo { x: ox(0, 0); y: oy(0, 0 - tall, 0); }
+    Close { }
+    MoveTo { x: ox(0, 1); y: oy(0, 0, 1); }
+    LineTo { x: ox(0, 0); y: oy(0, tall, 0); }
+    LineTo { x: ox(0, -1); y: oy(0, 0, -1); }
+    LineTo { x: ox(0, 0); y: oy(0, 0 - tall, 0); }
+    Close { }
+}
+
+// ------------------------------------------------------------------- Kodi
+//
+// Two crystals, one inside the other and turning against it, in front of a
+// lattice; three shards nearer the camera. Kodi's own mark, small, at the
+// heart, so the scene is still its application's.
+export component CrystalScene inherits SceneBase {
+    in property <string> mark;
+    property <float> turn: 25 + root.d * 95;
+
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.45;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.13);
+            stroke-width: root.fine;
+            opacity: root.f-far;
+            transform-rotation: root.d-far * 12deg;
+            commands: "M302 46.1L279 86L233 86L210 46.1M440 46.1L417 86L371 86L348 46.1M164 125.8L141 165.7L95 165.7L72 125.8M233 86L210 125.8L164 125.8L141 86M302 125.8L279 165.7L233 165.7L210 125.8M371 86L348 125.8L302 125.8L279 86M440 125.8L417 165.7L371 165.7L348 125.8M509 86L486 125.8L440 125.8L417 86M578 125.8L555 165.7L509 165.7L486 125.8M164 205.5L141 245.3L95 245.3L72 205.5M233 165.7L210 205.5L164 205.5L141 165.7M302 205.5L279 245.3L233 245.3L210 205.5M371 165.7L348 205.5L302 205.5L279 165.7M440 205.5L417 245.3L371 245.3L348 205.5M509 165.7L486 205.5L440 205.5L417 165.7M578 205.5L555 245.3L509 245.3L486 205.5M95 245.3L72 285.2L26 285.2L3 245.3M164 285.2L141 325L95 325L72 285.2M233 245.3L210 285.2L164 285.2L141 245.3M302 285.2L279 325L233 325L210 285.2M371 245.3L348 285.2L302 285.2L279 245.3M440 285.2L417 325L371 325L348 285.2M509 245.3L486 285.2L440 285.2L417 245.3M578 285.2L555 325L509 325L486 285.2M647 245.3L624 285.2L578 285.2L555 245.3M95 325L72 364.8L26 364.8L3 325M164 364.8L141 404.7L95 404.7L72 364.8M233 325L210 364.8L164 364.8L141 325M302 364.8L279 404.7L233 404.7L210 364.8M371 325L348 364.8L302 364.8L279 325M440 364.8L417 404.7L371 404.7L348 364.8M509 325L486 364.8L440 364.8L417 325M578 364.8L555 404.7L509 404.7L486 364.8M647 325L624 364.8L578 364.8L555 325M95 404.7L72 444.5L26 444.5L3 404.7M164 444.5L141 484.3L95 484.3L72 444.5M233 404.7L210 444.5L164 444.5L141 404.7M302 444.5L279 484.3L233 484.3L210 444.5M371 404.7L348 444.5L302 444.5L279 404.7M440 444.5L417 484.3L371 484.3L348 444.5M509 404.7L486 444.5L440 444.5L417 404.7M578 444.5L555 484.3L509 484.3L486 444.5M647 404.7L624 444.5L578 444.5L555 404.7M164 524.2L141 564L95 564L72 524.2M233 484.3L210 524.2L164 524.2L141 484.3M302 524.2L279 564L233 564L210 524.2M371 484.3L348 524.2L302 524.2L279 484.3M440 524.2L417 564L371 564L348 524.2M509 484.3L486 524.2L440 524.2L417 484.3M578 524.2L555 564L509 564L486 524.2M233 564L210 603.9L164 603.9L141 564M302 603.9L279 643.7L233 643.7L210 603.9M371 564L348 603.9L302 603.9L279 564M440 603.9L417 643.7L371 643.7L348 603.9M509 564L486 603.9L440 603.9L417 564";
+        }
+    }
+
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Crystal {
+            width: 100%;
+            height: 100%;
+            radius: 175;
+            yaw: turn * 1deg;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            opacity: root.f-main;
+        }
+        Crystal {
+            width: 100%;
+            height: 100%;
+            radius: 92;
+            tall: 1.35;
+            yaw: (40 - turn * 1.4) * 1deg;
+            fill: root.tint.with-alpha(0.08);
+            stroke: root.ink.with-alpha(0.5);
+            stroke-width: root.fine;
+            opacity: root.f-main;
+        }
+        Path {
+            x: root.width * 297 / 650;
+            y: root.height * 297 / 650;
+            width: root.width * 56 / 650;
+            height: self.width;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: mark;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.75);
+            stroke-width: root.fine;
+            stroke-line-join: round;
+            opacity: root.f-main;
+        }
+    }
+
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.8;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: root.tint.with-alpha(0.06);
+            stroke: root.glow.with-alpha(0.32);
+            stroke-width: root.fine;
+            stroke-line-join: round;
+            opacity: root.f-near;
+            transform-rotation: root.d-near * -30deg;
+            commands: "M96 150L120 110L144 150L120 205ZM540 470L558 440L576 470L558 512ZM505 92L517 72L529 92L517 120Z";
+        }
+    }
+}
+
+// ---------------------------------------------------- every other application
+//
+// The application's own mark drawn large inside two rings, the rings
+// separating into depth as the camera travels.
+export component MarkScene inherits SceneBase {
+    in property <string> mark;
+
+    far := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.22);
+            stroke-width: root.line;
+            opacity: root.f-far;
+            commands: "M548 325A223 223 0 1 1 102 325A223 223 0 1 1 548 325Z";
+        }
+    }
+    main := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.ink.with-alpha(0.14);
+            stroke-width: root.fine;
+            opacity: root.f-main;
+            commands: "M505 325A180 180 0 1 1 145 325A180 180 0 1 1 505 325Z";
+        }
+        Path {
+            x: root.width * 165 / 650;
+            y: root.height * 165 / 650;
+            width: root.width * 320 / 650;
+            height: self.width;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: mark;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+            opacity: root.f-main;
+        }
+    }
+    near := Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.6;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke: root.glow.with-alpha(0.18);
+            stroke-width: root.fine;
+            stroke-line-cap: round;
+            opacity: root.f-near;
+            transform-rotation: root.d-near * 28deg;
+            commands: "M325 40A285 285 0 0 1 586 210M325 610A285 285 0 0 1 64 440";
+        }
+    }
+}
+
+// The scene an application stands in front of, by its id.
+export component Scene inherits Rectangle {
+    in property <string> id;
+    in property <string> mark;
+    in property <float> d;
+    in property <float> d-far;
+    in property <float> d-near;
+    in property <float> presence: 1;
+    property <color> tint: Quiet.aura(id);
+
+    if id == "media": FilmScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+    }
+    if id == "livetv": LiveScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+    }
+    if id == "browser": GlobeScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+    }
+    if id == "settings": SettingsScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+    }
+    if id == "kodi": CrystalScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+        mark: root.mark;
+    }
+    if id != "media" && id != "livetv" && id != "browser" && id != "settings" && id != "kodi": MarkScene {
+        width: 100%; height: 100%;
+        d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence;
+        mark: root.mark;
+    }
+}

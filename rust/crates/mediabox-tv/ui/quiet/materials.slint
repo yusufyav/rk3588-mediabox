@@ -1,0 +1,131 @@
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+
+// Quiet OS's materials: the ground, the light that pools on it, the surface
+// a panel is made of and the focus that lifts out of a list.
+//
+// What the renderer is asked to do, and what it is not. Everything here is a
+// flat fill, a linear or radial gradient, a border or a stroked path, which
+// FemtoVG draws in one pass on the GPU. No blur, no drop shadow (a blur pass
+// per frame on this GPU), no backdrop refraction (Slint has none), no image.
+// And no `opacity` on an element with children: in Slint 1.17 that renders
+// the whole subtree into an offscreen layer first (core `Opacity::need_layer`,
+// femtovg `render_and_blend_layer`). Fading is done with each leaf's own
+// alpha instead.
+
+// The ground every Quiet screen stands on: a slate gradient, a neutral pool
+// of light at the top left and the chosen application's light (`aura`)
+// pooled where its scene stands. Three fills; when the aura changes, the
+// colour travels to the new one and stops.
+export component QuietGround inherits Rectangle {
+    in property <color> aura: Quiet.aura("");
+    // Where the coloured light pools, as fractions of the screen.
+    in property <float> light-x: 0.83;
+    in property <float> light-y: 0.5;
+    // How much of it there is, before the lab's multiplier: 1 the home's
+    // full strength, lower on a screen that is read rather than browsed.
+    in property <float> strength: 1;
+
+    property <color> light: aura;
+    animate light { duration: QuietMotion.t-aura; easing: QuietCurves.ease; }
+    property <float> a: min(0.42, 0.2 * strength * QuietMotion.glow);
+
+    background: @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%);
+    Rectangle {
+        x: root.width * light-x - self.width / 2;
+        y: root.height * light-y - self.height / 2;
+        width: root.width * 1.2;
+        height: root.height * 1.7;
+        background: @radial-gradient(circle, light.with-alpha(a) 0%, light.with-alpha(a * 0.35) 30%, light.with-alpha(0) 60%);
+    }
+    Rectangle {
+        x: root.width * 0.09 - self.width / 2;
+        y: root.height * 0.05 - self.height / 2;
+        width: root.width * 1.1;
+        height: root.height * 1.2;
+        background: @radial-gradient(circle, #1a2c3940 0%, #1a2c3900 65%);
+    }
+}
+
+// The surface a panel is made of: a dark glass a shade above the ground, a
+// hairline rim, and a thin line of light along its top edge -- the one
+// "metallic" detail Quiet OS allows itself.
+export component QuietSurface inherits Rectangle {
+    in property <color> tint: Quiet.warm;
+    border-radius: 18px * Quiet.u;
+    background: @linear-gradient(180deg, #171e25 0%, #10161c 100%);
+    border-width: 1px;
+    border-color: Quiet.hair;
+    Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - parent.border-radius * 2;
+        height: Quiet.hairline;
+        background: @linear-gradient(90deg, #ffffff00 0%, tint.with-alpha(0.32) 50%, #ffffff00 100%);
+    }
+}
+
+// Living Focus: the one capsule that a vertical list's focus is, travelling
+// from row to row.
+//
+// Its two edges animate separately -- the edge toward the new row quickly
+// (`t-lead`), the edge it leaves slowly (`t-trail`) -- so it stretches the
+// way it is going and gathers itself on arrival, in either direction and
+// whatever the rows' heights, without being told which way it moved. A new
+// row retargets both edges from wherever they are, so a held key is one long
+// stretch rather than a queue of steps. While stretched it draws in at the
+// sides a little, as something with volume would. Placed over the whole list
+// (its parent's size); the logical focus never waits for it.
+export component LivingFocus inherits Rectangle {
+    // The row it belongs on, in this element's coordinates.
+    in property <length> to-y;
+    in property <length> to-h;
+    in property <bool> shown: true;
+    // 1 with the remote on it; lower for where the remote was (a section
+    // a page belongs to, a list another column has the remote of).
+    in property <float> strength: 1;
+    in property <color> tint: Quiet.warm;
+    // How far in from the list's edges the capsule stands, and how wide it
+    // is (negative: the list's width less the inset).
+    in property <length> inset: 0px;
+    in property <length> to-w: -1px;
+    property <length> w: to-w < 0 ? root.width - inset * 2 : to-w;
+    animate w { duration: QuietMotion.t-trail; easing: QuietCurves.glide; }
+
+    property <length> lead-top: to-y;
+    property <length> lead-bot: to-y + to-h;
+    property <length> trail-top: to-y;
+    property <length> trail-bot: to-y + to-h;
+    animate lead-top, lead-bot { duration: QuietMotion.t-lead; easing: QuietCurves.glide; }
+    animate trail-top, trail-bot { duration: QuietMotion.t-trail; easing: QuietCurves.glide; }
+
+    property <length> top: min(lead-top, trail-top);
+    property <length> bot: max(lead-bot, trail-bot);
+    property <length> stretch: max(0px, bot - top - to-h);
+    property <length> pinch: min(stretch * 0.025, 7px * Quiet.u);
+
+    property <float> a: shown ? strength : 0;
+    animate a { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+    property <color> c: tint;
+    animate c { duration: QuietMotion.t-aura; easing: QuietCurves.ease; }
+
+    body := Rectangle {
+        x: inset + pinch;
+        y: top;
+        width: max(0px, w - pinch * 2);
+        height: bot - top;
+        border-radius: min(self.height, to-h) / 2;
+        background: c.with-alpha(0.12 * a);
+        border-width: 1px;
+        border-color: c.with-alpha(0.07 * a);
+
+        // The light along its upper edge.
+        Rectangle {
+            x: parent.border-radius;
+            y: 1px;
+            width: max(0px, parent.width - parent.border-radius * 2);
+            height: Quiet.hairline;
+            background: @linear-gradient(90deg, #ffffff00 0%, #fff6e8.with-alpha(0.2 * a) 50%, #ffffff00 100%);
+        }
+    }
+}

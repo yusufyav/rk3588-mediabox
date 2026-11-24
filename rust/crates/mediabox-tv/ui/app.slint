@@ -10,7 +10,9 @@ import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
 import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
-import { QuietHome, QuietSettings, QuietBar } from "quiet.slint";
+import { QuietHome } from "quiet/home.slint";
+import { QuietSettings } from "quiet/settings.slint";
+import { QuietBar } from "quiet/controls.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
@@ -101,6 +103,10 @@ export component MediaBoxWindow inherits Window {
     property <bool> quiet-family: layout == "quiet" && (screen == "settings" || screen == "wifi"
         || screen == "bluetooth" || screen == "account" || screen == "diagnostics");
     changed quiet-family => { Theme.quiet = quiet-family; }
+    // The screen the panel showed before this one, told by Rust with the
+    // screen itself (src/main.rs, `show`): Quiet OS carries an element from
+    // one screen into the next when it knows where the eye was.
+    in property <string> came-from;
     /// Whether the film's own controls are up. They come up on a key and go
     /// down by themselves; a film with a control bar permanently across it is
     /// not a television.
@@ -671,7 +677,9 @@ export component MediaBoxWindow inherits Window {
             apps: root.apps;
             vitals: root.vitals;
             focus-col: root.focus-col;
+            came-from: root.came-from;
         }
+
 
         if screen == "settings" && layout == "quiet": QuietSettings {
             width: 100%;
@@ -699,6 +707,7 @@ export component MediaBoxWindow inherits Window {
             choice: root.settings-choice;
             choice-focus: root.settings-choice-focus;
             choice-note: root.settings-choice-note;
+            came-from: root.came-from;
         }
 
         if screen == "settings" && layout != "quiet": Settings {
