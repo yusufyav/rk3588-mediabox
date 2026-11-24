@@ -13,6 +13,8 @@ import { Settings } from "settings.slint";
 import { QuietHome } from "quiet/home.slint";
 import { QuietSettings } from "quiet/settings.slint";
 import { QuietBar } from "quiet/controls.slint";
+import { QuietMotion } from "quiet/motion.slint";
+import { QuietMotionLab } from "quiet/lab.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
@@ -24,7 +26,7 @@ import { Diagnostics } from "diagnostics.slint";
 import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 import { PointerHub, PointerPan, PointerArrow } from "pointer.slint";
-export { AccountChip, CaptionStyle, PointerHub, PointerPan }
+export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietMotion }
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
@@ -680,6 +682,12 @@ export component MediaBoxWindow inherits Window {
             came-from: root.came-from;
         }
 
+        // Development only: never open unless MEDIABOX_TV_MOTION_LAB was set
+        // (src/motion_lab.rs).
+        if screen == "home" && layout == "quiet" && QuietMotion.lab-open: QuietMotionLab {
+            width: 100%;
+            height: 100%;
+        }
 
         if screen == "settings" && layout == "quiet": QuietSettings {
             width: 100%;

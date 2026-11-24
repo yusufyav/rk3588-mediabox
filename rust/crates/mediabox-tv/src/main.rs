@@ -22,6 +22,7 @@ mod keyboard;
 mod layout;
 mod metrics;
 mod model;
+mod motion_lab;
 mod monitor;
 mod platform;
 mod pointer;
@@ -411,6 +412,8 @@ struct App {
     wifi_polling: bool,
     /// The Bluetooth screen's.
     bt_polling: bool,
+    /// Quiet OS's Motion Lab, inert unless MEDIABOX_TV_MOTION_LAB is set.
+    lab: motion_lab::Lab,
 }
 
 impl App {
@@ -747,6 +750,10 @@ impl App {
     }
 
     fn act_on_home(&mut self, intent: Intent) {
+        if let Some(window) = self.window.upgrade().filter(|w| self.lab.is_open(w)) {
+            self.lab.act(&window, intent);
+            return;
+        }
         match intent {
             // The classic launcher is a row; Quiet OS's is a column, and
             // either arrow along it walks the same list.
@@ -6642,6 +6649,15 @@ impl App {
     /// refresh, the sound; on a shelf that has one, the poster's menu, as a
     /// long Ok opens it. Nothing anywhere else.
     fn options(&mut self) {
+        if self.here.is_none()
+            && self.route() == Route::Home
+            && self.layout == layout::Layout::Quiet
+        {
+            if let Some(window) = self.window.upgrade() {
+                self.lab.toggle(&window);
+            }
+            return;
+        }
         if self.here.is_some() {
             if self.route() != Route::NowPlaying {
                 self.open(Route::NowPlaying);
@@ -8844,6 +8860,7 @@ impl App {
             account_focus: 0,
             wifi_polling: false,
             bt_polling: false,
+            lab: motion_lab::Lab::from_env(),
         }
     }
 }
