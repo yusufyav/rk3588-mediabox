@@ -2769,7 +2769,7 @@ impl HasDisplayHandle for SplitDisplay {
     }
 }
 
-struct GlContext {
+pub(crate) struct GlContext {
     context: glutin::context::PossiblyCurrentContext,
     config: glutin::config::Config,
     /// Drawn through into the display's GBM surface; made again when that is
@@ -2907,6 +2907,53 @@ fn gl_string(display: &glutin::display::Display, name: u32) -> Option<String> {
     })
 }
 
+/// What the Skia experiment's surface asks of the context it is given.
+#[cfg(feature = "skia")]
+impl GlContext {
+    pub(crate) fn size(&self) -> slint::PhysicalSize {
+        self.display.size()
+    }
+
+    pub(crate) fn stencil(&self) -> u8 {
+        self.config.stencil_size()
+    }
+
+    /// Until there is a buffer to draw into: its age is asked before drawing,
+    /// and asking takes it.
+    pub(crate) fn wait_for_buffer(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let at = std::time::Instant::now();
+        if !self.display.gbm_surface.borrow().has_free_buffers() {
+            self.display.wait_for_page_flip()?;
+        }
+        let waited = at.elapsed();
+        add_phase(|phases| phases.flip_wait_us += waited.as_micros() as u64);
+        Ok(())
+    }
+
+    /// How many frames ago the buffer about to be drawn into was: 0 unknown.
+    /// Asked of EGL itself: glutin answers 0 unless EGL_EXT_buffer_age is
+    /// listed, and this driver lists EGL_KHR_partial_update, which has the
+    /// same query and answers it.
+    pub(crate) fn buffer_age(&self) -> u32 {
+        #[link(name = "EGL")]
+        unsafe extern "C" {
+            fn eglQuerySurface(
+                display: *const std::ffi::c_void,
+                surface: *const std::ffi::c_void,
+                what: i32,
+                value: *mut i32,
+            ) -> u32;
+        }
+        use glutin::surface::AsRawSurface;
+        let RawDisplay::Egl(display) = self.context.display().raw_display();
+        let glutin::surface::RawSurface::Egl(surface) = self.surface.borrow().raw_surface();
+        let mut age = 0;
+        // SAFETY: this display's current surface; one integer is written.
+        let asked = unsafe { eglQuerySurface(display, surface, 0x313D, &mut age) };
+        if asked == 0 { 0 } else { u32::try_from(age).unwrap_or(0) }
+    }
+}
+
 impl GlContext {
     /// Reads the frame back off the GPU and writes it as a PNG.
     ///
@@ -3023,7 +3070,10 @@ unsafe impl OpenGLInterface for GlContext {
     }
 
     fn get_proc_address(&self, name: &CStr) -> *const std::ffi::c_void {
-        self.context.display().get_proc_address(name)
+        let real = self.context.display().get_proc_address(name);
+        #[cfg(feature = "gl-count")]
+        let real = crate::glcount::wrap(name, real);
+        real
     }
 }
 
@@ -3052,9 +3102,62 @@ impl Told {
     }
 }
 
+/// What draws the interface: FemtoVG, the product's; or the Skia experiment.
+enum UiRenderer {
+    Femto(FemtoVGRenderer),
+    #[cfg(feature = "skia")]
+    Skia(Box<i_slint_renderer_skia::SkiaRenderer>),
+}
+
+impl UiRenderer {
+    fn new(gl: GlContext) -> Result<Self, PlatformError> {
+        #[cfg(feature = "skia")]
+        if let Some(partial) = crate::skia::asked() {
+            return Ok(Self::Skia(Box::new(crate::skia::renderer(gl, partial)?)));
+        }
+        Ok(Self::Femto(FemtoVGRenderer::new(gl)?))
+    }
+
+    fn render(&self) -> Result<(), PlatformError> {
+        match self {
+            Self::Femto(renderer) => renderer.render(),
+            #[cfg(feature = "skia")]
+            Self::Skia(renderer) => renderer.render().map(|_| ()),
+        }
+    }
+
+    fn slint(&self) -> &dyn slint::platform::Renderer {
+        match self {
+            Self::Femto(renderer) => renderer,
+            #[cfg(feature = "skia")]
+            Self::Skia(renderer) => renderer.as_ref(),
+        }
+    }
+}
+
+#[cfg(feature = "skia")]
+thread_local! {
+    static ON_DRAWN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Called after every frame, when this platform tells of them itself.
+#[cfg(feature = "skia")]
+pub fn on_drawn(told: impl Fn() + 'static) {
+    ON_DRAWN.with(|cell| *cell.borrow_mut() = Some(Box::new(told)));
+}
+
+/// Whether the platform says when a frame was drawn, rather than Slint's
+/// rendering notifier: for the Skia experiment only.
+pub fn tells_frames() -> bool {
+    #[cfg(feature = "skia")]
+    return crate::skia::asked().is_some();
+    #[cfg(not(feature = "skia"))]
+    false
+}
+
 struct SplitWindow {
     window: slint::Window,
-    renderer: FemtoVGRenderer,
+    renderer: UiRenderer,
     display: Rc<SplitDisplay>,
     redraw: Cell<bool>,
     told: Told,
@@ -3070,7 +3173,7 @@ struct SplitWindow {
 
 impl SplitWindow {
     fn new(display: Rc<SplitDisplay>) -> Result<Rc<Self>, PlatformError> {
-        let renderer = FemtoVGRenderer::new(GlContext::new(display.clone())?)?;
+        let renderer = UiRenderer::new(GlContext::new(display.clone())?)?;
         Ok(Rc::new_cyclic(|weak: &std::rc::Weak<Self>| Self {
             window: slint::Window::new(weak.clone()),
             renderer,
@@ -3142,9 +3245,30 @@ impl SplitWindow {
 
     fn render_if_needed(&self) -> Result<(), PlatformError> {
         if self.redraw.replace(false) {
+            #[cfg(feature = "gl-count")]
+            let before = PHASES.with(Cell::get);
             let at = std::time::Instant::now();
+            #[cfg(feature = "spatial")]
+            crate::spatial::frame(|| self.renderer.render())?;
+            #[cfg(not(feature = "spatial"))]
             self.renderer.render()?;
             let total = at.elapsed();
+            #[cfg(feature = "gl-count")]
+            crate::glcount::frame({
+                let after = PHASES.with(Cell::get);
+                let waited = (after.flip_wait_us - before.flip_wait_us)
+                    + (after.swap_us - before.swap_us)
+                    + (after.present_us - before.present_us);
+                total.saturating_sub(Duration::from_micros(waited))
+            });
+            #[cfg(feature = "skia")]
+            if tells_frames() {
+                ON_DRAWN.with(|told| {
+                    if let Some(told) = told.borrow().as_ref() {
+                        told();
+                    }
+                });
+            }
             add_phase(|phases| {
                 phases.frames += 1;
                 phases.total_us += total.as_micros() as u64;
@@ -3214,7 +3338,7 @@ impl WindowAdapter for SplitWindow {
         self.display.size()
     }
     fn renderer(&self) -> &dyn slint::platform::Renderer {
-        &self.renderer
+        self.renderer.slint()
     }
     fn request_redraw(&self) {
         self.redraw.set(true);
@@ -3935,6 +4059,8 @@ impl Platform for SplitPlatform {
                 }
             }
         }
+        #[cfg(feature = "spatial")]
+        crate::spatial::stop();
         self.window.display.release_display();
         Ok(())
     }
