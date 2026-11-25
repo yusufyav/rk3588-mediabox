@@ -64,16 +64,17 @@ farkı; yakalamalar farklı dakikada, saat da farklı).
 
 **FemtoVG'de kısmi çizim.** Mali yazmayı zaten eliyor (transaction elimination:
 14 400 karonun ~11 000'i yazılmadan atılıyor; 14,7 MB yerine 4,4 MB). Kalan
-kazanç yalnız gölgelemededir ve ana ekranda bölge %100 olduğundan sıfırdır.
+kazanç yalnız gölgelemededir. FemtoVG'de kısmi çizim **ölçülmedi**; ana ekranda
+kazanç beklenmemesi, aynı ekranda Skia ile ölçülen %100 bölgeden çıkarımdır.
 Uygulamak `i-slint-renderer-femtovg`'nin fork'unu ister: `GLItemRenderer`'a
 `ItemRendererFeatures` ve `PartialRenderer` sarmalaması, `clear_rect` yerine
 bölge scissor'u, `RendererSealed`'in `mark_dirty_region`/kaynak bırakma
 kancaları, `OpenGLInterface`'e buffer age, layer önbelleğiyle etkileşim, notifier
-ile dışlama. Yapılmadı: ana ekranda karşılığı yok.
+ile dışlama. Yapılmadı: ana ekranda karşılığı beklenmiyor.
 
 ## 2. GPU-resident spatial sahne
 
-Entegrasyon, ölçülmüş üç seçenekten:
+Entegrasyon. Yalnız seçilen yöntem ölçüldü; ilk ikisi kaynak incelemesiyle elendi:
 
 - `set_rendering_notifier`: FemtoVG'de kareyi ikiye böler (temizleme ayrı
   flush); arada başka FBO'ya geçmek ana karenin store+load'ı demektir; Skia'da
@@ -206,6 +207,11 @@ FBO dokuları için bir şey söylemez.
 
 ## Sınırlar
 
+- Ölçülmeyenler: `home-settings`; Skia'nın FemtoVG ile kıyaslanabilir ilk kare
+  süresi; geometri taramasının `detail=4`, doldurmanın MSAA 8× noktası. Skia
+  sonuçları 1–2 tur; kapasite sınırları yaklaşıktır.
+- Üretime geçmeden: sahne karmaşıklığı tavanı, iki eşzamanlı sahne için doku
+  havuzu, uzun süreli ısı testi, HDR/Kodi/CEC/Canlı TV regresyonu.
 - Yalnız Ultra ve 1440p144; 4K60, enerji, input-to-photon ölçülmedi.
 - Kapasite süpürmesi tek turdur (seviyeler iki kez), nokta başına 3 s; uzun
   süreli ısıl davranış sınanmadı. Arada gerçek kumanda girişi gelen bir
@@ -232,6 +238,6 @@ variant.sh idle.py <binary> MEDIABOX_TV_RENDERER=skia|skia-partial
 bench.py <çıktı> ; sweep.py <çıktı> <s> "<sahne> run ..."
 ```
 
-Ham veri: cihazda `/root/mediabox-verify/advgfx`, geliştirmede
+Ham veri (git'te değil): cihazda `/root/mediabox-verify/advgfx`, geliştirmede
 `/var/tmp/rk3588-mediabox/logs/advgfx`. PR #6'nın sonuçları
 `experiment/quietos-hardware-animation` dalında.
