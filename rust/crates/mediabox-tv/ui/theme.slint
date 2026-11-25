@@ -25,7 +25,12 @@ export global Theme {
     // Ground and surfaces. Near-black rather than black — a television's own
     // letterboxing is blacker than any panel can draw, and matching it makes
     // the interface look like a fault.
-    out property <brush> bg: quiet ? @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%) : #07080b;
+    //
+    // Under Quiet OS a plain colour, though every one of its screens draws a
+    // gradient: each covers the whole panel with its own (`QuietGround`), and
+    // a window whose background is a gradient fills 4K with it first. A
+    // colour is the frame's clear, which costs nothing.
+    out property <brush> bg: quiet ? #0a1018 : #07080b;
     out property <brush> bg-raise: #0f131a;
     out property <brush> bg-card: #151a23;
     out property <brush> bg-sheet: #0d1118;

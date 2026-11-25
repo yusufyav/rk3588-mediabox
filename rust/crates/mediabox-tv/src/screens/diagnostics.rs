@@ -21,6 +21,70 @@ pub struct Reading {
     pub tone: String,
 }
 
+/// What Quiet OS's picture of the SoC is made of: the same answer the rows
+/// are, as numbers. `None` is a reading the machine did not give, and is
+/// drawn as none; there is no figure for how busy the GPU or the NPU is.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Soc {
+    pub known: bool,
+    pub cpu: Option<f32>,
+    pub cores: i32,
+    pub memory: Option<f32>,
+    pub memory_text: String,
+    pub storage: Option<f32>,
+    pub storage_text: String,
+    /// Celsius.
+    pub soc: Option<f32>,
+    pub big0: Option<f32>,
+    pub big1: Option<f32>,
+    pub little: Option<f32>,
+    pub gpu: Option<f32>,
+    pub npu: Option<f32>,
+    pub center: Option<f32>,
+}
+
+fn soc(diagnostics: Option<&Value>) -> Soc {
+    let Some(root) = diagnostics else {
+        return Soc::default();
+    };
+    let zone = |name: &str| {
+        root.get("temperatures")?
+            .as_array()?
+            .iter()
+            .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))?
+            .get("celsius")?
+            .as_f64()
+            .map(|celsius| celsius as f32)
+    };
+    let share = |used: Option<f64>, total: Option<f64>| match (used, total) {
+        (Some(used), Some(total)) if total > 0.0 => (
+            Some((used / total).clamp(0.0, 1.0) as f32),
+            format!("{} / {}", human_size(used), human_size(total)),
+        ),
+        _ => (None, "—".into()),
+    };
+    let (memory, memory_text) =
+        share(number(diagnostics, "/memory/usedBytes"), number(diagnostics, "/memory/totalBytes"));
+    let (storage, storage_text) =
+        share(number(diagnostics, "/storage/0/usedBytes"), number(diagnostics, "/storage/0/totalBytes"));
+    Soc {
+        known: true,
+        cpu: number(diagnostics, "/cpu/usage").map(|usage| usage.clamp(0.0, 1.0) as f32),
+        cores: number(diagnostics, "/cpu/count").unwrap_or(0.0) as i32,
+        memory,
+        memory_text,
+        storage,
+        storage_text,
+        soc: zone("soc-thermal"),
+        big0: zone("bigcore0-thermal"),
+        big1: zone("bigcore1-thermal"),
+        little: zone("littlecore-thermal"),
+        gpu: zone("gpu-thermal"),
+        npu: zone("npu-thermal"),
+        center: zone("center-thermal"),
+    }
+}
+
 pub struct Group {
     pub title: String,
     pub rows: Vec<Reading>,
@@ -28,6 +92,7 @@ pub struct Group {
 
 pub struct Diagnostics {
     pub groups: Vec<Group>,
+    pub soc: Soc,
     /// Which group the remote is on. The rows are read, not operated, so the
     /// focus model here is one column.
     pub group: usize,
@@ -37,6 +102,7 @@ impl Diagnostics {
     pub fn new() -> Self {
         Self {
             groups: Vec::new(),
+            soc: Soc::default(),
             group: 0,
         }
     }
@@ -66,6 +132,7 @@ impl Diagnostics {
         display: Option<&DisplayStatus>,
     ) {
         self.groups = compose(status, diagnostics, display);
+        self.soc = soc(diagnostics);
         self.group = self.group.min(self.groups.len().saturating_sub(1));
     }
 }

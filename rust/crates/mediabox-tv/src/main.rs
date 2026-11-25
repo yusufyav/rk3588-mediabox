@@ -22,6 +22,7 @@ mod keyboard;
 mod layout;
 mod metrics;
 mod model;
+mod motion_lab;
 mod monitor;
 mod platform;
 mod pointer;
@@ -411,6 +412,8 @@ struct App {
     wifi_polling: bool,
     /// The Bluetooth screen's.
     bt_polling: bool,
+    /// Quiet OS's Motion Lab, inert unless MEDIABOX_TV_MOTION_LAB is set.
+    lab: motion_lab::Lab,
 }
 
 impl App {
@@ -747,6 +750,13 @@ impl App {
     }
 
     fn act_on_home(&mut self, intent: Intent) {
+        if self.lab_open()
+            && let Some(window) = self.window.upgrade()
+        {
+            self.lab.act(&window, intent);
+            self.paint();
+            return;
+        }
         match intent {
             // The classic launcher is a row; Quiet OS's is a column, and
             // either arrow along it walks the same list.
@@ -802,6 +812,7 @@ impl App {
                     .live
                     .as_ref()
                     .is_some_and(|live| live.layer != screens::live::Layer::None),
+                Route::Home => self.lab_open(),
                 _ => false,
             } || (self.on_search_box() && self.account_focus > 0)
             {
@@ -812,6 +823,11 @@ impl App {
             film,
             handed_over: self.handed_over,
         }
+    }
+
+    /// Quiet OS's Motion Lab is over the home screen.
+    fn lab_open(&self) -> bool {
+        self.layout == layout::Layout::Quiet && self.window.upgrade().is_some_and(|window| self.lab.is_open(&window))
     }
 
     fn pointer_policy(&self) -> pointer::Policy {
@@ -1058,7 +1074,8 @@ impl App {
         if (dx, dy) == (0, 0) {
             return;
         }
-        if pointer::wheel_is_along(self.route()) {
+        // The lab's rows are a column, whatever the launcher under it is.
+        if pointer::wheel_is_along(self.route()) && !self.lab_open() {
             (dx, dy) = (dx + dy, 0);
         }
         let steps = [
@@ -6311,6 +6328,10 @@ impl App {
         window.set_bt_present(bt.present);
         window.set_bt_notice(bt.notice.clone().into());
         window.set_bt_summary(bt.summary().into());
+        window.set_bt_powered(bt.powered);
+        window.set_bt_scanning(bt.scanning);
+        window.set_bt_linked(bt.devices.iter().filter(|device| device.connected).count() as i32);
+        window.set_bt_paired(bt.devices.iter().filter(|device| device.paired).count() as i32);
         let focused = bt.focused_row();
         let mut rows: Vec<WifiRow> = Vec::new();
         let mut slots = 0..;
@@ -6642,6 +6663,16 @@ impl App {
     /// refresh, the sound; on a shelf that has one, the poster's menu, as a
     /// long Ok opens it. Nothing anywhere else.
     fn options(&mut self) {
+        if self.here.is_none()
+            && self.route() == Route::Home
+            && self.layout == layout::Layout::Quiet
+        {
+            if let Some(window) = self.window.upgrade() {
+                self.lab.toggle(&window);
+                self.paint();
+            }
+            return;
+        }
         if self.here.is_some() {
             if self.route() != Route::NowPlaying {
                 self.open(Route::NowPlaying);
@@ -6960,6 +6991,15 @@ impl App {
     // ------------------------------------------------------------- the drawing
 
     fn paint(&mut self) {
+        /// A screen onto the panel, and which one it replaced (`came-from`)
+        /// before it, so the screen coming up knows where the eye was.
+        fn show(window: &MediaBoxWindow, screen: &str) {
+            let was = window.get_screen();
+            if was != screen {
+                window.set_came_from(was);
+                window.set_screen(screen.into());
+            }
+        }
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -6982,7 +7022,7 @@ impl App {
         // Live television is a film too, with its own overlays rather than a
         // film's controls.
         if route == Route::Live && self.live.is_some() {
-            window.set_screen("live".into());
+            show(&window, "live");
             self.paint_live(&window);
             self.paint_sheet(&window);
             return;
@@ -6992,7 +7032,7 @@ impl App {
         // the film's own controls and nothing else. No screen answers to
         // "film", which is how the rest of the interface is kept off the panel.
         if self.here.is_some() {
-            window.set_screen("film".into());
+            show(&window, "film");
             let open = self.controls_open();
             window.set_film_controls(open);
             if std::env::var_os("MEDIABOX_TV_TRACE_INPUT").is_some() {
@@ -7002,7 +7042,7 @@ impl App {
             self.paint_sheet(&window);
             return;
         }
-        window.set_screen(route.name().into());
+        show(&window, route.name());
         window.set_layout(self.layout.name().into());
 
         self.paint_sheet(&window);
@@ -7976,9 +8016,12 @@ impl App {
         let (title, blurb) = self.settings.heading();
         window.set_settings_title(title.into());
         window.set_settings_blurb(blurb.into());
-        window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(setting_rows(
-            self.settings.rows(),
-        ))));
+        let rows = setting_rows(self.settings.rows());
+        // Quiet OS keeps the rows it has and changes what changed: a switch
+        // whose row is built over again has nothing to slide from.
+        if self.layout != layout::Layout::Quiet || !refresh(&window.get_settings_rows(), &rows) {
+            window.set_settings_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+        }
         let choice = self.settings.choice_view();
         window.set_settings_choice_open(choice.is_some());
         if let Some(choice) = choice {
@@ -8072,6 +8115,12 @@ impl App {
             volume: view.volume,
             muted: view.muted,
             volume_focused: view.volume_focused,
+            device_icon: view.device_icon.into(),
+            speakers: view.speakers,
+            source: view.source.into(),
+            form: view.form.into(),
+            bitstream: view.bitstream,
+            receiver_volume: view.receiver_volume,
         });
     }
 
@@ -8173,6 +8222,10 @@ impl App {
             trial: view.trial.into(),
             previous: view.previous.into(),
             trial_now: view.trial_now.into(),
+            link: view.link,
+            addressed: view.addressed,
+            fixed: view.fixed,
+            gateway: view.gateway.into(),
         });
     }
 
@@ -8233,6 +8286,9 @@ impl App {
             ),
             current_title: view.current_title.into(),
             current_line: view.current_line.into(),
+            wire: out_screen(&view.wire),
+            draft: out_screen(&view.draft),
+            unsaved: view.unsaved,
             current_badges: model(
                 view.current_badges
                     .into_iter()
@@ -8457,6 +8513,8 @@ impl App {
             ),
             prompt: view.prompt,
             prompt_focus: view.prompt_focus as i32,
+            celsius: view.celsius.unwrap_or(-1.0) as f32,
+            duty_at: view.duty_at.unwrap_or(-1.0) as f32,
         });
     }
 
@@ -8530,6 +8588,24 @@ impl App {
 
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
+        let soc = &self.diagnostics.soc;
+        let measured = |value: Option<f32>| value.unwrap_or(-1.0);
+        window.set_diag_soc(SocView {
+            known: soc.known,
+            cpu: measured(soc.cpu),
+            cores: soc.cores,
+            memory: measured(soc.memory),
+            memory_text: soc.memory_text.clone().into(),
+            storage: measured(soc.storage),
+            storage_text: soc.storage_text.clone().into(),
+            soc: measured(soc.soc),
+            big0: measured(soc.big0),
+            big1: measured(soc.big1),
+            little: measured(soc.little),
+            gpu: measured(soc.gpu),
+            npu: measured(soc.npu),
+            center: measured(soc.center),
+        });
         window.set_diag_nav(slint::ModelRc::new(slint::VecModel::from(
             self.diagnostics
                 .groups
@@ -8561,6 +8637,34 @@ impl App {
                 })
                 .collect::<Vec<_>>(),
         )));
+    }
+}
+
+/// Brings a model to `rows` by writing only the rows that differ; false where
+/// it cannot (another length, or not a model of ours), and a new one is due.
+fn refresh<T: Clone + PartialEq + 'static>(model: &slint::ModelRc<T>, rows: &[T]) -> bool {
+    use slint::Model;
+    if model.row_count() != rows.len() || model.as_any().downcast_ref::<slint::VecModel<T>>().is_none() {
+        return false;
+    }
+    for (at, row) in rows.iter().enumerate() {
+        if model.row_data(at).as_ref() != Some(row) {
+            model.set_row_data(at, row.clone());
+        }
+    }
+    true
+}
+
+fn out_screen(view: &screens::output::ScreenView) -> OutScreen {
+    OutScreen {
+        known: view.known,
+        width: view.width,
+        height: view.height,
+        size: view.size.clone().into(),
+        rate: view.rate.clone().into(),
+        bits: view.bits,
+        chroma: view.chroma.clone().into(),
+        hdr: view.hdr,
     }
 }
 
@@ -8835,6 +8939,7 @@ impl App {
             account_focus: 0,
             wifi_polling: false,
             bt_polling: false,
+            lab: motion_lab::Lab::from_env(),
         }
     }
 }

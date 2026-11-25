@@ -1,0 +1,306 @@
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+
+// Quiet OS's materials: the ground, the light that pools on it, the surface
+// a panel is made of and the focus that lifts out of a list.
+//
+// What the renderer is asked to do, and what it is not. Everything here is a
+// flat fill, a linear or radial gradient, a border or a stroked path, which
+// FemtoVG draws in one pass on the GPU. No blur, no drop shadow (a blur pass
+// per frame on this GPU), no backdrop refraction (Slint has none), no image.
+// And no `opacity` on an element with children but where that is the point
+// (`Kept`): in Slint 1.17 it renders the whole subtree into an offscreen layer
+// first (core `Opacity::need_layer`, femtovg `render_and_blend_layer`). Nor on
+// a leaf that also has a `transform-*`: the compiler puts the transform
+// between the two, the leaf counts as a child with a child, and it is a layer
+// all the same -- drawn again for every frame it turns. Fading is a leaf's own
+// `opacity`, or, on one that turns, its colours' alpha.
+//
+// Nothing invisible is free either: `visible: false` is a clip of no size,
+// which the renderer flattens as a circle of no radius (kit.slint,
+// `NetGlyph`). What is not there is `if`, or a leaf's `opacity: 0`.
+
+// A drawing that moves, turns or fades but does not itself change: drawn once
+// into a texture, and composited from it every frame after.
+//
+// It is `opacity` on an element with children, on purpose (see above): the
+// renderer keeps that layer and draws it again only when something a child
+// reads has changed -- never for the opacity itself, or for what moves the
+// whole of it from outside. So nothing inside may depend on anything that
+// animates. At exactly 1 the renderer drops the layer and draws the children,
+// so 1 is never asked for.
+export component Kept inherits Rectangle {
+    in property <float> fade: 1;
+    // Draw the children as they are after all: while what is kept would
+    // change for every frame, a texture of it is a pass for nothing. Whoever
+    // sets this fades the children's own colours.
+    in property <bool> live;
+    x: 0;
+    // An element that draws nothing has no bounds, and the texture is then
+    // the size of what is inside instead: this one has its own.
+    background: transparent;
+    opacity: live ? 1 : min(fade, 0.9999);
+}
+
+// The same, for what does not fade: words and marks that stand still while
+// something else on the screen moves. It stands on whole device pixels
+// (`Quiet.px`) and is as large as what it holds -- what of it stands outside
+// is not drawn.
+export component Still inherits Rectangle {
+    // Off, what it holds is drawn every frame: for what may grow past what a
+    // texture should be, as the texture is of all of it, not of what shows.
+    in property <bool> keep: true;
+    x: 0;
+    background: transparent;
+    cache-rendering-hint: keep;
+}
+
+// The ground with its light, whole, over however small a rectangle.
+component GroundPicture inherits Rectangle {
+    in property <color> light;
+    in property <float> a;
+    in property <float> light-x;
+    in property <float> light-y;
+    // The lights reach past it, and the texture must not: it is this size.
+    clip: true;
+    background: @linear-gradient(142deg, #111c26 0%, #0a1018 52%, #080d13 100%);
+    Rectangle {
+        x: root.width * light-x - self.width / 2;
+        y: root.height * light-y - self.height / 2;
+        width: root.width * 1.2;
+        height: root.height * 1.7;
+        background: @radial-gradient(circle, light.with-alpha(a) 0%, light.with-alpha(a * 0.35) 30%, light.with-alpha(0) 60%);
+    }
+    Rectangle {
+        x: root.width * 0.09 - self.width / 2;
+        y: root.height * 0.05 - self.height / 2;
+        width: root.width * 1.1;
+        height: root.height * 1.2;
+        background: @radial-gradient(circle, #1a2c3940 0%, #1a2c3900 65%);
+    }
+}
+
+// The ground every Quiet screen stands on: a slate gradient, the chosen
+// application's light (`aura`) pooled where its scene stands and a neutral
+// pool of light at the top left. When the aura changes, the colour travels to
+// the new one and stops.
+//
+// Kept, for the GPU's sake: a gradient over the panel is a shader run for
+// every one of 4K's eight million pixels, three of them were four fifths of
+// what a frame cost (2026-11-25), and they are the same three in every frame.
+// The light does change, while it travels: two kept grounds then, the one it
+// leaves and the one it goes to over it, as far in as the light has got --
+// which is the same colour at every pixel as one ground in the mixed light.
+//
+// Kept on a grid of four pixels and drawn back through the texture filter.
+// There is nothing in it to lose: three gradients whose steepest is a level
+// every ten pixels, so the filter gives back what the gradient would have
+// been (compared pixel by pixel at 4K: within two levels of 255, as a kept
+// ground of every pixel is). At full size it was a hundred megabytes, the
+// memory bus's to read again for every frame and to clear for every screen.
+export component QuietGround inherits Rectangle {
+    in property <color> aura: Quiet.aura("");
+    // Where the coloured light pools, as fractions of the screen.
+    in property <float> light-x: 0.83;
+    in property <float> light-y: 0.5;
+    // How much of it there is, before the lab's multiplier: 1 the home's
+    // full strength, lower on a screen that is read rather than browsed.
+    in property <float> strength: 1;
+
+    // Assigned on a change of value, not bound: the launcher's model is
+    // replaced on every poll of the control plane, and a bound animation
+    // would play (to the same colour) each time, asking for frames at rest.
+    property <bool> snap: true;
+    property <color> one;
+    property <color> two;
+    // How far from ground one to ground two.
+    property <float> t;
+    animate t { duration: snap ? 0ms : QuietMotion.t-aura; easing: QuietCurves.ease; }
+    function aim() {
+        if t <= 0 {
+            two = aura;
+            t = 1;
+        } else if t >= 1 {
+            one = aura;
+            t = 0;
+        } else {
+            // Half way: on from the colour it had got to.
+            one = two.mix(one, t);
+            two = aura;
+            snap = true;
+            t = 0;
+            snap = false;
+            t = 1;
+        }
+    }
+    init => {
+        one = aura;
+        two = aura;
+        snap = false;
+    }
+    changed aura => { aim(); }
+    // Reduced motion turned on: what is moving lands (t-aura is zero now).
+    property <bool> moving: QuietMotion.on;
+    changed moving => {
+        one = aura;
+        two = aura;
+    }
+    property <float> a: min(0.42, 0.2 * strength * QuietMotion.glow);
+    property <float> grid: 4;
+
+    // One with nothing of it to show -- less than half a level, at the end of
+    // the crossing -- stands off the panel, where the renderer culls it and
+    // keeps its texture.
+    Rectangle {
+        x: t > 0.99 ? root.width * 2 : 0;
+        y: 0;
+        width: root.width / grid;
+        height: root.height / grid;
+        transform-scale: grid;
+        transform-origin: { x: 0px, y: 0px };
+        Still {
+            width: 100%;
+            height: 100%;
+            GroundPicture {
+                width: 100%;
+                height: 100%;
+                light: one;
+                a: root.a;
+                light-x: root.light-x;
+                light-y: root.light-y;
+            }
+        }
+    }
+    Rectangle {
+        x: t <= 0 ? root.width * 2 : 0;
+        y: 0;
+        width: root.width / grid;
+        height: root.height / grid;
+        transform-scale: grid;
+        transform-origin: { x: 0px, y: 0px };
+        Kept {
+            width: 100%;
+            height: 100%;
+            fade: t;
+            GroundPicture {
+                width: 100%;
+                height: 100%;
+                light: two;
+                a: root.a;
+                light-x: root.light-x;
+                light-y: root.light-y;
+            }
+        }
+    }
+}
+
+// The surface a panel is made of: a dark glass a shade above the ground, a
+// hairline rim, and a thin line of light along its top edge -- the one
+// "metallic" detail Quiet OS allows itself.
+export component QuietSurface inherits Rectangle {
+    in property <color> tint: Quiet.warm;
+    border-radius: 18px * Quiet.u;
+    background: @linear-gradient(180deg, #171e25 0%, #10161c 100%);
+    border-width: 1px;
+    border-color: Quiet.hair;
+    Rectangle {
+        x: parent.border-radius;
+        y: 1px;
+        width: parent.width - parent.border-radius * 2;
+        height: Quiet.hairline;
+        background: @linear-gradient(90deg, #ffffff00 0%, tint.with-alpha(0.32) 50%, #ffffff00 100%);
+    }
+}
+
+// Living Focus: the one capsule that a vertical list's focus is, travelling
+// from row to row.
+//
+// Its two edges animate separately -- the edge toward the new row quickly
+// (`t-lead`), the edge it leaves slowly (`t-trail`) -- so it stretches the
+// way it is going and gathers itself on arrival, in either direction and
+// whatever the rows' heights, without being told which way it moved. A new
+// row retargets both edges from wherever they are, so a held key is one long
+// stretch rather than a queue of steps. While stretched it draws in at the
+// sides a little, as something with volume would. Placed over the whole list
+// (its parent's size); the logical focus never waits for it.
+export component LivingFocus inherits Rectangle {
+    // The row it belongs on, in this element's coordinates.
+    in property <length> to-y;
+    in property <length> to-h;
+    in property <bool> shown: true;
+    // 1 with the remote on it; lower for where the remote was (a section
+    // a page belongs to, a list another column has the remote of).
+    in property <float> strength: 1;
+    in property <color> tint: Quiet.warm;
+    // How far in from the list's edges the capsule stands, and how wide it
+    // is (negative: the list's width less the inset).
+    in property <length> inset: 0px;
+    in property <length> to-w: -1px;
+
+    // Assigned on a change of value, not bound (see QuietGround): a list's
+    // model is replaced when its data is polled, and a bound animation would
+    // play to where it already is, asking for frames at rest.
+    property <bool> snap: true;
+    property <length> lead-top;
+    property <length> lead-bot;
+    property <length> trail-top;
+    property <length> trail-bot;
+    property <length> w;
+    property <float> a;
+    property <color> c;
+    animate lead-top, lead-bot { duration: snap ? 0ms : QuietMotion.t-lead; easing: QuietCurves.glide; }
+    animate trail-top, trail-bot, w { duration: snap ? 0ms : QuietMotion.t-trail; easing: QuietCurves.glide; }
+    animate a { duration: snap ? 0ms : QuietMotion.t-wash; easing: QuietCurves.ease; }
+    animate c { duration: snap ? 0ms : QuietMotion.t-aura; easing: QuietCurves.ease; }
+    function aim() {
+        lead-top = to-y;
+        lead-bot = to-y + to-h;
+        trail-top = to-y;
+        trail-bot = to-y + to-h;
+        w = to-w < 0 ? root.width - inset * 2 : to-w;
+    }
+    init => {
+        aim();
+        a = shown ? strength : 0;
+        c = tint;
+        snap = false;
+    }
+    changed to-y => { aim(); }
+    changed to-h => { aim(); }
+    changed to-w => { aim(); }
+    changed width => { aim(); }
+    changed shown => { a = shown ? strength : 0; }
+    changed strength => { a = shown ? strength : 0; }
+    changed tint => { c = tint; }
+    property <bool> moving: QuietMotion.on;
+    changed moving => {
+        aim();
+        c = tint;
+    }
+
+    property <length> top: min(lead-top, trail-top);
+    property <length> bot: max(lead-bot, trail-bot);
+    property <length> stretch: max(0px, bot - top - to-h);
+    property <length> pinch: min(stretch * 0.025, 7px * Quiet.u);
+
+
+    body := Rectangle {
+        x: inset + pinch;
+        y: top;
+        width: max(0px, w - pinch * 2);
+        height: bot - top;
+        border-radius: min(self.height, to-h) / 2;
+        background: c.with-alpha(0.12 * a);
+        border-width: 1px;
+        border-color: c.with-alpha(0.07 * a);
+
+        // The light along its upper edge.
+        Rectangle {
+            x: parent.border-radius;
+            y: 1px;
+            width: max(0px, parent.width - parent.border-radius * 2);
+            height: Quiet.hairline;
+            background: @linear-gradient(90deg, #ffffff00 0%, #fff6e8.with-alpha(0.2 * a) 50%, #ffffff00 100%);
+        }
+    }
+}

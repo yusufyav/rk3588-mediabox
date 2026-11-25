@@ -1428,6 +1428,16 @@ impl Output {
                 })
                 .unwrap_or_default(),
             current_badges,
+            wire: screen_view(wire_mode, wire_colour, wire_mode.is_some() && status.hdr_applied()),
+            draft: screen_view(
+                self.draft_mode(),
+                self.draft_colour(),
+                self.draft_mode().is_some_and(|mode| match self.draft_colour() {
+                    Some(colour) => mode.carries_hdr10(colour),
+                    None => mode.hdr10(),
+                }),
+            ),
+            unsaved,
             current_rows: vec![
                 ("Ekran".into(), offer.sink_name.clone().unwrap_or_else(|| "—".into())),
                 ("Bağlantı".into(), offer.connector.clone()),
@@ -1804,6 +1814,39 @@ pub struct CellView {
     pub now: bool,
 }
 
+/// A mode, as Quiet OS's display model draws it. `known` false: nothing is
+/// drawn as measured that was not.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScreenView {
+    pub known: bool,
+    pub width: i32,
+    pub height: i32,
+    pub size: String,
+    pub rate: String,
+    pub bits: i32,
+    /// "RGB", "4:4:4", "4:2:2", "4:2:0"; "" where the choice is left to the
+    /// display (`Otomatik`).
+    pub chroma: String,
+    /// HDR10 committed (the wire), or carried at this choice (the draft).
+    pub hdr: bool,
+}
+
+fn screen_view(mode: Option<&OutputModeOffer>, colour: Option<ColorMode>, hdr: bool) -> ScreenView {
+    let Some(mode) = mode else {
+        return ScreenView::default();
+    };
+    ScreenView {
+        known: true,
+        width: i32::from(mode.width),
+        height: i32::from(mode.height),
+        size: format!("{} × {}", mode.width, mode.height),
+        rate: format!("{} Hz{}", hz_text(mode.refresh_mhz), if mode.interlaced { " i" } else { "" }),
+        bits: colour.map_or(0, |colour| i32::from(colour.bits)),
+        chroma: colour.map(format_short).unwrap_or_default(),
+        hdr,
+    }
+}
+
 /// One card of the simple face.
 #[derive(Debug, Clone, Default)]
 pub struct SimpleView {
@@ -1848,6 +1891,11 @@ pub struct View {
     /// (word, tone)
     pub current_badges: Vec<(String, String)>,
     pub current_rows: Vec<(String, String)>,
+    /// What the driver reports on the wire, what the draft would put there,
+    /// and whether the two are different things.
+    pub wire: ScreenView,
+    pub draft: ScreenView,
+    pub unsaved: bool,
     pub picker_open: bool,
     pub picker_title: String,
     pub picker_note: String,

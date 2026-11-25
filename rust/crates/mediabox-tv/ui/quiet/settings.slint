@@ -1,0 +1,852 @@
+import { VitalsModel, SettingRow } from "../components.slint";
+import { PointerTarget, PointerPanArea, PanState } from "../pointer.slint";
+import { SettingNav, Icon, ChoiceItem } from "../kit.slint";
+import { CoolingPane, CoolingView } from "../cooling.slint";
+import { OutputPane, OutputView } from "../output.slint";
+import { EthernetPane, EthernetView } from "../ethernet.slint";
+import { AudioPane, AudioView } from "../audio.slint";
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves, QuietCam } from "motion.slint";
+import { QuietGround, LivingFocus, Kept, Still } from "materials.slint";
+import { SettingsScene } from "scenes.slint";
+import { Overline, HomeCrumb, QuietBar, QuietToggle, QuietChoice } from "controls.slint";
+import { QuietPlaces } from "home.slint";
+
+// The settings family under Quiet OS: the settings themselves (QuietSettings)
+// and the frame the radios and the diagnostics stand in (QuietFrame).
+//
+// Spatial navigation, within what these screens are. Each screen is its own
+// conditional component in app.slint and is built when it comes up, so
+// nothing outlives a screen but what Rust holds; continuity is drawn, not
+// kept. The settings' emblem -- the home screen's Ayarlar scene -- flies from
+// where that scene stood when the settings are opened from the home screen
+// (`came-from`), and back again (home.slint). Between categories the heading
+// and the rows move in the direction the column moved, the emblem's
+// mechanism turns a notch, and the focus is one capsule travelling.
+
+// The settings' emblem: the home screen's Ayarlar scene, smaller, at the top
+// right, its mechanism turning a notch when the category changes.
+component SettingsEmblem inherits Rectangle {
+    // The category, as a number: it turns when this does.
+    in property <float> turn;
+    in property <bool> small;
+    property <float> u: Quiet.u;
+    // Where the window's camera has it; in its place, on a screen that does
+    // not move it.
+    in property <QuietCam> camera: { flight: 1 };
+    callback shrink-to(float);
+    property <float> fly: 1 - camera.flight;
+
+    property <bool> snap: true;
+    property <float> notch;
+    animate notch { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    init => {
+        notch = turn;
+        snap = false;
+        // First: without motion it is there by the next line, and nothing
+        // has changed to be told of.
+        root.shrink-to(small ? 1 : 0);
+        stand();
+    }
+    changed turn => { notch = turn; }
+    // In its place, and which of its two (-1 on its way): assigned when that
+    // changes, not bound -- the camera is one value, and all that reads it is
+    // told of every part of it that moves. The place is what is told apart,
+    // not only that it is in one: without motion it goes from one to the
+    // other with nothing between. How large that place is stays bound, for
+    // the panel's mode may change under it.
+    property <float> place: camera.flight == 1 && (camera.shrink == 0 || camera.shrink == 1) ? camera.shrink : -1;
+    property <bool> standing;
+    property <float> stands-at;
+    property <length> resting: QuietPlaces.emblem-size(stands-at);
+    function stand() {
+        standing = place >= 0;
+        if standing {
+            stands-at = place;
+        }
+    }
+    changed place => { stand(); }
+    changed small => { root.shrink-to(small ? 1 : 0); }
+
+    x: QuietPlaces.emblem-x(camera.shrink) + (QuietPlaces.stage-x - QuietPlaces.emblem-x(camera.shrink)) * fly;
+    y: QuietPlaces.emblem-y(camera.shrink) + (QuietPlaces.stage-y - QuietPlaces.emblem-y(camera.shrink)) * fly;
+    width: QuietPlaces.emblem-size(camera.shrink) + (QuietPlaces.stage-size - QuietPlaces.emblem-size(camera.shrink)) * fly;
+    height: self.width;
+
+    // What the home screen's camera still had to travel when it was left.
+    property <float> owed: camera.settings ? camera.row - camera.cam + camera.arrive : 0;
+    property <float> d: clamp((notch - turn) * 0.3, -0.45, 0.45);
+    SettingsScene {
+        width: 100%;
+        height: 100%;
+        tint: Quiet.aura("settings");
+        d: root.d + root.owed;
+        d-far: root.d * 0.7 + root.owed;
+        d-near: root.d * 1.3 + root.owed;
+        presence: 0.55 + 0.35 * fly;
+        kept: standing;
+        box: resting;
+    }
+}
+
+// A line of text that, when it changes, moves out the way the screen went
+// and lets the new one in from the other side. Two slots take turns, so a
+// change while one is still moving retargets rather than waits.
+component SwapText inherits Rectangle {
+    in property <string> text;
+    // Where this text stands in the screen's order (a category, a page
+    // under it): a higher one arrives from below.
+    in property <float> order;
+    in property <length> font-size;
+    in property <int> font-weight: 400;
+    in property <length> letter-spacing: 0px;
+    in property <color> ink: Quiet.ink;
+    in property <length> travel: 26px * Quiet.u;
+
+    property <bool> snap: true;
+    property <bool> on-a: true;
+    // Assigned, never bound: what each slot shows and where the screen
+    // stood must not follow `text` and `order` before the change is seen.
+    property <string> a-text;
+    property <string> b-text;
+    property <float> a: 1;
+    property <float> b: 0;
+    property <float> a-side;
+    property <float> b-side;
+    property <float> last;
+    animate a, b { duration: snap ? 0ms : QuietMotion.t-enter; easing: QuietCurves.glide; }
+    init => {
+        a-text = text;
+        last = order;
+        snap = false;
+    }
+
+    changed text => {
+        if (on-a && text == a-text) || (!on-a && text == b-text) {
+            return;
+        }
+        // Back to the word still on its way out: it turns round.
+        if on-a && b > 0.02 && text == b-text {
+            on-a = false;
+            b = 1;
+            a = 0;
+            last = order;
+            return;
+        }
+        if !on-a && a > 0.02 && text == a-text {
+            on-a = true;
+            a = 1;
+            b = 0;
+            last = order;
+            return;
+        }
+        // Still coming in: it goes on coming in, as the new word. Taking the
+        // other slot would drop a word that is still half there.
+        if on-a && a < 0.6 {
+            a-text = text;
+            last = order;
+            return;
+        }
+        if !on-a && b < 0.6 {
+            b-text = text;
+            last = order;
+            return;
+        }
+        let dir = order >= last ? 1 : -1;
+        last = order;
+        if on-a {
+            b-text = text;
+            b-side = dir;
+            a-side = 0 - dir;
+            snap = true;
+            b = 0;
+            snap = false;
+            b = 1;
+            a = 0;
+        } else {
+            a-text = text;
+            a-side = dir;
+            b-side = 0 - dir;
+            snap = true;
+            a = 0;
+            snap = false;
+            a = 1;
+            b = 0;
+        }
+        on-a = !on-a;
+    }
+
+    if a > 0: Rectangle {
+        x: 0;
+        y: Quiet.px((1 - a) * a-side * travel);
+        width: parent.width;
+        height: parent.height;
+        // Kept, as the home screen's name is (home.slint, `NameBlock`).
+        property <length> room: Quiet.px(12px * Quiet.u);
+        Kept {
+            x: -room;
+            y: -room;
+            width: parent.width + 2 * room;
+            height: parent.height + 2 * room;
+            fade: a;
+            Text {
+                x: room;
+                y: room;
+                width: parent.width - 2 * room;
+                height: parent.height - 2 * room;
+                text: a-text;
+                color: root.ink;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                letter-spacing: root.letter-spacing;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+    if b > 0: Rectangle {
+        x: 0;
+        y: Quiet.px((1 - b) * b-side * travel);
+        width: parent.width;
+        height: parent.height;
+        // Kept, as the home screen's name is (home.slint, `NameBlock`).
+        property <length> room: Quiet.px(12px * Quiet.u);
+        Kept {
+            x: -room;
+            y: -room;
+            width: parent.width + 2 * room;
+            height: parent.height + 2 * room;
+            fade: b;
+            Text {
+                x: room;
+                y: room;
+                width: parent.width - 2 * room;
+                height: parent.height - 2 * room;
+                text: b-text;
+                color: root.ink;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                letter-spacing: root.letter-spacing;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
+    }
+}
+
+// The column of categories (or a screen's own groups) down the left: one
+// Living Focus that fits the name it reaches, full strength while the remote
+// is on the column and quieter for the place a page belongs to.
+component CategoryColumn inherits Rectangle {
+    in property <[SettingNav]> items;
+    in property <int> current;
+    in property <bool> active;
+    in property <string> pointer-zone;
+    property <float> u: Quiet.u;
+    property <length> pitch: 55px * u;
+    property <length> row-h: 51px * u;
+    property <length> cat-w: 0px;
+
+    if items.length > 0 && current >= 0: LivingFocus {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        to-y: current * pitch;
+        to-h: row-h;
+        to-w: cat-w;
+        strength: active ? 1 : 0.62;
+    }
+    // Kept: drawn when the remote moves here, not while the page settles.
+    Still {
+        y: 0;
+        width: 100%;
+        height: Quiet.px(max(1, items.length) * pitch);
+        for item[i] in items: Rectangle {
+            property <bool> here: i == current;
+            property <bool> lit: here && active;
+            x: 0;
+            y: i * pitch;
+            width: root.width;
+            height: row-h;
+            property <length> fit: min(root.width, line.preferred-width + 30px * u);
+            function lift() {
+                if here {
+                    root.cat-w = fit;
+                }
+            }
+            init => { lift(); }
+            changed here => { lift(); }
+            changed fit => { lift(); }
+
+            // The arrow over another name: the wash fits the name, as the
+            // reference draws it; the target is the whole width, so the hand
+            // does not have to find the word.
+            Rectangle {
+                x: 0;
+                y: 0;
+                height: parent.height;
+                width: fit;
+                border-radius: self.height / 2;
+                background: !here && cat.lit ? Quiet.hover : transparent;
+            }
+            line := HorizontalLayout {
+                x: 15px * u;
+                y: 0;
+                height: parent.height;
+                width: self.preferred-width;
+                spacing: 15px * u;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        name: item.icon;
+                        size: 21px * u;
+                        ink: lit ? Quiet.warm-hi : here ? #dccfb9 : #8f9ba5;
+                    }
+                }
+                Text {
+                    text: item.label;
+                    color: lit ? Quiet.warm-hi : here ? #e6dccb : (cat.lit ? #e3e6e6 : #8f9ba5);
+                    font-size: 19px * u;
+                    font-weight: lit ? 560 : 480;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+                }
+            }
+            cat := PointerTarget {
+                enabled: root.pointer-zone != "";
+                zone: root.pointer-zone;
+                index: i;
+                veil: false;
+            }
+        }
+    }
+}
+
+// The settings family's frame under Quiet OS, for the screens that are not
+// QuietSettings itself -- the radios, the diagnostics: the same ground and
+// bar, the same way back, the same column down the left (the screen's own
+// groups, or the one page it is), the same heading over the same content
+// column (`Quiet.content-x`, `content-top`), the same emblem. The screen
+// draws its content.
+export component QuietFrame inherits Rectangle {
+    in property <VitalsModel> vitals;
+    in property <string> crumb;
+    in property <string> column;
+    in property <[SettingNav]> items;
+    in property <int> current;
+    in property <bool> active;
+    in property <string> pointer-zone;
+    // Off where the screen draws an instrument of its own in its place.
+    in property <bool> emblem: true;
+    in property <string> page-label;
+    in property <string> page-icon;
+    in property <string> overline;
+    in property <string> title;
+    in property <string> blurb;
+
+    property <float> u: Quiet.u;
+    property <length> left: 121px * u;
+
+    QuietGround {
+        width: 100%;
+        height: 100%;
+        aura: Quiet.aura("settings");
+        strength: 0.55;
+    }
+    QuietBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 104px * u;
+        vitals: root.vitals;
+        crumb: root.crumb;
+    }
+    if emblem: SettingsEmblem {
+        turn: root.current;
+    }
+
+    HomeCrumb {
+        x: left;
+        y: 170px * u;
+    }
+
+    Overline {
+        x: left;
+        y: 259px * u;
+        height: 15px * u;
+        text: root.column;
+    }
+    Rectangle {
+        x: 590px * u;
+        y: 259px * u;
+        width: 1px;
+        height: 691px * u;
+        background: Quiet.hair;
+    }
+
+    CategoryColumn {
+        x: Quiet.px(left);
+        y: Quiet.px(286px * u);
+        width: 413px * u;
+        height: 691px * u;
+        items: root.items;
+        current: root.current;
+        active: root.active;
+        pointer-zone: root.pointer-zone;
+    }
+
+    // Or the one page this is.
+    if items.length == 0 && page-label != "": Rectangle {
+        x: left;
+        y: 286px * u;
+        width: page-line.preferred-width + 30px * u;
+        height: 51px * u;
+        border-radius: self.height / 2;
+        background: Quiet.current;
+        page-line := HorizontalLayout {
+            x: 15px * u;
+            y: 0;
+            height: parent.height;
+            width: self.preferred-width;
+            spacing: 15px * u;
+            VerticalLayout {
+                alignment: center;
+                Icon { name: root.page-icon; size: 21px * u; ink: #dccfb9; }
+            }
+            Text {
+                text: root.page-label;
+                color: #e6dccb;
+                font-size: 19px * u;
+                font-weight: 520;
+                vertical-alignment: center;
+                wrap: no-wrap;
+            }
+        }
+    }
+
+    Overline {
+        x: Quiet.content-x;
+        y: 259px * u;
+        height: 15px * u;
+        text: root.overline;
+        color: Quiet.warm;
+    }
+    SwapText {
+        x: Quiet.px(Quiet.content-x - 2px * u);
+        y: Quiet.px(286px * u);
+        width: Quiet.content-w;
+        height: Quiet.t-title * 1.15;
+        text: root.title;
+        order: root.current;
+        font-size: Quiet.t-title;
+        font-weight: 560;
+        letter-spacing: -68px * u * 0.05;
+    }
+    if blurb != "": Text {
+        x: Quiet.content-x;
+        y: 286px * u + Quiet.t-title * 1.15 + 8px * u;
+        width: Quiet.content-w;
+        text: root.blurb;
+        color: #91a0aa;
+        font-size: Quiet.t-body;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// The system settings, quietly: the same categories, cards, readings, pages,
+// editors, lists and questions as ui/settings.slint, from the same
+// properties, under one heading and down one column.
+//
+// The rows are placed by arithmetic from Rust's counts (`SettingRow`'s
+// n-header, n-reading, n-card), as the classic face places them, so where
+// the focused row is -- and how far the list scrolls -- is known without
+// measuring. The editors are the classic ones, given this face's column;
+// their own lists and questions cover the panel as they always do.
+export component QuietSettings inherits Rectangle {
+    in property <[SettingNav]> sections;
+    in property <int> section;
+    in property <bool> on-sections;
+    in property <[SettingRow]> rows;
+    in property <int> row-index;
+    in property <string> page;
+    in property <string> page-icon;
+    in property <string> title;
+    in property <string> blurb;
+    in property <bool> cooling;
+    in property <CoolingView> cooling-view;
+    in property <bool> output;
+    in property <OutputView> output-view;
+    in property <bool> ethernet;
+    in property <EthernetView> ethernet-view;
+    in property <bool> audio;
+    in property <AudioView> audio-view;
+    in property <VitalsModel> vitals;
+    in property <bool> choice-open;
+    in property <string> choice-title;
+    in property <[ChoiceItem]> choice;
+    in property <int> choice-focus;
+    in property <string> choice-note;
+    // The screen before this one (src/main.rs, `show`): from the home
+    // screen, the emblem flies in from the scene it was there.
+    in property <string> came-from;
+
+    property <float> u: Quiet.u;
+    property <bool> editor: cooling || output || ethernet || audio;
+    property <string> section-label: sections.length > section && section >= 0 ? sections[section].label : "";
+    // Where on the screen's map this is: a category, and half a step
+    // deeper for a page opened from it.
+    property <float> order: section + (page == "" ? 0 : 0.5);
+
+    property <length> left: 121px * u;
+    property <length> nav-w: 413px * u;
+    property <length> content-x: editor ? 650px * u : 708px * u;
+    // An editor is the classic face's own pane (output, cooling, audio,
+    // ethernet), laid out for the classic content column: it gets the width
+    // up to the right margin and the height from just under the back crumb,
+    // and its heading is the smaller one, so a chart or a table is never
+    // squeezed under the reference's large list title.
+    property <length> content-w: editor ? root.width - content-x - 100px * u
+                                        : min(868px * u, root.width - content-x - 121px * u);
+    property <length> title-size: editor ? 46px * u : Quiet.t-title;
+    property <length> head-y: editor ? 124px * u : 259px * u;
+    property <length> title-y: head-y + 27px * u;
+    property <length> list-top: editor ? 252px * u : 462px * u;
+    property <length> bottom: root.height - (editor ? 28px : 56px) * u;
+
+    property <length> card-h: 74px * u;
+    property <length> reading-h: 62px * u;
+    property <length> header-h: 58px * u;
+
+    // ---- arriving
+    //
+    // The emblem's way in from the home screen's scene (QuietCam.flight),
+    // and `enter`: the rows settling after a category or a page changed,
+    // from the side the column moved to. A change while they are still
+    // settling does not start them over, so a held key never holds the list
+    // away from its place.
+    in property <QuietCam> camera;
+    callback fly(float, bool);
+    callback shrink-to(float);
+    property <bool> snap: true;
+    property <float> enter;
+    property <float> last-order;
+    animate enter { duration: snap ? 0ms : QuietMotion.t-enter; easing: QuietCurves.glide; }
+    init => {
+        last-order = order;
+        snap = false;
+        root.fly(1, !(came-from == "home" && camera.settings));
+    }
+    changed order => {
+        if abs(enter) < 0.1 {
+            snap = true;
+            enter = order > last-order ? 1 : -1;
+            snap = false;
+            enter = 0;
+        }
+        last-order = order;
+    }
+
+    clip: true;
+
+    QuietGround {
+        width: 100%;
+        height: 100%;
+        aura: Quiet.aura("settings");
+        strength: 0.55;
+    }
+
+    QuietBar {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 104px * u;
+        vitals: root.vitals;
+        crumb: page == "" ? "Ayarlar" : "Ayarlar  /  " + section-label;
+    }
+
+    SettingsEmblem {
+        turn: root.order;
+        small: editor;
+        camera: root.camera;
+        shrink-to(to) => { root.shrink-to(to); }
+    }
+
+    // ---- the way home
+    HomeCrumb {
+        x: left;
+        y: 170px * u;
+    }
+
+    // ---- the categories
+    Overline {
+        x: left;
+        y: 259px * u;
+        height: 15px * u;
+        text: "KATEGORİLER";
+    }
+    Rectangle {
+        x: 590px * u;
+        y: 259px * u;
+        width: 1px;
+        height: 691px * u;
+        background: Quiet.hair;
+    }
+
+    // Under a page too: a click on a category leaves the page for it
+    // (src/main.rs, `pointer_point`).
+    CategoryColumn {
+        x: Quiet.px(left);
+        y: Quiet.px(286px * u);
+        width: nav-w;
+        height: 691px * u;
+        items: root.sections;
+        current: root.section;
+        active: on-sections && !choice-open;
+        pointer-zone: "settings-sections";
+    }
+
+    // ---- the chosen category, or the page a card opened
+    Overline {
+        x: content-x;
+        y: head-y;
+        height: 15px * u;
+        text: page == "" ? "MEDIABOX  /  AYARLAR" : "AYARLAR  /  SAYFA";
+        color: Quiet.warm;
+        animate x, y { duration: QuietMotion.t-shared; easing: QuietCurves.camera; }
+    }
+    SwapText {
+        x: Quiet.px(content-x - 2px * u);
+        y: Quiet.px(title-y);
+        width: content-w;
+        height: title-size * 1.15;
+        text: root.title;
+        order: root.order;
+        font-size: title-size;
+        font-weight: 560;
+        letter-spacing: -title-size * 0.05;
+    }
+    SwapText {
+        x: Quiet.px(content-x);
+        y: Quiet.px(title-y + title-size * 1.15 + 8px * u);
+        width: content-w;
+        height: Quiet.t-body * 1.4;
+        text: root.blurb;
+        order: root.order;
+        font-size: Quiet.t-body;
+        ink: #91a0aa;
+        travel: 14px * u;
+    }
+
+    if cooling: CoolingPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: cooling-view;
+        active-pane: !on-sections;
+        titled: false;
+    }
+    if ethernet: EthernetPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: ethernet-view;
+        active-pane: !on-sections;
+    }
+    if audio: AudioPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: audio-view;
+        active-pane: !on-sections;
+    }
+    if output: OutputPane {
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        view: output-view;
+        active-pane: !on-sections;
+    }
+
+    // The list: hairlines between names and values. It scrolls only when the
+    // focused row would otherwise fall off the bottom.
+    if !editor: Rectangle {
+        property <length> focus-y: rows.length == 0 ? 0px : y-of(rows[row-index]);
+        property <length> focus-h: rows.length == 0 ? 0px : h-of(rows[row-index]);
+        property <length> content-h: rows.length == 0 ? 0px : y-of(rows[rows.length - 1]) + h-of(rows[rows.length - 1]);
+        // A hand moves the list itself, to its very end -- the readings
+        // under the last row anyone can choose included -- and lets it
+        // coast. A wheel walks the focus instead (Rust,
+        // `Settings::wheel_rows`), the list given back to the focus first,
+        // so the focused row never leaves the screen.
+        pan := PanState {
+            surface: "settings-rows";
+            remote: max(0px, focus-y + focus-h + 8px * u - parent.height);
+            limit: max(0px, content-h + 8px * u - parent.height);
+            remote-duration: QuietMotion.t-move;
+        }
+
+        x: content-x;
+        y: list-top;
+        width: content-w;
+        height: bottom - list-top;
+        clip: true;
+
+        pure function y-of(r: SettingRow) -> length {
+            return r.n-header * header-h + r.n-reading * reading-h + r.n-card * card-h;
+        }
+        pure function h-of(r: SettingRow) -> length {
+            return r.kind == "header" ? header-h : r.kind == "reading" ? reading-h : card-h;
+        }
+
+        PointerPanArea { surface: "settings-rows"; }
+
+        Rectangle {
+            x: 0;
+            y: -pan.value;
+            width: parent.width;
+            animate y { duration: pan.duration; easing: QuietCurves.ease; }
+
+            if rows.length > 0 && rows[0].kind != "header": Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: 1px;
+                background: Quiet.hair;
+            }
+
+            // The focus: the Living Focus, travelling from row to row.
+            LivingFocus {
+                x: 0;
+                y: 0;
+                width: 100%;
+                height: 100%;
+                shown: rows.length > 0 && !on-sections && !choice-open
+                    && (rows[row-index].kind == "link" || rows[row-index].kind == "action")
+                    && rows[row-index].enabled;
+                to-y: focus-y + 5px * u;
+                to-h: max(0px, focus-h - 10px * u);
+            }
+
+            for entry[i] in rows: Rectangle {
+                property <bool> card: entry.kind == "link" || entry.kind == "action";
+                property <bool> focused: card && entry.enabled && !on-sections && !choice-open && i == row-index;
+                property <color> name-ink: !entry.enabled ? Quiet.dim : focused ? Quiet.warm-hi : (card ? #e2e5e7 : #b9c2c8);
+                // Settling after a change of category, each row a little
+                // further than the one above it, so the list fans in.
+                property <length> settle: enter * (16px + min(i, 8) * 7px) * u;
+                property <float> seen: 1 - abs(enter) * 0.55;
+                y: y-of(entry) + settle;
+                width: parent.width;
+                height: h-of(entry);
+
+                // A heading inside a category: a quiet label over the rows it
+                // names, in the names' own case.
+                if entry.kind == "header": Text {
+                    x: 22px * u;
+                    y: parent.height - 17px * u - 12px * u;
+                    height: 17px * u;
+                    text: entry.label;
+                    color: #80919a;
+                    opacity: seen;
+                    font-size: Quiet.t-small;
+                    font-weight: 600;
+                    letter-spacing: 14px * u * 0.04;
+                    vertical-alignment: center;
+                }
+
+                // The arrow over a row: a fainter wash, the focus's own
+                // capsule is the one above.
+                if entry.kind != "header": Rectangle {
+                    x: 0;
+                    y: 5px * u;
+                    width: parent.width;
+                    height: parent.height - 10px * u;
+                    border-radius: self.height / 2;
+                    background: !focused && row-target.lit ? Quiet.hover : transparent;
+                }
+                // The hairline under the focused row steps aside.
+                if entry.kind != "header": Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: focused ? transparent : Quiet.hair;
+                    animate background { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+                }
+
+                if entry.kind != "header": HorizontalLayout {
+                    padding-left: 22px * u;
+                    padding-right: 22px * u;
+                    spacing: 20px * u;
+
+                    Text {
+                        text: entry.label;
+                        color: name-ink;
+                        opacity: seen;
+                        animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+                        font-size: card ? Quiet.t-row : 18px * u;
+                        font-weight: card ? 520 : 460;
+                        letter-spacing: -20px * u * 0.02;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        min-width: 0px;
+                    }
+                    if entry.toggle >= 0: VerticalLayout {
+                        alignment: center;
+                        QuietToggle {
+                            on: entry.toggle == 1;
+                            enabled: entry.enabled;
+                        }
+                    }
+                    if entry.value != "": Text {
+                        text: entry.value;
+                        color: !entry.enabled ? Quiet.dim : Quiet.tone(entry.tone);
+                        opacity: seen;
+                        font-size: 16px * u;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        max-width: parent.width * 0.5;
+                    }
+                    if entry.kind == "link": VerticalLayout {
+                        alignment: center;
+                        Icon {
+                            name: "chevron";
+                            size: 15px * u;
+                            ink: focused ? Quiet.warm : #71838a;
+                        }
+                    }
+                }
+
+                row-target := PointerTarget {
+                    enabled: card && entry.enabled;
+                    zone: card && entry.enabled ? "settings-rows" : "";
+                    index: i;
+                    veil: false;
+                }
+            }
+        }
+    }
+
+    // A short list opened from a card, over everything, in this face's own
+    // hand: the same items, focus and note Rust gives the classic sheet, its
+    // rows under the same zone and indices.
+    if choice-open: QuietChoice {
+        width: 100%;
+        height: 100%;
+        title: choice-title;
+        items: choice;
+        focus-at: choice-focus;
+        note: choice-note;
+    }
+}

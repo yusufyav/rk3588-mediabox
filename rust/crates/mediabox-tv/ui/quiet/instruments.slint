@@ -1,0 +1,1164 @@
+import { SocView } from "../components.slint";
+import { Icon, NetGlyph } from "../kit.slint";
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+import { QuietSurface } from "materials.slint";
+import { Overline } from "controls.slint";
+
+// Quiet OS's instruments: what a setting is about, drawn. The radio's field,
+// the cable, the way sound goes, the picture on the wire, the fan, the SoC.
+//
+// Each draws readings the screen already has and nothing else. One that was
+// not measured is not drawn as zero: it is dimmed and says "—". Nothing here
+// runs by itself -- a value that changed is eased to once (`Eased`: assigned,
+// not bound, so a poll that brings the same reading asks for no frame), and
+// the one exception, the Bluetooth field's search ring, runs while a search
+// does. Nothing here is operated or pointed at.
+
+// A reading eased to: 0 to 1, or -1 for none.
+component Eased inherits Rectangle {
+    in property <float> to;
+    out property <float> at;
+    width: 0px;
+    height: 0px;
+    property <bool> snap: true;
+    property <float> v;
+    animate v { duration: snap ? 0ms : QuietMotion.t-enter; easing: QuietCurves.glide; }
+    at: v;
+    init => {
+        v = to;
+        snap = false;
+    }
+    changed to => { v = to; }
+    property <bool> moving: QuietMotion.on;
+    changed moving => { v = to; }
+}
+
+// A colour eased to, the same way.
+component Tinted inherits Rectangle {
+    in property <color> to;
+    out property <color> at: v;
+    width: 0px;
+    height: 0px;
+    property <bool> snap: true;
+    property <color> v;
+    animate v { duration: snap ? 0ms : QuietMotion.t-enter; easing: QuietCurves.ease; }
+    init => {
+        v = to;
+        snap = false;
+    }
+    changed to => { v = to; }
+    property <bool> moving: QuietMotion.on;
+    changed moving => { v = to; }
+}
+
+// The heat of a reading in Celsius: the slate, the warm tone, the red of the
+// verdicts, at the figures the diagnostics' own words change at (70, 85).
+export global Heat {
+    public pure function of(celsius: float) -> color {
+        return celsius < 0 ? #5c6a75
+            : celsius < 70 ? #7fa3a0.mix(#dcc08a, 1 - clamp((celsius - 45) / 25, 0, 1))
+            : #dcc08a.mix(#e0a092, 1 - clamp((celsius - 70) / 15, 0, 1));
+    }
+    public pure function text(celsius: float) -> string {
+        return celsius < 0 ? "—" : round(celsius) + " °C";
+    }
+}
+
+// A dial: three quarters of a circle, its reading from the lower left round.
+export component Dial inherits Rectangle {
+    // 0 to 1; -1 for no reading.
+    in property <float> value;
+    in property <color> tint: Quiet.warm;
+    in property <length> line: 5px * Quiet.u;
+    // A mark on the scale, where something happens; -1 for none.
+    in property <float> mark: -1;
+    in property <color> mark-tint: #e0a092;
+
+    eased := Eased { to: max(0, root.value); }
+    hue := Tinted { to: root.tint; }
+    property <angle> a: 135deg + 270deg * clamp(eased.at, 0.004, 1);
+    pure function px(a: angle) -> float { return 50 + 45 * cos(a); }
+    pure function py(a: angle) -> float { return 50 + 45 * sin(a); }
+
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        fill: transparent;
+        stroke: Quiet.ink.with-alpha(0.12);
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        MoveTo { x: root.px(135deg); y: root.py(135deg); }
+        ArcTo { x: root.px(405deg); y: root.py(405deg); radius-x: 45; radius-y: 45; large-arc: true; sweep: true; }
+    }
+    if root.mark >= 0: Path {
+        property <angle> m: 135deg + 270deg * root.mark;
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        fill: transparent;
+        stroke: root.mark-tint.with-alpha(0.6);
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        MoveTo { x: root.px(m); y: root.py(m); }
+        ArcTo { x: root.px(405deg); y: root.py(405deg); radius-x: 45; radius-y: 45; sweep: true; }
+    }
+    if root.value >= 0: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        fill: transparent;
+        stroke: hue.at;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        MoveTo { x: root.px(135deg); y: root.py(135deg); }
+        ArcTo { x: root.px(root.a); y: root.py(root.a); radius-x: 45; radius-y: 45; large-arc: root.a > 315deg; sweep: true; }
+    }
+}
+
+// A share of something, as a thin bar.
+export component Meter inherits Rectangle {
+    in property <float> value;
+    in property <color> tint: Quiet.warm;
+    eased := Eased { to: max(0, root.value); }
+    hue := Tinted { to: root.tint; }
+    height: 5px * Quiet.u;
+    border-radius: self.height / 2;
+    background: Quiet.ink.with-alpha(0.1);
+    Rectangle {
+        x: 0;
+        width: parent.width * clamp(eased.at, 0, 1);
+        height: parent.height;
+        border-radius: self.height / 2;
+        background: root.value < 0 ? transparent : hue.at;
+    }
+}
+
+// ---------------------------------------------------------------- the radios
+
+component FieldArc inherits Rectangle {
+    in property <bool> lit;
+    in property <color> ink;
+    in property <string> commands;
+    in property <length> line;
+    hue := Tinted { to: root.lit ? root.ink : Quiet.ink.with-alpha(0.12); }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: root.commands;
+        fill: transparent;
+        stroke: hue.at;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+    }
+}
+
+// The Wi-Fi field: the transmitter, and four fronts lit as far as the signal
+// reaches. Struck through while the radio is off.
+export component SignalField inherits Rectangle {
+    in property <bool> known;
+    in property <bool> on;
+    in property <bool> linked;
+    in property <int> bars;
+    in property <string> ssid;
+    property <float> u: Quiet.u;
+    property <color> ink: bars >= 3 ? #9bbfae : bars == 2 ? #dfc9a5 : #dcc08a;
+    property <int> lit: on && linked ? bars : 0;
+
+    for front[i] in [
+        "M43.6 69.6A9 9 0 0 1 56.4 69.6",
+        "M34.4 60.4A22 22 0 0 1 65.6 60.4",
+        "M25.2 51.2A35 35 0 0 1 74.8 51.2",
+        "M16 42A48 48 0 0 1 84 42",
+    ]: FieldArc {
+        width: parent.width;
+        height: parent.width;
+        commands: front;
+        lit: i < root.lit;
+        ink: root.ink;
+        line: (i < root.lit ? 5.5px : 4px) * root.u;
+    }
+    Rectangle {
+        x: root.width / 2 - self.width / 2;
+        y: root.width * 0.77 - self.height / 2;
+        width: 13px * u;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: root.lit > 0 ? root.ink : Quiet.ink.with-alpha(0.25);
+    }
+    if known && !on: Path {
+        width: parent.width;
+        height: parent.width;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: "M22 22L78 78";
+        fill: transparent;
+        stroke: #dcc08a;
+        stroke-width: 4px * root.u;
+        stroke-line-cap: round;
+    }
+    Text {
+        x: 0;
+        y: root.width * 0.86;
+        width: root.width;
+        text: !known ? "Okunuyor…" : !on ? "Kapalı" : linked ? ssid : "Bağlı değil";
+        color: linked && on ? Quiet.ink : Quiet.muted;
+        font-size: 17px * u;
+        font-weight: 560;
+        horizontal-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    if known && on && linked: Text {
+        x: 0;
+        y: root.width * 0.86 + 25px * u;
+        width: root.width;
+        text: bars >= 4 ? "Çok güçlü" : bars == 3 ? "Güçlü" : bars == 2 ? "Orta" : "Zayıf";
+        color: root.ink;
+        font-size: Quiet.t-small;
+        horizontal-alignment: center;
+    }
+}
+
+// The front of a search going out: only while one runs.
+component SearchRing inherits Rectangle {
+    property <float> p: mod(animation-tick(), 1800ms) / 1800ms;
+    Rectangle {
+        width: root.width * (0.3 + 0.7 * root.p);
+        height: self.width;
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2;
+        border-radius: self.width / 2;
+        border-width: max(1px, 2px * Quiet.u);
+        border-color: #dfc9a5.with-alpha(0.55 * (1 - root.p));
+    }
+}
+
+// The Bluetooth field: the mark, the connected devices on the near orbit and
+// the other paired ones on the far one; a ring going out while it searches.
+export component BluetoothField inherits Rectangle {
+    in property <bool> known;
+    in property <bool> on;
+    in property <bool> scanning;
+    in property <int> linked;
+    in property <int> paired;
+    property <float> u: Quiet.u;
+    property <int> idle: max(0, paired - linked);
+
+    for ring[i] in [0.56, 0.92]: Rectangle {
+        width: root.width * ring;
+        height: self.width;
+        x: (root.width - self.width) / 2;
+        y: (root.width - self.height) / 2;
+        border-radius: self.width / 2;
+        border-width: max(1px, 1.2px * u);
+        border-color: i == 0 && linked > 0 ? #9bbfae.with-alpha(0.5) : Quiet.ink.with-alpha(0.14);
+    }
+    if scanning && on && QuietMotion.on: SearchRing {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.width;
+    }
+    for i in min(linked, 6): Rectangle {
+        property <angle> a: -90deg + 360deg * i / max(1, min(linked, 6));
+        width: 17px * u;
+        height: self.width;
+        x: root.width / 2 + root.width * 0.28 * cos(a) - self.width / 2;
+        y: root.width / 2 + root.width * 0.28 * sin(a) - self.height / 2;
+        border-radius: self.width / 2;
+        background: #9bbfae;
+    }
+    for i in min(idle, 8): Rectangle {
+        property <angle> a: -60deg + 360deg * i / max(1, min(idle, 8));
+        width: 13px * u;
+        height: self.width;
+        x: root.width / 2 + root.width * 0.46 * cos(a) - self.width / 2;
+        y: root.width / 2 + root.width * 0.46 * sin(a) - self.height / 2;
+        border-radius: self.width / 2;
+        background: #10171d;
+        border-width: max(1px, 1.6px * u);
+        border-color: Quiet.muted;
+    }
+    Icon {
+        x: (root.width - self.width) / 2;
+        y: (root.width - self.height) / 2;
+        name: "bluetooth";
+        size: root.width * 0.24;
+        ink: on ? Quiet.ink : Quiet.faint;
+    }
+    Text {
+        x: 0;
+        y: root.width + 8px * u;
+        width: root.width;
+        text: !known ? "Okunuyor…" : !on ? "Kapalı" : scanning ? "Aranıyor" : linked > 0 ? linked + " bağlı" : "Bağlı cihaz yok";
+        color: linked > 0 && on ? Quiet.ink : Quiet.muted;
+        font-size: 17px * u;
+        font-weight: 560;
+        horizontal-alignment: center;
+    }
+}
+
+// ------------------------------------------------------------------ the bands
+//
+// What an editor is about, along the top of its page: the same width as the
+// page and no taller than the settings under it leave (the settings keep
+// their own rows' height and width).
+
+// A word under a figure.
+component Caption inherits Text {
+    color: Quiet.label;
+    font-size: Quiet.t-over;
+    font-weight: 650;
+    letter-spacing: Quiet.t-over * 0.14;
+    horizontal-alignment: center;
+    overflow: elide;
+    wrap: no-wrap;
+}
+
+component Figure inherits Text {
+    color: Quiet.ink;
+    font-size: 19px * Quiet.u;
+    font-weight: 560;
+    horizontal-alignment: center;
+    overflow: elide;
+    wrap: no-wrap;
+}
+
+// Something at an end of the way, in a ring.
+component Node inherits Rectangle {
+    in property <string> icon;
+    in property <bool> live;
+    in property <color> tint: Quiet.warm;
+    hue := Tinted { to: root.live ? root.tint : Quiet.ink.with-alpha(0.28); }
+    border-radius: self.width / 2;
+    background: hue.at.with-alpha(0.08);
+    border-width: max(1px, 1.6px * Quiet.u);
+    border-color: hue.at;
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        name: root.icon;
+        size: parent.width * 0.46;
+        ink: root.live ? Quiet.ink : Quiet.faint;
+    }
+}
+
+// The way between two: a line when something goes along it, dashes when not.
+component Way inherits Rectangle {
+    in property <bool> live;
+    in property <color> tint: Quiet.warm;
+    height: 2px * Quiet.u;
+    grown := Eased { to: root.live ? 1 : 0; }
+    for i in 9: Rectangle {
+        x: root.width * (i * 2 + 0.5) / 18;
+        width: root.width / 18;
+        height: parent.height;
+        background: Quiet.ink.with-alpha(0.16);
+    }
+    Rectangle {
+        x: 0;
+        width: root.width * grown.at;
+        height: parent.height;
+        border-radius: self.height / 2;
+        background: root.tint;
+    }
+}
+
+// A wired port: the socket, the cable, the network.
+export component PortBand inherits QuietSurface {
+    in property <bool> link;
+    in property <bool> addressed;
+    in property <bool> fixed;
+    in property <string> address;
+    in property <string> gateway;
+    property <float> u: Quiet.u;
+    property <length> mid: 60px * u;
+    property <color> good: #9bbfae;
+
+    // The socket: lit contacts while the cable carries.
+    Rectangle {
+        x: 56px * u;
+        y: mid - self.height / 2;
+        width: 84px * u;
+        height: 64px * u;
+        border-radius: 9px * u;
+        border-width: max(1px, 1.8px * u);
+        border-color: link ? good : Quiet.ink.with-alpha(0.28);
+        background: link ? good.with-alpha(0.08) : transparent;
+        for i in 8: Rectangle {
+            x: (13px + i * 7.6px) * u;
+            y: 10px * u;
+            width: 3.6px * u;
+            height: 17px * u;
+            background: link ? good : Quiet.ink.with-alpha(0.22);
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: parent.height - self.height;
+            width: 32px * u;
+            height: 12px * u;
+            border-radius: 3px * u;
+            background: link ? good.with-alpha(0.5) : Quiet.ink.with-alpha(0.18);
+        }
+    }
+    Way {
+        x: 152px * u;
+        y: mid - self.height / 2;
+        width: root.width * 0.5 - 85px * u - self.x;
+        live: link;
+        tint: good;
+    }
+    Figure {
+        x: root.width * 0.5 - 75px * u;
+        y: mid - 25px * u;
+        width: 150px * u;
+        text: !link ? "Kablo yok" : fixed ? "Elle" : "DHCP";
+        color: link ? Quiet.ink : #dcc08a;
+    }
+    Caption {
+        x: root.width * 0.5 - 75px * u;
+        y: mid + 5px * u;
+        width: 150px * u;
+        text: "ADRES ALMA";
+    }
+    Way {
+        x: root.width * 0.5 + 85px * u;
+        y: mid - self.height / 2;
+        width: root.width - 152px * u - self.x;
+        live: link && addressed;
+        tint: good;
+    }
+    Node {
+        x: root.width - 140px * u;
+        y: mid - self.height / 2;
+        width: 72px * u;
+        height: self.width;
+        icon: "network";
+        live: link && addressed;
+        tint: good;
+    }
+    Figure {
+        x: 24px * u;
+        y: root.height - 34px * u;
+        width: root.width * 0.5;
+        text: addressed ? address : "Adres yok";
+        horizontal-alignment: left;
+    }
+    Text {
+        x: root.width * 0.5;
+        y: root.height - 32px * u;
+        width: root.width * 0.5 - 24px * u;
+        text: gateway == "" ? "Ağ geçidi —" : "Ağ geçidi " + gateway;
+        color: Quiet.muted;
+        font-size: 15px * u;
+        horizontal-alignment: right;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// A speaker's place round the listener: lit where the sink declares it
+// (`bit` of `declared`, src/screens/audio.rs `speaker_bits`).
+component SpeakerSpot inherits Rectangle {
+    in property <int> bit;
+    in property <int> declared;
+    in property <float> at-x;
+    in property <float> at-y;
+    property <bool> lit: mod(floor(declared / bit), 2) == 1;
+    width: 13px * Quiet.u;
+    height: 10px * Quiet.u;
+    x: 150px * Quiet.u * at-x - self.width / 2;
+    y: 150px * Quiet.u * at-y - self.height / 2;
+    border-radius: 3px * Quiet.u;
+    background: lit ? Quiet.warm : transparent;
+    border-width: max(1px, 1.2px * Quiet.u);
+    border-color: lit ? Quiet.warm : Quiet.ink.with-alpha(0.16);
+}
+
+// The way sound goes: what plays, the form it leaves in, the device, and how
+// loud -- the fronts off the device are the volume's own, unlit where the
+// receiver keeps it. Round it, the speakers the sink declares.
+export component SoundBand inherits QuietSurface {
+    in property <string> source;
+    in property <string> form;
+    in property <bool> bitstream;
+    in property <string> icon;
+    in property <string> device;
+    in property <int> volume;
+    in property <bool> muted;
+    in property <bool> receiver-volume;
+    in property <int> speakers;
+    property <float> u: Quiet.u;
+    property <length> mid: 76px * u;
+    property <bool> playing: source != "";
+    property <length> form-w: 250px * u;
+    property <length> form-x: root.width * 0.40 - form-w / 2;
+    property <length> dev-x: root.width * 0.645;
+
+    Node {
+        x: 78px * u;
+        y: mid - self.height / 2;
+        width: 74px * u;
+        height: self.width;
+        icon: "play";
+        live: playing;
+    }
+    Figure {
+        x: 24px * u;
+        y: mid + 46px * u;
+        width: 182px * u;
+        text: playing ? source : "Oynatma yok";
+        color: playing ? Quiet.ink : Quiet.muted;
+    }
+    Way {
+        x: 164px * u;
+        y: mid - self.height / 2;
+        width: form-x - 12px * u - self.x;
+        live: playing;
+    }
+    // The form it leaves in: one solid run of bits, or samples.
+    Rectangle {
+        x: form-x;
+        y: mid - self.height / 2;
+        width: form-w;
+        height: 62px * u;
+        border-radius: self.height / 2;
+        border-width: max(1px, 1.4px * u);
+        border-color: playing ? Quiet.warm.with-alpha(0.6) : Quiet.ink.with-alpha(0.16);
+        background: playing ? Quiet.warm.with-alpha(0.07) : transparent;
+        for i in 21: Rectangle {
+            property <float> tall: bitstream ? 0.5 : 0.22 + 0.5 * abs(sin(i * 47deg));
+            x: parent.width * (0.14 + 0.036 * i);
+            y: (parent.height - self.height) / 2;
+            width: (bitstream ? 5px : 3px) * u;
+            height: parent.height * tall;
+            border-radius: bitstream ? 0px : self.width / 2;
+            background: playing ? Quiet.warm.with-alpha(0.85) : Quiet.ink.with-alpha(0.16);
+        }
+    }
+    Figure {
+        x: form-x - 40px * u;
+        y: mid + 46px * u;
+        width: form-w + 80px * u;
+        text: form;
+        color: playing ? Quiet.ink : Quiet.muted;
+    }
+    Way {
+        x: form-x + form-w + 12px * u;
+        y: mid - self.height / 2;
+        width: dev-x - 12px * u - self.x;
+        live: playing && icon != "";
+    }
+    Node {
+        x: dev-x;
+        y: mid - self.height / 2;
+        width: 74px * u;
+        height: self.width;
+        icon: root.icon == "" ? "speaker" : root.icon;
+        live: icon != "" && !muted;
+    }
+    loud := Eased { to: root.muted || root.receiver-volume ? 0 : root.volume / 100; }
+    for i in 4: Path {
+        x: dev-x + 74px * u;
+        y: mid - self.height / 2;
+        width: 82px * u;
+        height: 104px * u;
+        viewbox-width: 82;
+        viewbox-height: 104;
+        fill: transparent;
+        stroke: Quiet.ink.with-alpha(0.12).mix(Quiet.warm, 1 - clamp(loud.at * 4 - i, 0, 1));
+        stroke-width: 3.4px * u;
+        stroke-line-cap: round;
+        commands: i == 0 ? "M12 40A20 20 0 0 1 12 64" : i == 1 ? "M26 30A36 36 0 0 1 26 74"
+            : i == 2 ? "M40 20A52 52 0 0 1 40 84" : "M54 10A68 68 0 0 1 54 94";
+    }
+    if muted: Path {
+        x: dev-x - 4px * u;
+        y: mid - self.height / 2;
+        width: 82px * u;
+        height: self.width;
+        viewbox-width: 100;
+        viewbox-height: 100;
+        commands: "M18 18L82 82";
+        fill: transparent;
+        stroke: #e0a092;
+        stroke-width: 4px * u;
+        stroke-line-cap: round;
+    }
+    Figure {
+        x: dev-x - 90px * u;
+        y: mid + 46px * u;
+        width: 300px * u;
+        text: icon == "" ? "Ses gitmiyor" : muted ? "Sessiz" : receiver-volume ? "Ses seviyesi alıcıda" : "%" + volume;
+        color: muted ? #e0a092 : icon == "" ? Quiet.muted : Quiet.ink;
+    }
+    Text {
+        x: 24px * u;
+        y: root.height - 30px * u;
+        width: root.width * 0.78;
+        text: device;
+        color: Quiet.muted;
+        font-size: 16px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    // The room, where the sink said what is in it.
+    if speakers > 0: Rectangle {
+        x: root.width - self.width - 34px * u;
+        y: 22px * u;
+        width: 150px * u;
+        height: 150px * u;
+        border-radius: 14px * u;
+        border-width: max(1px, 1px * u);
+        border-color: Quiet.ink.with-alpha(0.1);
+        Rectangle {
+            width: 15px * u;
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: parent.height * 0.56 - self.height / 2;
+            border-radius: self.width / 2;
+            border-width: max(1px, 1.6px * u);
+            border-color: Quiet.muted;
+        }
+        SpeakerSpot { declared: speakers; bit: 1; at-x: 0.17; at-y: 0.18; }
+        SpeakerSpot { declared: speakers; bit: 4; at-x: 0.5; at-y: 0.13; }
+        SpeakerSpot { declared: speakers; bit: 2; at-x: 0.83; at-y: 0.18; }
+        SpeakerSpot { declared: speakers; bit: 8; at-x: 0.335; at-y: 0.13; }
+        SpeakerSpot { declared: speakers; bit: 16; at-x: 0.11; at-y: 0.62; }
+        SpeakerSpot { declared: speakers; bit: 32; at-x: 0.89; at-y: 0.62; }
+        SpeakerSpot { declared: speakers; bit: 128; at-x: 0.3; at-y: 0.9; }
+        SpeakerSpot { declared: speakers; bit: 256; at-x: 0.7; at-y: 0.9; }
+        SpeakerSpot { declared: speakers; bit: 64; at-x: 0.5; at-y: 0.92; }
+    }
+}
+
+// A mode, as a picture on the wire would be: the frame to the scale of 4K
+// UHD, the depth as the steps of its ramp, the chroma as the samples of one
+// four by two block, HDR as the light it throws. Faint and dashed while it is
+// only wanted.
+export component ScreenModel inherits Rectangle {
+    in property <bool> known;
+    in property <int> px-w;
+    in property <int> px-h;
+    in property <string> size;
+    in property <string> rate;
+    in property <int> bits;
+    in property <string> chroma;
+    in property <bool> hdr;
+    in property <bool> wanted;
+    in property <string> heading;
+    property <float> u: Quiet.u;
+    property <length> full-w: 250px * u;
+    property <length> full-h: 141px * u;
+    property <color> ink: wanted ? Quiet.warm : Quiet.ink;
+    scale-w := Eased { to: root.known ? clamp(root.px-w / 3840, 0.12, 1.07) : 0; }
+    scale-h := Eased { to: root.known ? clamp(root.px-h / 2160, 0.12, 1.07) : 0; }
+    // Only what is on the wire throws it: a draft could carry HDR, and does not yet.
+    glow := Eased { to: root.hdr && !root.wanted ? 1 : 0; }
+
+    Overline {
+        x: 0;
+        y: 0;
+        height: 15px * u;
+        text: root.heading;
+        color: wanted ? Quiet.warm : Quiet.label;
+    }
+    set := Rectangle {
+        x: 0;
+        y: 28px * u;
+        width: full-w;
+        height: full-h;
+
+        // The light HDR throws round the set.
+        Rectangle {
+            x: -parent.width * 0.16;
+            y: -parent.height * 0.22;
+            width: parent.width * 1.32;
+            height: parent.height * 1.44;
+            background: @radial-gradient(circle, #dcc08a.with-alpha(0.3 * glow.at) 0%, #dcc08a.with-alpha(0) 68%);
+        }
+        // 4K UHD, the scale.
+        Rectangle {
+            width: 100%;
+            height: 100%;
+            border-radius: 7px * u;
+            border-width: max(1px, 1px * u);
+            border-color: Quiet.ink.with-alpha(0.16);
+            background: #0b1117;
+        }
+        // The frame sent, from the lower left as resolutions nest.
+        if known: Rectangle {
+            x: 0;
+            y: parent.height - self.height;
+            width: min(1, scale-w.at) * parent.width;
+            height: min(1, scale-h.at) * parent.height;
+            border-radius: 7px * u;
+            border-width: max(1px, (wanted ? 1.2px : 2px) * u);
+            border-color: ink.with-alpha(wanted ? 0.6 : 0.85);
+            background: ink.with-alpha(wanted ? 0.04 : 0.08);
+            clip: true;
+            // The ramp: as many steps as four bits fewer would make -- the
+            // same four times finer at 10 bit that the wire is.
+            for i in bits >= 10 ? 32 : bits >= 8 ? 8 : 0: Rectangle {
+                x: parent.width * i / (bits >= 10 ? 32 : 8);
+                y: parent.height - self.height;
+                width: parent.width / (bits >= 10 ? 32 : 8) + 1px;
+                height: parent.height * 0.22;
+                background: ink.with-alpha(0.03 + 0.4 * (i + 1) / (bits >= 10 ? 32 : 8));
+            }
+        }
+        if !known: Text {
+            width: 100%;
+            height: 100%;
+            text: "—";
+            color: Quiet.faint;
+            font-size: 30px * u;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            x: parent.width * 0.36;
+            y: parent.height + 6px * u;
+            width: parent.width * 0.28;
+            height: 3px * u;
+            border-radius: self.height / 2;
+            background: Quiet.ink.with-alpha(0.22);
+        }
+    }
+    Text {
+        x: full-w + 26px * u;
+        y: 30px * u;
+        width: root.width - self.x;
+        text: known ? size : "Bilinmiyor";
+        color: wanted ? Quiet.warm-hi : Quiet.ink;
+        font-size: 25px * u;
+        font-weight: 560;
+        letter-spacing: -25px * u * 0.02;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    Text {
+        x: full-w + 26px * u;
+        y: 64px * u;
+        width: root.width - self.x;
+        text: known ? rate : "";
+        color: Quiet.muted;
+        font-size: 18px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    // One block of chroma: eight samples of light, and of colour as many as
+    // the form sends.
+    Rectangle {
+        x: full-w + 26px * u;
+        y: 100px * u;
+        width: 84px * u;
+        height: 40px * u;
+        for i in known ? 8 : 0: Rectangle {
+            property <int> sx: mod(i, 4);
+            property <int> sy: floor(i / 4);
+            property <bool> sampled: chroma == "RGB" || chroma == "4:4:4"
+                || (chroma == "4:2:2" && mod(sx, 2) == 0)
+                || (chroma == "4:2:0" && mod(sx, 2) == 0 && sy == 0);
+            x: sx * 21px * u;
+            y: sy * 21px * u;
+            width: 18px * u;
+            height: self.width;
+            border-radius: 4px * u;
+            background: Quiet.ink.with-alpha(0.08);
+            Rectangle {
+                visible: sampled;
+                width: 8px * u;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: sx < 2 ? #6f9fc4 : #c98a86;
+            }
+        }
+    }
+    Text {
+        x: full-w + 122px * u;
+        y: 98px * u;
+        width: root.width - self.x;
+        text: !known ? "" : chroma == "" ? "Renk otomatik" : chroma == "RGB" ? "RGB" : "YCbCr " + chroma;
+        color: Quiet.app;
+        font-size: 16px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    Text {
+        x: full-w + 122px * u;
+        y: 122px * u;
+        width: root.width - self.x;
+        text: !known ? "" : (bits > 0 ? bits + " bit" : "") + (bits > 0 && hdr ? "  ·  " : "") + (hdr ? (wanted ? "HDR taşır" : "HDR") : "");
+        color: hdr ? #dcc08a : Quiet.muted;
+        font-size: 16px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+}
+
+// The display: the connector, the picture on the wire and -- while a draft
+// differs, or is on trial -- the one wanted beside it, never over it.
+export component DisplayBand inherits QuietSurface {
+    in property <string> sink;
+    in property <string> load;
+    in property <string> load-max;
+    in property <float> load-fill;
+    in property <bool> unsaved;
+    in property <bool> trying;
+    property <float> u: Quiet.u;
+    property <length> cable-x: 30px * u;
+
+    @children
+
+    Text {
+        x: cable-x;
+        y: root.height - 33px * u;
+        width: 330px * u;
+        text: sink;
+        color: Quiet.muted;
+        font-size: Quiet.t-small;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    // The cable: how much of what this link carries is in use.
+    Text {
+        x: root.width - 400px * u;
+        y: root.height - 33px * u;
+        width: 160px * u;
+        text: "Hat yükü " + load + " " + load-max;
+        color: Quiet.muted;
+        font-size: Quiet.t-small;
+        horizontal-alignment: right;
+        wrap: no-wrap;
+    }
+    Meter {
+        x: root.width - 226px * u;
+        y: root.height - 26px * u;
+        width: 196px * u;
+        value: load-fill > 0 ? load-fill : -1;
+        tint: load-fill > 0.98 ? #dcc08a : #9bbfae;
+    }
+    if !unsaved && !trying: Text {
+        x: root.width * 0.56;
+        y: 84px * u;
+        width: root.width * 0.44 - 30px * u;
+        text: "Ayar ile hattaki görüntü aynı";
+        color: Quiet.dim;
+        font-size: 16px * u;
+        horizontal-alignment: right;
+        wrap: no-wrap;
+        overflow: elide;
+    }
+}
+
+// ------------------------------------------------------------------- the fan
+
+// The rotor: turned by how hard it is driven, not by time -- no line on this
+// board measures its speed, and the picture does not pretend to.
+export component FanDial inherits Rectangle {
+    // 0 to 1; -1 for none.
+    in property <float> duty;
+    property <float> u: Quiet.u;
+    eased := Eased { to: max(0, root.duty); }
+    Dial {
+        width: 100%;
+        height: 100%;
+        value: root.duty;
+        tint: #9bb9c4;
+    }
+    rotor := Rectangle {
+        x: root.width * 0.2;
+        y: root.height * 0.2;
+        width: root.width * 0.6;
+        height: self.width;
+        for i in 5: Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 100;
+            viewbox-height: 100;
+            commands: "M50 44C46 30 50 12 64 8C78 12 74 34 55 45Z";
+            fill: Quiet.ink.with-alpha(root.duty > 0 ? 0.34 : 0.12);
+            stroke: transparent;
+            transform-rotation: i * 72deg + eased.at * 300deg;
+        }
+        Rectangle {
+            x: parent.width * 0.4;
+            y: parent.height * 0.4;
+            width: parent.width * 0.2;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: Quiet.ink.with-alpha(root.duty > 0 ? 0.6 : 0.25);
+        }
+    }
+}
+
+component StripWord inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    in property <string> sub;
+    alignment: center;
+    spacing: 3px * Quiet.u;
+    Caption { text: label; horizontal-alignment: left; }
+    Text {
+        text: value;
+        color: Quiet.ink;
+        font-size: 25px * Quiet.u;
+        font-weight: 560;
+        wrap: no-wrap;
+    }
+    if sub != "": Text {
+        text: sub;
+        color: Quiet.muted;
+        font-size: Quiet.t-small;
+        wrap: no-wrap;
+    }
+}
+
+// The cooling page's readings: how warm the SoC is against where the kernel
+// slows it down, how hard the fan is driven, the curve and its state.
+export component CoolingStrip inherits QuietSurface {
+    in property <string> temperature;
+    in property <float> celsius;
+    in property <string> duty;
+    in property <string> duty-raw;
+    in property <float> duty-at;
+    in property <string> curve;
+    in property <string> profile;
+    in property <string> state;
+    in property <string> state-tone;
+    property <float> u: Quiet.u;
+    property <length> d: root.height - 28px * u;
+
+    // 30 to 90 degrees; the red is from the first passive trip point, 75.
+    Dial {
+        x: 24px * u;
+        y: 16px * u;
+        width: d;
+        height: d;
+        value: celsius < 0 ? -1 : clamp((celsius - 30) / 60, 0, 1);
+        mark: 0.75;
+        tint: Heat.of(celsius);
+        Icon {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            name: "chip";
+            size: parent.width * 0.36;
+            ink: Quiet.app;
+        }
+    }
+    StripWord {
+        x: 40px * u + d;
+        height: 100%;
+        label: "SOC SICAKLIĞI";
+        value: root.temperature;
+    }
+    FanDial {
+        x: root.width * 0.28;
+        y: 16px * u;
+        width: d;
+        height: d;
+        duty: root.duty-at;
+    }
+    StripWord {
+        x: root.width * 0.28 + d + 16px * u;
+        height: 100%;
+        label: "FAN GÜCÜ (PWM)";
+        value: root.duty;
+        sub: root.duty-raw;
+    }
+    StripWord {
+        x: root.width * 0.57;
+        height: 100%;
+        label: "EĞRİ";
+        value: root.curve;
+        sub: root.profile;
+    }
+    HorizontalLayout {
+        x: root.width - self.width - 28px * u;
+        y: (root.height - self.height) / 2;
+        width: self.preferred-width;
+        height: 24px * u;
+        spacing: 9px * u;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 9px * u;
+                height: self.width;
+                border-radius: self.width / 2;
+                background: Quiet.tone(root.state-tone == "accent" ? "warn" : root.state-tone);
+            }
+        }
+        Text {
+            text: root.state;
+            color: Quiet.tone(root.state-tone == "accent" ? "warn" : root.state-tone);
+            font-size: 16px * u;
+            font-weight: 600;
+            vertical-alignment: center;
+            wrap: no-wrap;
+        }
+    }
+}
+
+// ------------------------------------------------------------------- the SoC
+
+// One block of the die: what it is, its zone's own temperature, and the tint
+// of it. Without a reading it is only an outline.
+component DieBlock inherits Rectangle {
+    in property <string> name;
+    in property <string> part;
+    in property <float> celsius: -1;
+    in property <int> cores: 0;
+    property <float> u: Quiet.u;
+    hue := Tinted { to: Heat.of(root.celsius); }
+    border-radius: 7px * u;
+    border-width: max(1px, 1.2px * u);
+    border-color: hue.at.with-alpha(celsius < 0 ? 0.3 : 0.75);
+    background: hue.at.with-alpha(celsius < 0 ? 0.03 : 0.12);
+    Text {
+        x: 12px * u;
+        y: 9px * u;
+        width: parent.width - 24px * u;
+        text: root.name;
+        color: Quiet.ink;
+        font-size: 16px * u;
+        font-weight: 600;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    if part != "": Text {
+        x: 12px * u;
+        y: 30px * u;
+        width: parent.width - 24px * u;
+        text: root.part;
+        color: Quiet.muted;
+        font-size: 13px * u;
+        overflow: elide;
+        wrap: no-wrap;
+    }
+    Text {
+        x: 12px * u;
+        y: parent.height - self.height - 9px * u;
+        text: Heat.text(root.celsius);
+        color: celsius < 0 ? Quiet.faint : hue.at;
+        font-size: 19px * u;
+        font-weight: 600;
+    }
+    for i in cores: Rectangle {
+        x: parent.width - (12px + 14px * (mod(i, 2) + 1)) * u;
+        y: parent.height - (10px + 14px * (floor(i / 2) + 1)) * u;
+        width: 10px * u;
+        height: self.width;
+        border-radius: 2px * u;
+        background: hue.at.with-alpha(celsius < 0 ? 0.18 : 0.5);
+    }
+}
+
+// The RK3588, as its blocks: the temperatures are the kernel's own zones for
+// them, the processor's and the memory's shares the control plane's. How busy
+// the GPU and the NPU are is not read on this box, so it is not shown.
+export component SocPanel inherits Rectangle {
+    in property <SocView> soc;
+    property <float> u: Quiet.u;
+    property <length> die: min(root.width, root.height - 92px * u);
+    property <length> pad: 18px * u;
+    property <length> g: 9px * u;
+    property <length> in-w: die - pad * 2;
+    property <length> cw: (in-w - g) / 2;
+    property <length> rh: (die - pad * 2 - g * 3) / 12;
+
+    // The package: its pads, and the die.
+    for i in 22: Rectangle {
+        x: -6px * u;
+        y: 22px * u + i * (die - 44px * u) / 21.5;
+        width: 6px * u;
+        height: 5px * u;
+        background: Quiet.warm.with-alpha(0.3);
+    }
+    for i in 22: Rectangle {
+        x: die;
+        y: 22px * u + i * (die - 44px * u) / 21.5;
+        width: 6px * u;
+        height: 5px * u;
+        background: Quiet.warm.with-alpha(0.3);
+    }
+    QuietSurface {
+        x: 0;
+        y: 0;
+        width: die;
+        height: die;
+        border-radius: 14px * u;
+        DieBlock {
+            x: pad; y: pad; width: cw; height: rh * 3;
+            name: "İşlemci"; part: "Cortex-A76 · 2"; cores: 2; celsius: soc.big0;
+        }
+        DieBlock {
+            x: pad + cw + g; y: pad; width: cw; height: rh * 3;
+            name: "İşlemci"; part: "Cortex-A76 · 2"; cores: 2; celsius: soc.big1;
+        }
+        DieBlock {
+            x: pad; y: pad + rh * 3 + g; width: cw; height: rh * 3;
+            name: "İşlemci"; part: "Cortex-A55 · 4"; cores: 4; celsius: soc.little;
+        }
+        DieBlock {
+            x: pad + cw + g; y: pad + rh * 3 + g; width: cw; height: rh * 3;
+            name: "NPU"; part: "Yapay zekâ · 3"; cores: 3; celsius: soc.npu;
+        }
+        DieBlock {
+            x: pad; y: pad + rh * 6 + g * 2; width: in-w; height: rh * 3.2;
+            name: "GPU"; part: "Mali-G610"; cores: 4; celsius: soc.gpu;
+        }
+        DieBlock {
+            x: pad; y: pad + rh * 9.2 + g * 3; width: cw; height: rh * 2.8;
+            name: "Merkez"; celsius: soc.center;
+        }
+        DieBlock {
+            x: pad + cw + g; y: pad + rh * 9.2 + g * 3; width: cw; height: rh * 2.8;
+            name: "SoC"; celsius: soc.soc;
+        }
+    }
+    // Under it: how busy, how full.
+    for share[i] in [
+        { name: "İşlemci", at: soc.cpu, text: soc.cpu < 0 ? "—" : "%" + round(soc.cpu * 100) },
+        { name: "Bellek", at: soc.memory, text: soc.memory < 0 ? "—" : soc.memory-text },
+        { name: "Depolama", at: soc.storage, text: soc.storage < 0 ? "—" : soc.storage-text },
+    ]: Rectangle {
+        property <length> w: (die - 40px * u) / 3;
+        x: i * (w + 20px * u);
+        y: die + 20px * u;
+        width: w;
+        height: 72px * u;
+        Text {
+            x: 0;
+            y: 0;
+            text: share.name;
+            color: Quiet.muted;
+            font-size: Quiet.t-small;
+        }
+        Text {
+            x: 0;
+            y: 20px * u;
+            width: parent.width;
+            text: share.text;
+            color: share.at < 0 ? Quiet.faint : Quiet.ink;
+            font-size: 17px * u;
+            font-weight: 560;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+        Meter {
+            x: 0;
+            y: 52px * u;
+            width: parent.width;
+            value: share.at;
+            tint: share.at >= 0.92 ? #e0a092 : share.at >= 0.8 ? #dcc08a : #9bbfae;
+        }
+    }
+}

@@ -1,0 +1,267 @@
+import { Theme } from "../theme.slint";
+
+// Quiet OS's motion: every duration and curve its screens animate with, and
+// the few parameters the Motion Lab (lab.slint, src/motion_lab.rs) may turn
+// on a television. The defaults are the product's values; nothing but the
+// lab ever writes them.
+//
+// One technique throughout, and it is easing, not physics: a Slint property
+// animation that is retargeted whenever its binding changes. A new target
+// starts from wherever the value is at that moment, so a press never waits
+// for the last one to finish and animations never queue -- but the velocity
+// is not carried over, which is what a spring would do. Where the eye should
+// read weight (the focus capsule, the camera), two or three copies of one
+// value animate with different durations and the drawing is made from their
+// difference: the leading copy arrives first and the trailing one follows,
+// so the shape stretches toward where it is going and settles. Nothing here
+// runs while nothing changes: an animation that has reached its target asks
+// for no more frames.
+//
+// Reduced motion is `Theme.motion`: every duration below is zero without it.
+
+export global QuietMotion {
+    // ---- what the Motion Lab may turn (src/motion_lab.rs owns the ranges)
+    // Every duration, multiplied.
+    in-out property <float> pace: 1.0;
+    // How far into depth a scene recedes and how much it scales.
+    in-out property <float> depth: 1.0;
+    // How far the camera travels between two applications.
+    in-out property <float> travel: 1.0;
+    // How strongly the ground takes the chosen application's light.
+    in-out property <float> glow: 1.0;
+    // How far apart the far, main and near layers of a scene move.
+    in-out property <float> parallax: 1.0;
+    // The easing profile: 0 the product's, 1 swifter, 2 softer.
+    in-out property <int> profile: 0;
+    // Bumped by the lab's replay: the home screen's camera jumps back one
+    // application and travels again (home.slint, `changed replay`).
+    in-out property <int> replay: 0;
+    // Reduced motion, from the lab: Quiet OS's durations only.
+    in-out property <bool> reduced: false;
+    // The lab panel's own state, drawn by lab.slint.
+    in-out property <bool> lab-open: false;
+    in-out property <int> lab-row: 0;
+
+    out property <bool> on: Theme.motion && !reduced;
+    property <float> k: on ? max(0.05, pace) : 0;
+
+    // ---- the focus: a capsule with a leading and a trailing edge
+    out property <duration> t-lead: 140ms * k;
+    out property <duration> t-trail: 290ms * k;
+    // A list scrolling under the focus, and a surface's own wash.
+    out property <duration> t-move: 180ms * k;
+    out property <duration> t-wash: 120ms * k;
+    // ---- the camera between applications: main, far and near layers
+    out property <duration> t-camera: 560ms * k;
+    out property <duration> t-camera-far: 760ms * k;
+    out property <duration> t-camera-near: 420ms * k;
+    // ---- the type that names what is chosen: the name, then what it is
+    out property <duration> t-type: 300ms * k;
+    out property <duration> t-type-late: 440ms * k;
+    // ---- the camera while it is already moving, or has far to go: a held key
+    // and a reversal keep the scene and the words close behind the focus
+    out property <duration> t-brisk: 300ms * k;
+    out property <duration> t-brisk-far: 360ms * k;
+    out property <duration> t-brisk-near: 240ms * k;
+    out property <duration> t-brisk-type: 170ms * k;
+    out property <duration> t-brisk-late: 230ms * k;
+    // ---- the light
+    out property <duration> t-aura: 900ms * k;
+    // ---- a page arriving, an element carried from one screen to the next
+    out property <duration> t-enter: 320ms * k;
+    out property <duration> t-shared: 560ms * k;
+    // ---- a control's own state: a switch, a level, a sheet
+    out property <duration> t-control: 200ms * k;
+    out property <duration> t-sheet: 260ms * k;
+
+    // How visible something is at a camera offset `d` (0 here, 1 one
+    // application away): full at rest, gone well before the next one is.
+    public pure function fade(d: float, reach: float) -> float {
+        return max(0, 1 - abs(d) / max(0.01, reach));
+    }
+    // A word's: the chosen one (`lead` 1) is legible as soon as it comes into
+    // reach and all but solid half way; the one left behind (`lead` 0) is
+    // gone by then, so the two are never both half there.
+    public pure function word(d: float, lead: float) -> float {
+        return lead * max(0, 1 - d * d) + (1 - lead) * max(0, 1 - abs(d) / 0.42);
+    }
+}
+
+// The curves, apart from the parameters above: Slint cannot hand a property
+// of type easing to Rust, so the global Rust writes holds none.
+export global QuietCurves {
+    // Quick to leave and slow to settle, as a thing with weight does.
+    out property <easing> glide: QuietMotion.profile == 1 ? cubic-bezier(0.3, 1, 0.4, 1)
+        : QuietMotion.profile == 2 ? cubic-bezier(0.45, 0.05, 0.25, 1)
+        : cubic-bezier(0.22, 1, 0.36, 1);
+    // The camera: a dolly that accelerates out of rest and eases into it.
+    out property <easing> camera: QuietMotion.profile == 1 ? cubic-bezier(0.25, 0.9, 0.3, 1)
+        : QuietMotion.profile == 2 ? cubic-bezier(0.6, 0, 0.3, 1)
+        : cubic-bezier(0.45, 0, 0.2, 1);
+    // Ordinary changes of state.
+    out property <easing> ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+// The camera, as a screen reads it: where the launcher's list stands for the
+// scenes and the words, and where the settings' emblem is between the home
+// screen's stage and its own place.
+export struct QuietCam {
+    // The row it is going to.
+    row: int,
+    // Before Ayarlar, whose scene the settings' emblem is.
+    settings: bool,
+    // The main, far and near planes of a scene, the name, and what it says.
+    cam: float,
+    cam-far: float,
+    cam-near: float,
+    cam-type: float,
+    cam-late: float,
+    // How far the chosen scene still has to come as the home screen opens.
+    arrive: float,
+    // The settings' emblem: 0 where the home screen's scene stands, 1 in its
+    // own place; and 1 for its smaller place beside an editor's heading.
+    flight: float,
+    shrink: float,
+    // A leap further than the next row or two: only what was on the panel
+    // (`lo` to `hi`) and what is wanted are drawn, not everything between.
+    leap: bool,
+    lo: int,
+    hi: int,
+}
+
+export global QuietReach {
+    pure function near(c: QuietCam, i: int) -> float {
+        return min(abs(i - c.cam), min(abs(i - c.cam-far), abs(i - c.cam-near)));
+    }
+    pure function wanted(c: QuietCam, i: int) -> bool {
+        return i == c.row || !c.leap || (i >= c.lo && i <= c.hi);
+    }
+    // Whether row `i`'s scene is in reach of any plane's camera. At rest that
+    // is the chosen one alone: a neighbour exactly one away has faded out.
+    public pure function scene(c: QuietCam, i: int) -> bool {
+        return wanted(c, i) && (near(c, i) < 0.995 || (i == c.row && c.arrive > 0));
+    }
+    // Whether row `i`'s words are: its name's, or what it says (`late`).
+    public pure function words(c: QuietCam, i: int, late: bool) -> bool {
+        return wanted(c, i) && abs(i - (late ? c.cam-late : c.cam-type)) < 0.995;
+    }
+}
+
+// What moves the camera: one, in the window, for as long as the window is
+// (app.slint). Each screen is built when it comes up, so one that replaces
+// another half way through a move would start over if it kept these itself;
+// here it carries on from the numbers the eye last saw. (A global may not
+// animate.)
+//
+// Every value is assigned, never bound: `snap` zeroes the durations for one
+// assignment (an assigned animation starts from the value the property has,
+// so a zero-length one lands at once), and a jump is made without a frame of
+// its own.
+export component QuietRig inherits Rectangle {
+    width: 0px;
+    height: 0px;
+
+    // The application it stands before.
+    in-out property <string> id;
+    // The row it last left, for the Motion Lab's replay.
+    property <int> from;
+    property <int> at-row;
+    property <bool> leap;
+    property <int> lo;
+    property <int> hi;
+    property <float> cam;
+    property <float> cam-far;
+    property <float> cam-near;
+    property <float> cam-type;
+    property <float> cam-late;
+    property <float> arrive;
+    property <float> flight: 1;
+    property <float> shrink;
+    out property <QuietCam> view: {
+        row: at-row, settings: id == "settings",
+        cam: cam, cam-far: cam-far, cam-near: cam-near, cam-type: cam-type, cam-late: cam-late,
+        arrive: arrive, flight: flight, shrink: shrink, leap: leap, lo: lo, hi: hi,
+    };
+
+    property <bool> snap;
+    // Already moving, or far to go: shorter, and from speed rather than from
+    // rest. An ease-in restarted by every press of a held key never leaves.
+    property <bool> brisk;
+    // The emblem turned round, or sent on, half way.
+    property <bool> turned;
+
+    animate cam { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk : QuietMotion.t-camera; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+    animate cam-far { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-far : QuietMotion.t-camera-far; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+    animate cam-near { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-near : QuietMotion.t-camera-near; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+    animate cam-type { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-type : QuietMotion.t-type; easing: QuietCurves.glide; }
+    animate cam-late { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-late : QuietMotion.t-type-late; easing: QuietCurves.glide; }
+    animate arrive { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    animate flight { duration: snap ? 0ms : QuietMotion.t-shared; easing: turned ? QuietCurves.glide : QuietCurves.camera; }
+    animate shrink { duration: snap ? 0ms : QuietMotion.t-shared; easing: QuietCurves.camera; }
+
+    function put(at: float) {
+        cam = at;
+        cam-far = at;
+        cam-near = at;
+        cam-type = at;
+        cam-late = at;
+    }
+    // To another row, from wherever it is.
+    public function travel(to: int) {
+        if to != at-row {
+            brisk = abs(cam - round(cam)) > 0.01 || abs(to - cam) > 1.2;
+            leap = abs(to - cam) > 2.2;
+            lo = floor(min(cam, min(cam-far, cam-near)));
+            hi = ceil(max(cam, max(cam-far, cam-near)));
+            from = at-row;
+            at-row = to;
+            snap = false;
+            put(to);
+        }
+    }
+    // At a row at once; opening, with its scene coming from ahead.
+    public function land(at: int, opening: bool) {
+        snap = true;
+        at-row = at;
+        from = at;
+        put(at);
+        flight = 0;
+        arrive = opening ? 0.6 : 0;
+        snap = false;
+        arrive = 0;
+    }
+    // The emblem home (0) or to its place (1), or there at once.
+    public function fly(to: float, at-once: bool) {
+        turned = flight > 0.01 && flight < 0.99;
+        snap = at-once;
+        flight = to;
+        snap = false;
+    }
+    public function shrink-to(to: float) {
+        shrink = to;
+    }
+    // Whatever is moving, where it was going: reduced motion turned on.
+    public function rest() {
+        let emblem = flight > 0.5 ? 1 : 0;
+        snap = true;
+        put(at-row);
+        arrive = 0;
+        flight = emblem;
+        snap = false;
+    }
+    // The last move, the way it went, again.
+    public function replay() {
+        let to = at-row;
+        let was = from;
+        snap = true;
+        brisk = false;
+        leap = abs(to - was) > 2.2;
+        lo = was;
+        hi = was;
+        put(was);
+        arrive = was == to ? 0.6 : 0;
+        snap = false;
+        put(to);
+        arrive = 0;
+    }
+}

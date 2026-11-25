@@ -715,7 +715,7 @@ export component Dialog inherits Rectangle {
     in property <length> panel-w: Metrics.dialog-w;
     width: 100%;
     height: 100%;
-    background: #04050ad0;
+    background: Theme.quiet ? #05080bd9 : #04050ad0;
 
     // Nothing under a modal is pointed at through it.
     PointerShield { }
@@ -725,12 +725,21 @@ export component Dialog inherits Rectangle {
         y: (parent.height - self.height) / 2;
         width: min(panel-w, parent.width - Metrics.safe-x * 2);
         height: min(inner.preferred-height, parent.height - Metrics.safe-y * 2);
-        border-radius: Metrics.s-radius * 1.3;
-        background: Theme.quiet ? @linear-gradient(180deg, #161d24 0%, #10161c 100%)
+        border-radius: Theme.quiet ? 18px * Metrics.qu : Metrics.s-radius * 1.3;
+        background: Theme.quiet ? @linear-gradient(180deg, #171e25 0%, #10161c 100%)
             : @linear-gradient(180deg, #171a24 0%, #11141c 100%);
         border-width: 1px;
-        border-color: Theme.s-line;
+        border-color: Theme.quiet ? #d0dce224 : Theme.s-line;
         clip: true;
+
+        // Quiet OS's line of light along a surface's top edge.
+        if Theme.quiet: Rectangle {
+            x: parent.border-radius;
+            y: 1px;
+            width: parent.width - parent.border-radius * 2;
+            height: max(1px, 1px * Metrics.qu);
+            background: @linear-gradient(90deg, #ffffff00 0%, #dfc9a552 50%, #ffffff00 100%);
+        }
 
         PointerSwallow { }
 
@@ -1089,7 +1098,7 @@ export component Backdrop inherits Rectangle {
         height: parent.height * 0.9;
         background: @radial-gradient(circle, #17345640 0%, #17345600 62%);
     }
-    // Quiet OS's two soft pools (quiet.slint, `QuietGround`).
+    // Quiet OS's two soft pools (quiet/materials.slint, `QuietGround`).
     if Theme.quiet: Rectangle {
         x: parent.width * 0.83 - self.width / 2;
         y: parent.height * 0.5 - self.height / 2;
@@ -1350,12 +1359,15 @@ export component NetGlyph inherits Rectangle {
         stroke-width: root.size / 9;
         stroke-line-cap: round;
     }
-    for arc[i] in [
+    // Not there at all on a cable, rather than `visible: false`: that is a
+    // clip of no size, which the renderer makes a circle of no radius and
+    // flattens to its deepest level -- 25 000 calls a frame for three arcs
+    // nobody sees (femtovg 0.25.1, `tesselate_bezier`).
+    for arc[i] in root.eth-up ? [] : [
         "M8.6 15.3a4.8 4.8 0 0 1 6.8 0",
         "M5.4 12.1a9.3 9.3 0 0 1 13.2 0",
         "M2.3 8.9a13.6 13.6 0 0 1 19.4 0",
     ]: Path {
-        visible: !root.eth-up;
         width: 100%;
         height: 100%;
         viewbox-width: 24;

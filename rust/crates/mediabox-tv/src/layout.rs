@@ -2,7 +2,7 @@
 //!
 //! One application, one state, one set of screens' logic: the layout only
 //! chooses which Slint component draws the home screen and the settings
-//! (`ui/home.slint` and `ui/settings.slint`, or `ui/quiet.slint`). Every
+//! (`ui/home.slint` and `ui/settings.slint`, or `ui/quiet/`). Every
 //! focus, pointer zone, row and action is the same under both.
 //!
 //! Kept in a file of its own beside the session file rather than in

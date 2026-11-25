@@ -1,0 +1,516 @@
+import { Theme } from "../theme.slint";
+import { VitalsModel } from "../components.slint";
+import { PointerTarget, PointerPanArea, PanState, PointerShield, PointerSwallow, PointerClose } from "../pointer.slint";
+import { Icon, ChoiceItem, NetGlyph } from "../kit.slint";
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+import { QuietSurface, LivingFocus, Still } from "materials.slint";
+
+// Quiet OS's controls: the small parts every one of its screens is made of.
+
+// The small capitals over a block: tracked out, never shouted.
+export component Overline inherits Text {
+    font-size: Quiet.t-over;
+    font-weight: 650;
+    letter-spacing: Quiet.t-over * 0.21;
+    color: Quiet.label;
+    wrap: no-wrap;
+    vertical-alignment: center;
+}
+
+// The way out of the settings family, at the top left where a page's way
+// out is looked for: home, in one press -- the remote's Home under the arrow
+// ("go-home"). One level back is the remote's Back and the mouse's right
+// button, as everywhere.
+export component HomeCrumb inherits Rectangle {
+    property <float> u: Quiet.u;
+    width: row.preferred-width + 30px * u;
+    height: 38px * u;
+    border-radius: self.height / 2;
+    background: target.lit ? #ffffff1a : #ffffff08;
+    animate background { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+
+    row := HorizontalLayout {
+        x: 13px * u;
+        width: self.preferred-width;
+        height: parent.height;
+        spacing: 10px * u;
+        VerticalLayout {
+            alignment: center;
+            Icon {
+                name: "home";
+                size: 17px * u;
+                ink: target.lit ? Quiet.warm-hi : #c9c4ba;
+            }
+        }
+        Overline {
+            text: "ANA MENÜ";
+            color: target.lit ? Quiet.warm-hi : #a9b2b6;
+        }
+    }
+    target := PointerTarget {
+        zone: "go-home";
+        index: 0;
+        veil: false;
+    }
+}
+
+// A key drawn as a keycap, holding a stroked mark rather than a glyph the
+// typeface may not have.
+export component KeyCap inherits Rectangle {
+    in property <string> mark;
+    property <float> u: Quiet.u;
+    width: 29px * u;
+    height: 27px * u;
+    border-radius: 5px * u;
+    border-width: 1px;
+    border-color: #63717b66;
+    Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 13px * u;
+        height: 13px * u;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: mark;
+        fill: transparent;
+        stroke: #c1cbc8;
+        stroke-width: 1.4px * u;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+    }
+}
+
+// One reading of System Presence: a small drawn mark and the words, in the
+// warning tone with its own word only when it is worth noticing.
+component Presence inherits HorizontalLayout {
+    in property <string> mark;
+    in property <string> text;
+    in property <bool> warn;
+    property <float> u: Quiet.u;
+    spacing: 7px * u;
+    VerticalLayout {
+        alignment: center;
+        Path {
+            width: 14px * u;
+            height: 14px * u;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: mark;
+            fill: transparent;
+            stroke: warn ? #dcc08a : #7f8d97;
+            stroke-width: 1.5px * u;
+            stroke-line-cap: round;
+            stroke-line-join: round;
+        }
+    }
+    Text {
+        text: root.text;
+        color: warn ? #dcc08a : #8a97a1;
+        font-size: Quiet.t-small;
+        font-weight: warn ? 560 : 450;
+        vertical-alignment: center;
+        overflow: elide;
+        wrap: no-wrap;
+        max-width: 260px * u;
+    }
+}
+
+// The mark, the name, where you are; whether the box is on a network, and
+// the time. On the home screen (`details`) the time carries System Presence
+// under it, as a watch face carries its complications: which network the box
+// is on, what is left on its disk and how warm its SoC is. Every one of them
+// is the device's own reading (`VitalsModel`); one it does not have says
+// "—" rather than a number.
+export component QuietBar inherits Rectangle {
+    in property <VitalsModel> vitals;
+    in property <string> crumb;
+    in property <bool> details;
+    property <float> u: Quiet.u;
+    property <bool> online: vitals.eth-up || vitals.wifi-up;
+
+    // Two groups, each kept: they change when the device says something new.
+    Still {
+        x: Quiet.px(92px * u);
+        y: Quiet.px(26px * u);
+        width: Quiet.px(700px * u);
+        height: Quiet.px(60px * u);
+        HorizontalLayout {
+            x: 100px * u - parent.x;
+            y: 34px * u - parent.y;
+            height: 44px * u;
+            spacing: 17px * u;
+            alignment: start;
+
+            VerticalLayout {
+                alignment: center;
+                padding-top: 8px * u;
+                Rectangle {
+                    width: 24px * u;
+                    height: 24px * u;
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: 28;
+                        viewbox-height: 28;
+                        commands: "M4 3.8 L23.5 14 L4 24.2 Z";
+                        fill: transparent;
+                        stroke: #dedad1;
+                        stroke-width: 2.1px * u;
+                        stroke-line-join: round;
+                    }
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: 28;
+                        viewbox-height: 28;
+                        commands: "M4 24.2 L13.2 14 L4 3.8";
+                        fill: transparent;
+                        stroke: #d5b992;
+                        stroke-width: 2.1px * u;
+                        stroke-line-join: round;
+                    }
+                }
+            }
+            Text {
+                text: "MediaBox";
+                color: Quiet.ink;
+                font-size: 31px * u;
+                font-weight: 700;
+                letter-spacing: -31px * u * 0.05;
+                vertical-alignment: center;
+            }
+            if crumb != "": VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 1px;
+                    height: 17px * u;
+                    background: Quiet.hair;
+                }
+            }
+            if crumb != "": Text {
+                text: crumb;
+                color: Quiet.muted;
+                font-size: 15px * u;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Still {
+        x: Quiet.px(root.width - 1092px * u);
+        y: Quiet.px(26px * u);
+        width: Quiet.px(1000px * u);
+        height: Quiet.px(78px * u);
+        HorizontalLayout {
+            x: root.width - 100px * u - self.width - parent.x;
+            y: 30px * u - parent.y;
+            width: self.preferred-width;
+            height: 44px * u;
+            spacing: 14px * u;
+
+            VerticalLayout {
+                alignment: center;
+                NetGlyph {
+                    size: 22px * u;
+                    eth-up: vitals.eth-up;
+                    wifi-up: vitals.wifi-up;
+                    bars: vitals.wifi-bars;
+                }
+            }
+            Text {
+                text: vitals.time;
+                color: Quiet.ink;
+                font-size: 27px * u;
+                font-weight: 600;
+                letter-spacing: -27px * u * 0.03;
+                vertical-alignment: center;
+            }
+        }
+
+        if details: HorizontalLayout {
+            x: root.width - 100px * u - self.width - parent.x;
+            y: 78px * u - parent.y;
+            width: self.preferred-width;
+            height: 20px * u;
+            spacing: 18px * u;
+            Presence {
+                mark: vitals.eth-up ? "M9 3.5h6v5H9z M3.5 15.5h6v5h-6z M14.5 15.5h6v5h-6z M12 8.5v3.5 M6.5 15.5V12h11v3.5"
+                    : "M2.8 9.2a13.5 13.5 0 0 1 18.4 0 M5.9 12.6a9 9 0 0 1 12.2 0 M9 16a4.6 4.6 0 0 1 6 0 M11.2 19.4a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0";
+                text: vitals.eth-up ? "Ethernet" : vitals.wifi-up ? (vitals.wifi-ssid != "" ? vitals.wifi-ssid : "Wi-Fi") : "Ağ yok";
+                warn: !online;
+            }
+            Presence {
+                mark: "M4 6.5h16v11H4z M4 13.5h16 M16.5 15.6h.01";
+                text: vitals.storage-free == "" || vitals.storage-free == "—" ? "—"
+                    : vitals.storage-low ? "Disk dolmak üzere · " + vitals.storage-free + " boş"
+                    : vitals.storage-free + " boş";
+                warn: vitals.storage-low;
+            }
+            Presence {
+                mark: "M10 4.5a2 2 0 0 1 4 0v9.3a4 4 0 1 1-4 0z M12 10v6.5";
+                text: vitals.temperature == "" ? "—" : vitals.temperature-warm ? "Sıcak · " + vitals.temperature : vitals.temperature;
+                warn: vitals.temperature-warm;
+            }
+        }
+    }
+}
+
+// A switch: a track that warms when on and a knob that slides across it.
+// What it says is Rust's (`SettingRow.toggle`); the switch only shows it, and
+// shows the change.
+export component QuietToggle inherits Rectangle {
+    in property <bool> on;
+    in property <bool> enabled: true;
+    property <float> u: Quiet.u;
+    width: 43px * u;
+    height: 23px * u;
+    border-radius: self.height / 2;
+    border-width: 1px;
+    border-color: on ? #a5baaa : #5c706d88;
+    background: on ? #9baea0 : #65757d4d;
+    opacity: enabled ? 1 : 0.45;
+    animate background, border-color { duration: QuietMotion.t-control; easing: QuietCurves.ease; }
+    Rectangle {
+        x: on ? parent.width - self.width - 4px * u : 4px * u;
+        y: (parent.height - self.height) / 2;
+        width: 15px * u;
+        height: self.width;
+        border-radius: self.width / 2;
+        background: on ? #18231c : #cad5d1;
+        animate x { duration: QuietMotion.t-control; easing: QuietCurves.glide; }
+        animate background { duration: QuietMotion.t-control; easing: QuietCurves.ease; }
+    }
+}
+
+// The settings' short list (`ChoiceSheet` on the classic face), as Quiet OS
+// draws a list: hairlines between names, the focus the Living Focus capsule,
+// the one in effect a warm dot. What it shows and what a press does are the
+// classic sheet's: the same `ChoiceItem`s, the same zone ("settings-choice")
+// and indices, the same ground (Back), panel (nothing) and close mark, the
+// same surface for a hand and a wheel. It rises into place as it opens; the
+// rows take the remote from the first frame.
+export component QuietChoice inherits Rectangle {
+    in property <string> title;
+    in property <[ChoiceItem]> items;
+    in property <int> focus-at;
+    in property <string> note;
+    // Its rows' zone and surface: the settings' own list, or an editor's.
+    in property <string> pointer-zone: "settings-choice";
+
+    property <float> u: Quiet.u;
+    property <length> pitch: 68px * u;
+    property <int> shown: min(items.length, 7);
+    property <length> viewport: shown * pitch;
+    property <length> total: items.length * pitch;
+    property <length> pad: 44px * u;
+    property <length> head-h: 118px * u;
+    property <length> note-h: note == "" ? 0px : 64px * u;
+
+    // 0 the moment it opens, 1 in place.
+    property <float> rise: 0;
+    animate rise { duration: QuietMotion.t-sheet; easing: QuietCurves.glide; }
+    init => { rise = 1; }
+
+    background: #05080b.with-alpha(0.85 * rise);
+
+    PointerShield { }
+
+    panel := QuietSurface {
+        width: min(760px * u, root.width - 160px * u);
+        height: min(head-h + viewport + note-h + pad, root.height - 120px * u);
+        x: (root.width - self.width) / 2;
+        y: (root.height - self.height) / 2 + (1 - rise) * 28px * u;
+        // A layer of its own for the opening only. (The rounded clip is one
+        // for as long as it is open, drawn again when something in it is.)
+        opacity: rise;
+        clip: true;
+
+        PointerSwallow { }
+
+        HorizontalLayout {
+            x: pad;
+            y: 38px * u;
+            height: 15px * u;
+            spacing: 14px * u;
+            alignment: start;
+            VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 34px * u;
+                    height: Quiet.hairline;
+                    background: Quiet.warm;
+                }
+            }
+            Overline {
+                text: "SEÇİN";
+                color: Quiet.warm;
+            }
+        }
+        Text {
+            x: pad;
+            y: 60px * u;
+            width: parent.width - pad * 2 - 60px * u;
+            height: 40px * u;
+            text: root.title;
+            color: Quiet.ink;
+            font-size: Quiet.t-heading;
+            font-weight: 560;
+            letter-spacing: -32px * u * 0.03;
+            vertical-alignment: center;
+            overflow: elide;
+            wrap: no-wrap;
+        }
+
+        PointerClose {
+            x: parent.width - self.width - pad * 0.5;
+            y: pad * 0.5;
+        }
+
+        list := Rectangle {
+            x: pad;
+            y: head-h;
+            width: parent.width - pad * 2;
+            height: min(viewport, parent.height - head-h - note-h - pad);
+            clip: true;
+
+            pan := PanState {
+                surface: root.pointer-zone;
+                remote: clamp(focus-at * pitch - (list.height - pitch) / 2, 0px, self.limit);
+                limit: max(0px, total - list.height);
+                remote-duration: QuietMotion.t-move;
+            }
+
+            PointerPanArea { surface: root.pointer-zone; }
+
+            Rectangle {
+                x: 0;
+                y: -pan.value;
+                width: parent.width;
+                height: max(total, parent.height);
+                animate y { duration: pan.duration; easing: QuietCurves.ease; }
+
+                Rectangle {
+                    x: 0;
+                    y: 0;
+                    width: parent.width;
+                    height: 1px;
+                    background: Quiet.hair;
+                }
+
+                LivingFocus {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: 100%;
+                    shown: items.length > 0;
+                    to-y: focus-at * pitch + 4px * u;
+                    to-h: pitch - 8px * u;
+                }
+
+                for c[i] in items: Rectangle {
+                    x: 0;
+                    y: i * pitch;
+                    width: parent.width;
+                    height: pitch;
+                    opacity: c.enabled ? 1.0 : 0.45;
+
+                    Rectangle {
+                        x: 0;
+                        y: 4px * u;
+                        width: parent.width;
+                        height: parent.height - 8px * u;
+                        border-radius: self.height / 2;
+                        background: !c.focused && target.lit ? Quiet.hover : transparent;
+                    }
+
+                    // The one in effect.
+                    Rectangle {
+                        x: 22px * u;
+                        y: (parent.height - self.height) / 2;
+                        width: 14px * u;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        border-width: 1.5px * u;
+                        border-color: c.selected ? Quiet.warm : #ffffff30;
+                        animate border-color { duration: QuietMotion.t-control; easing: QuietCurves.ease; }
+                        Rectangle {
+                            width: c.selected ? parent.width * 0.45 : 0px;
+                            height: self.width;
+                            border-radius: self.width / 2;
+                            background: Quiet.warm;
+                            animate width { duration: QuietMotion.t-control; easing: QuietCurves.glide; }
+                        }
+                    }
+
+                    VerticalLayout {
+                        x: 56px * u;
+                        width: parent.width - self.x - 150px * u;
+                        height: parent.height;
+                        alignment: center;
+                        spacing: 2px * u;
+                        Text {
+                            text: c.title;
+                            color: c.focused ? Quiet.warm-hi : (c.selected ? Quiet.ink : Quiet.app);
+                            font-size: 21px * u;
+                            font-weight: c.focused || c.selected ? 560 : 500;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                        if c.sub != "": Text {
+                            text: c.sub;
+                            color: Quiet.dim;
+                            font-size: Quiet.t-small;
+                            overflow: elide;
+                            wrap: no-wrap;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        x: parent.width - self.width - 20px * u;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        spacing: 14px * u;
+                        if c.now: Overline {
+                            text: "ŞU AN";
+                            color: Quiet.tone("good");
+                        }
+                        if c.badge != "": Overline {
+                            text: c.badge;
+                            color: Quiet.tone(c.badge-tone);
+                        }
+                    }
+
+                    Rectangle {
+                        x: 0;
+                        y: parent.height - 1px;
+                        width: parent.width;
+                        height: 1px;
+                        background: Quiet.hair;
+                    }
+
+                    // Not while it cannot be pressed: hover, focus and a click
+                    // are refused as the remote's are.
+                    target := PointerTarget {
+                        enabled: c.enabled;
+                        zone: c.enabled ? root.pointer-zone : "";
+                        index: i;
+                        veil: false;
+                    }
+                }
+            }
+        }
+
+        if note != "": Text {
+            x: pad;
+            y: list.y + list.height + 18px * u;
+            width: parent.width - pad * 2;
+            height: note-h - 18px * u;
+            text: root.note;
+            color: Quiet.dim;
+            font-size: 15px * u;
+            wrap: word-wrap;
+            overflow: elide;
+        }
+    }
+}

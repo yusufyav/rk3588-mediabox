@@ -3027,11 +3027,37 @@ unsafe impl OpenGLInterface for GlContext {
     }
 }
 
+/// The panel's size Slint was last told of. Its own answer
+/// (`slint::Window::size`) is the adapter's `size`, which is already the new
+/// one the moment the mode is.
+#[derive(Default)]
+struct Told(Cell<slint::PhysicalSize>);
+
+impl Told {
+    /// The scale first, then the size in the logical pixels that scale
+    /// defines; neither when it is what Slint was last told.
+    fn follow(&self, window: &slint::Window, size: slint::PhysicalSize, scale: f32) {
+        if (window.scale_factor() - scale).abs() > f32::EPSILON {
+            window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+        }
+        if self.0.replace(size) != size {
+            window.dispatch_event(WindowEvent::Resized {
+                size: size.to_logical(window.scale_factor()),
+            });
+        }
+    }
+
+    fn is(&self, size: slint::PhysicalSize) -> bool {
+        self.0.get() == size
+    }
+}
+
 struct SplitWindow {
     window: slint::Window,
     renderer: FemtoVGRenderer,
     display: Rc<SplitDisplay>,
     redraw: Cell<bool>,
+    told: Told,
     /// Draws every frame the panel will take, whether anything changed or not.
     ///
     /// The interface is event-driven and idles at nothing, which is right for a
@@ -3050,24 +3076,16 @@ impl SplitWindow {
             renderer,
             display,
             redraw: Cell::new(true),
+            told: Told::default(),
             bench: std::env::var_os("MEDIABOX_TV_BENCH").is_some(),
         }))
     }
 
     /// Tells Slint the panel's size and scale, when they are not what it was
     /// last told: after a mode of another size, or back from one the kernel
-    /// refused. The scale first, then the size in the logical pixels that
-    /// scale defines.
+    /// refused.
     fn sync_size(&self) {
-        let scale = self.display.scale_factor();
-        if (self.window.scale_factor() - scale).abs() > f32::EPSILON {
-            self.window
-                .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
-        }
-        let logical = self.size().to_logical(self.window.scale_factor());
-        if self.window.size().to_logical(self.window.scale_factor()) != logical {
-            self.window.dispatch_event(WindowEvent::Resized { size: logical });
-        }
+        self.told.follow(&self.window, self.size(), self.display.scale_factor());
         self.redraw.set(true);
     }
 
@@ -3210,8 +3228,10 @@ impl WindowAdapter for SplitWindow {
             self.window.dispatch_event(WindowEvent::ScaleFactorChanged {
                 scale_factor: self.display.scale_factor(),
             });
+            let size = self.size();
+            self.told.0.set(size);
             self.window.dispatch_event(WindowEvent::Resized {
-                size: self.size().to_logical(self.window.scale_factor()),
+                size: size.to_logical(self.window.scale_factor()),
             });
             self.redraw.set(true);
         }
@@ -3839,7 +3859,7 @@ impl Platform for SplitPlatform {
             }
             // A switch the kernel refused has put the old size back.
             if self.window.display.switch.borrow().is_none()
-                && self.window.window.size() != self.window.size()
+                && !self.window.told.is(self.window.size())
             {
                 self.window.sync_size();
             }
@@ -4023,6 +4043,79 @@ fn printable(code: u32, shift: bool) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use slint::ComponentHandle;
+
+    slint::slint! {
+        export component Laid inherits Window {
+            out property <length> wide: self.width;
+            out property <length> high: self.height;
+        }
+    }
+
+    /// The panel as `SplitWindow` is one: its size is the new mode's before
+    /// Slint has been told of any.
+    struct Panel {
+        window: slint::Window,
+        renderer: slint::platform::software_renderer::SoftwareRenderer,
+        size: Cell<slint::PhysicalSize>,
+    }
+
+    impl WindowAdapter for Panel {
+        fn window(&self) -> &slint::Window {
+            &self.window
+        }
+        fn size(&self) -> slint::PhysicalSize {
+            self.size.get()
+        }
+        fn renderer(&self) -> &dyn slint::platform::Renderer {
+            &self.renderer
+        }
+    }
+
+    struct OnPanel(Rc<Panel>);
+
+    impl Platform for OnPanel {
+        fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, PlatformError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    /// A mode of another size reaches the layout, and so does the way back
+    /// from one the kernel refused. `sync_size` asked `slint::Window::size`,
+    /// which is the panel's own: a 1080p trial from 1440p was drawn in the
+    /// panel's top left two thirds.
+    #[test]
+    fn a_mode_of_another_size_reaches_the_layout() {
+        let panel = Rc::new_cyclic(|weak: &std::rc::Weak<Panel>| Panel {
+            window: slint::Window::new(weak.clone()),
+            renderer: Default::default(),
+            size: Cell::default(),
+        });
+        slint::platform::set_platform(Box::new(OnPanel(panel.clone()))).expect("one platform");
+        let ui = Laid::new().expect("a window");
+        ui.show().expect("shown");
+        let told = Told::default();
+        let laid = |width, height, scale| {
+            let size = slint::PhysicalSize::new(width, height);
+            panel.size.set(size);
+            assert_eq!(ui.window().size(), size, "Slint's own answer is the panel's");
+            told.follow(&panel.window, size, scale);
+            assert!(told.is(size));
+            slint::platform::update_timers_and_animations();
+            (ui.get_wide(), ui.get_high())
+        };
+        assert_eq!(laid(2560, 1440, 2.0), (1280.0, 720.0));
+        assert_eq!(laid(1920, 1080, 2.0), (960.0, 540.0));
+        assert_eq!(laid(1280, 720, 1.0), (1280.0, 720.0));
+        assert_eq!(laid(3840, 2160, 3.0), (1280.0, 720.0));
+
+        // Refused: the old size is back without Slint having been told.
+        assert_eq!(laid(1920, 1080, 2.0), (960.0, 540.0));
+        let before = slint::PhysicalSize::new(2560, 1440);
+        panel.size.set(before);
+        assert!(!told.is(before), "the loop is to see that it must say so");
+        assert_eq!(laid(2560, 1440, 2.0), (1280.0, 720.0));
+    }
 
     /// The keyboard must not have a key that can turn the appliance off.
     #[test]

@@ -1,5 +1,9 @@
 import { Theme, Metrics } from "theme.slint";
-import { Quiet, QuietFrame } from "quiet.slint";
+import { Quiet } from "quiet/core.slint";
+import { LivingFocus } from "quiet/materials.slint";
+import { QuietFrame } from "quiet/settings.slint";
+import { QuietGround } from "quiet/materials.slint";
+import { SignalField, BluetoothField } from "quiet/instruments.slint";
 import { KeyRow, KeyCap, Keyboard, VitalsModel } from "components.slint";
 import { PointerTarget, PointerPanArea, PanState } from "pointer.slint";
 import {
@@ -91,13 +95,42 @@ component Bars inherits Rectangle {
     width: w * 4 + gap * 3;
     height: Metrics.t-secondary * 1.05;
 
-    for step[i] in [1, 2, 3, 4]: Rectangle {
+    if Theme.quiet: Path {
+        // Quiet OS: the radio's fronts, the same four steps.
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: parent.height * 1.25;
+        height: self.width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke: #ffffff26;
+        stroke-width: 2px * Metrics.qu;
+        stroke-line-cap: round;
+        commands: "M9.9 17.1a3 3 0 0 1 4.2 0M7.4 13.6a6.6 6.6 0 0 1 9.2 0M4.9 10.2a10.2 10.2 0 0 1 14.2 0M2.4 6.8a13.8 13.8 0 0 1 19.2 0";
+    }
+    if Theme.quiet && bars > 0: Path {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: parent.height * 1.25;
+        height: self.width;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke: focused ? #f2e5d0 : #c9d0d4;
+        stroke-width: 2px * Metrics.qu;
+        stroke-line-cap: round;
+        commands: "M9.9 17.1a3 3 0 0 1 4.2 0" + (bars > 1 ? "M7.4 13.6a6.6 6.6 0 0 1 9.2 0" : "")
+            + (bars > 2 ? "M4.9 10.2a10.2 10.2 0 0 1 14.2 0" : "") + (bars > 3 ? "M2.4 6.8a13.8 13.8 0 0 1 19.2 0" : "")
+            + "M0 24M24 0M24 24M0 0";
+    }
+    for step[i] in Theme.quiet ? [] : [1, 2, 3, 4]: Rectangle {
         x: i * (w + gap);
         width: w;
         height: parent.height * (0.28 + 0.24 * i);
         y: parent.height - self.height;
         border-radius: w / 2;
-        background: step <= bars ? (focused ? (Theme.quiet ? #f2e5d0 : Theme.text) : (Theme.quiet ? #c9d0d4 : #d6dae2)) : #ffffff26;
+        background: step <= bars ? (focused ? Theme.text : #d6dae2) : #ffffff26;
     }
 }
 
@@ -269,8 +302,10 @@ component Frame inherits Rectangle {
     // OS keeps them down the left, as the settings screen does.
     in property <[SettingNav]> sections;
     in property <int> section;
+    // The screen draws its own instrument where the emblem stands.
+    in property <bool> instrument;
 
-    // Quiet OS: the settings' own frame (quiet.slint), the list in its
+    // Quiet OS: the settings' own frame (quiet/settings.slint), the list in its
     // content column.
     if Theme.quiet: QuietFrame {
         width: 100%;
@@ -282,6 +317,7 @@ component Frame inherits Rectangle {
         current: root.section;
         active: false;
         pointer-zone: "settings-sections";
+        emblem: !root.instrument;
         page-label: root.page;
         page-icon: root.page-icon;
         overline: "AYARLAR  /  BAĞLANTILAR";
@@ -441,16 +477,14 @@ component RadioList inherits Rectangle {
             // Quiet OS: the focus is one capsule travelling from row to
             // row, as on the settings list; only over a row, not over a
             // heading's "Yenile" or a network's (i), which light their own.
-            if Theme.quiet: Rectangle {
+            if Theme.quiet: LivingFocus {
                 x: 0;
-                y: focus-y;
-                width: parent.width;
-                height: focus-tall ? Metrics.set-h : Metrics.set-h-flat;
-                border-radius: self.height / 2;
-                background: Theme.s-card-hi;
-                opacity: root.glide-on ? 1 : 0;
-                animate y, height { duration: Theme.motion ? 230ms : 0ms; easing: cubic-bezier(0.22, 1, 0.36, 1); }
-                animate opacity { duration: Theme.t-focus; easing: Theme.ease; }
+                y: 0;
+                width: 100%;
+                height: 100%;
+                shown: root.glide-on;
+                to-y: focus-y;
+                to-h: focus-tall ? Metrics.set-h : Metrics.set-h-flat;
             }
 
             for row in rows: Rectangle {
@@ -619,7 +653,19 @@ export component WifiScreen inherits Rectangle {
         vitals: root.vitals;
         sections: root.sections;
         section: root.section;
+        instrument: true;
 
+        if Theme.quiet: SignalField {
+            x: 1604px * Metrics.qu;
+            y: 196px * Metrics.qu;
+            width: 204px * Metrics.qu;
+            height: 204px * Metrics.qu;
+            known: root.known;
+            on: root.present && root.powered;
+            linked: vitals.wifi-up;
+            bars: vitals.wifi-bars;
+            ssid: vitals.wifi-ssid;
+        }
         RadioList {
             width: 100%;
             height: 100%;
@@ -673,6 +719,11 @@ export component WifiScreen inherits Rectangle {
         }
     }
 
+    if face == "password" && Theme.quiet: QuietGround {
+        width: 100%;
+        height: 100%;
+        strength: 0.4;
+    }
     if face == "password": VerticalLayout {
         padding: Metrics.gutter;
         // The shared bar draws the name of the screen; this clears it rather
@@ -717,8 +768,8 @@ export component WifiScreen inherits Rectangle {
             // "Ağ adı" and "Güvenlik", as AddNetworkFragment asks them.
             if adding: Rectangle {
                 height: Metrics.vh * 0.08;
-                border-radius: Theme.radius * 0.6;
-                background: focus-at == "ssid" ? Theme.focus-fill : #ffffff0f;
+                border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.6;
+                background: focus-at == "ssid" ? Theme.focus-fill : (Theme.quiet ? #ffffff08 : #ffffff0f);
                 border-width: focus-at == "ssid" ? 2px : 1px;
                 border-color: focus-at == "ssid" ? Theme.focus-ring : Theme.line-soft;
                 HorizontalLayout {
@@ -738,8 +789,8 @@ export component WifiScreen inherits Rectangle {
             }
             if adding: Rectangle {
                 height: Metrics.vh * 0.07;
-                border-radius: Theme.radius * 0.6;
-                background: focus-at == "security" ? Theme.focus-fill : #ffffff0f;
+                border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.6;
+                background: focus-at == "security" ? Theme.focus-fill : (Theme.quiet ? #ffffff08 : #ffffff0f);
                 border-width: focus-at == "security" ? 2px : 1px;
                 border-color: focus-at == "security" ? Theme.focus-ring : Theme.line-soft;
                 HorizontalLayout {
@@ -773,8 +824,8 @@ export component WifiScreen inherits Rectangle {
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    border-radius: Theme.radius * 0.6;
-                    background: focus-at == "field" ? Theme.focus-fill : #ffffff0f;
+                    border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.6;
+                    background: focus-at == "field" ? Theme.focus-fill : (Theme.quiet ? #ffffff08 : #ffffff0f);
                     border-width: focus-at == "field" ? 2px : 1px;
                     border-color: focus-at == "field" ? Theme.focus-ring : Theme.line-soft;
                     HorizontalLayout {
@@ -795,8 +846,8 @@ export component WifiScreen inherits Rectangle {
 
                 Rectangle {
                     width: Metrics.vh * 0.22;
-                    border-radius: Theme.radius * 0.6;
-                    background: focus-at == "show" ? Theme.focus-fill : #ffffff0f;
+                    border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.6;
+                    background: focus-at == "show" ? Theme.focus-fill : (Theme.quiet ? #ffffff08 : #ffffff0f);
                     border-width: focus-at == "show" ? 2px : 1px;
                     border-color: focus-at == "show" ? Theme.focus-ring : Theme.line-soft;
                     Text {
@@ -819,8 +870,8 @@ export component WifiScreen inherits Rectangle {
 
             Rectangle {
                 height: Metrics.vh * 0.075;
-                border-radius: Theme.radius * 0.6;
-                background: focus-at == "join" ? Theme.focus-fill : #ffffff0f;
+                border-radius: Theme.quiet ? self.height / 2 : Theme.radius * 0.6;
+                background: focus-at == "join" ? Theme.focus-fill : (Theme.quiet ? #ffffff08 : #ffffff0f);
                 border-width: focus-at == "join" ? 2px : 1px;
                 border-color: focus-at == "join" ? Theme.focus-ring : Theme.line-soft;
                 Text {
@@ -841,6 +892,10 @@ export component BluetoothScreen inherits Rectangle {
     in property <bool> known;
     in property <bool> present;
     in property <string> summary;
+    in property <bool> powered;
+    in property <bool> scanning;
+    in property <int> linked;
+    in property <int> paired;
     in property <string> notice;
     in property <VitalsModel> vitals;
     in property <[SettingNav]> sections;
@@ -865,7 +920,19 @@ export component BluetoothScreen inherits Rectangle {
         vitals: root.vitals;
         sections: root.sections;
         section: root.section;
+        instrument: true;
 
+        if Theme.quiet: BluetoothField {
+            x: 1604px * Metrics.qu;
+            y: 196px * Metrics.qu;
+            width: 204px * Metrics.qu;
+            height: 240px * Metrics.qu;
+            known: root.known;
+            on: root.present && root.powered;
+            scanning: root.scanning;
+            linked: root.linked;
+            paired: root.paired;
+        }
         RadioList {
             width: 100%;
             height: 100%;

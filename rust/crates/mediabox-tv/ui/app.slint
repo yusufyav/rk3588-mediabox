@@ -10,9 +10,14 @@ import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
 import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
-import { QuietHome, QuietSettings, QuietBar } from "quiet.slint";
+import { Quiet } from "quiet/core.slint";
+import { QuietHome } from "quiet/home.slint";
+import { QuietSettings } from "quiet/settings.slint";
+import { QuietBar } from "quiet/controls.slint";
+import { QuietMotion, QuietReach, QuietRig, QuietCam } from "quiet/motion.slint";
+import { QuietMotionLab } from "quiet/lab.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
-import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple } from "output.slint";
+import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple, OutScreen } from "output.slint";
 import { SettingNav, Badge, InfoLine, Toast, ChoiceItem, DeviceToast } from "kit.slint";
 import { EthernetView } from "ethernet.slint";
 import { AudioView, AudioCard } from "audio.slint";
@@ -22,9 +27,9 @@ import { Diagnostics } from "diagnostics.slint";
 import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 import { PointerHub, PointerPan, PointerArrow } from "pointer.slint";
-export { AccountChip, CaptionStyle, PointerHub, PointerPan }
+export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietMotion, QuietReach, QuietCam }
 import {
-    RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup,
+    RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup, SocView,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
 } from "components.slint";
 
@@ -32,7 +37,7 @@ export {
     RailModel, PosterItem, AppTile, VitalsModel, SourceRow, TechRow, SettingRow,
     DiagGroup, SheetRow, KeyCap, KeyRow, NpControl, CoolingView, CoolChip, CoolRow,
     CoolInfo, CoolPoint, CoolTick, CoolSeg, OutputView, OutRow, OutCell, OutAction, OutInfo,
-    OutSimple, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
+    OutSimple, OutScreen, SocView, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
     EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun, MsCategory, MsRow, MsNode, MsRate, MsRoute,
     LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow,
 }
@@ -101,6 +106,12 @@ export component MediaBoxWindow inherits Window {
     property <bool> quiet-family: layout == "quiet" && (screen == "settings" || screen == "wifi"
         || screen == "bluetooth" || screen == "account" || screen == "diagnostics");
     changed quiet-family => { Theme.quiet = quiet-family; }
+    property <float> device-scale: 1px / 1phx;
+    changed device-scale => { Quiet.scale = device-scale; }
+    // The screen the panel showed before this one, told by Rust with the
+    // screen itself (src/main.rs, `show`): Quiet OS carries an element from
+    // one screen into the next when it knows where the eye was.
+    in property <string> came-from;
     /// Whether the film's own controls are up. They come up on a key and go
     /// down by themselves; a film with a control bar permanently across it is
     /// not a television.
@@ -242,6 +253,10 @@ export component MediaBoxWindow inherits Window {
     in property <bool> bt-known;
     in property <bool> bt-present;
     in property <string> bt-summary;
+    in property <bool> bt-powered;
+    in property <bool> bt-scanning;
+    in property <int> bt-linked;
+    in property <int> bt-paired;
     in property <string> bt-notice;
     in property <[WifiRow]> bt-rows;
     in property <int> bt-focus-flats;
@@ -473,6 +488,7 @@ export component MediaBoxWindow inherits Window {
     in property <bool> account-submit-ready;
 
     // ---- diagnostics
+    in property <SocView> diag-soc;
     in property <[DiagGroup]> diag-groups;
     in property <[SettingNav]> diag-nav;
     in property <int> diag-group;
@@ -491,6 +507,10 @@ export component MediaBoxWindow inherits Window {
     callback key-released(string);
 
     forward-focus: scope;
+
+    // Quiet OS's camera, from one screen to the next.
+    rig := QuietRig { }
+    out property <QuietCam> quiet-camera: rig.view;
 
     scope := FocusScope {
         key-pressed(event) => {
@@ -671,6 +691,21 @@ export component MediaBoxWindow inherits Window {
             apps: root.apps;
             vitals: root.vitals;
             focus-col: root.focus-col;
+            came-from: root.came-from;
+            camera: rig.view;
+            stood-before <=> rig.id;
+            travel(to) => { rig.travel(to); }
+            land(at, opening) => { rig.land(at, opening); }
+            fly(to, at-once) => { rig.fly(to, at-once); }
+            rest => { rig.rest(); }
+            replayed => { rig.replay(); }
+        }
+
+        // Development only: never open unless MEDIABOX_TV_MOTION_LAB was set
+        // (src/motion_lab.rs).
+        if screen == "home" && layout == "quiet" && QuietMotion.lab-open: QuietMotionLab {
+            width: 100%;
+            height: 100%;
         }
 
         if screen == "settings" && layout == "quiet": QuietSettings {
@@ -699,6 +734,10 @@ export component MediaBoxWindow inherits Window {
             choice: root.settings-choice;
             choice-focus: root.settings-choice-focus;
             choice-note: root.settings-choice-note;
+            came-from: root.came-from;
+            camera: rig.view;
+            fly(to, at-once) => { rig.fly(to, at-once); }
+            shrink-to(to) => { rig.shrink-to(to); }
         }
 
         if screen == "settings" && layout != "quiet": Settings {
@@ -806,6 +845,10 @@ export component MediaBoxWindow inherits Window {
             summary: root.bt-summary;
             vitals: root.vitals;
             notice: root.bt-notice;
+            powered: root.bt-powered;
+            scanning: root.bt-scanning;
+            linked: root.bt-linked;
+            paired: root.bt-paired;
             rows: root.bt-rows;
             focus-flats: root.bt-focus-flats;
             focus-talls: root.bt-focus-talls;
@@ -845,6 +888,7 @@ export component MediaBoxWindow inherits Window {
             groups: root.diag-groups;
             nav: root.diag-nav;
             group: root.diag-group;
+            soc: root.diag-soc;
             vitals: root.vitals;
         }
 

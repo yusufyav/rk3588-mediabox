@@ -1,0 +1,92 @@
+import { Quiet } from "core.slint";
+import { QuietMotion } from "motion.slint";
+import { QuietSurface } from "materials.slint";
+import { PointerShield, PointerSwallow } from "../pointer.slint";
+import { Overline } from "controls.slint";
+
+// The Motion Lab: a development panel over Quiet OS's home screen for turning
+// its motion on a real television. It exists only when the interface was
+// started with MEDIABOX_TV_MOTION_LAB=1 (src/motion_lab.rs); otherwise
+// nothing opens it and it is never built. The Menu key opens and closes it;
+// Up and Down choose a parameter, Left and Right turn it, Ok replays the
+// camera's last move, Back or a click outside closes.
+
+component LabRow inherits Rectangle {
+    in property <string> name;
+    in property <string> value;
+    in property <bool> here;
+    property <float> u: Quiet.u;
+    height: 40px * u;
+    border-radius: self.height / 2;
+    background: here ? Quiet.lift : transparent;
+    Text {
+        x: 18px * u;
+        height: parent.height;
+        text: root.name;
+        color: here ? Quiet.warm-hi : Quiet.app;
+        font-size: 17px * u;
+        vertical-alignment: center;
+    }
+    Text {
+        x: parent.width - self.width - 18px * u;
+        width: self.preferred-width;
+        height: parent.height;
+        text: root.value;
+        color: here ? Quiet.warm-hi : Quiet.muted;
+        font-size: 17px * u;
+        font-weight: 600;
+        vertical-alignment: center;
+    }
+}
+
+export component QuietMotionLab inherits Rectangle {
+    property <float> u: Quiet.u;
+    pure function times(v: float) -> string {
+        return "× " + round(v * 100) / 100;
+    }
+
+    // Modal: nothing under it is pointed at through it, and a click on its
+    // ground is Back, as under every other modal.
+    PointerShield { }
+
+    QuietSurface {
+        x: 100px * u;
+        y: root.height - self.height - 90px * u;
+        width: 460px * u;
+        height: 470px * u;
+
+        PointerSwallow { }
+        Overline {
+            x: 26px * u;
+            y: 24px * u;
+            height: 15px * u;
+            text: "QUIET OS  ·  MOTION LAB";
+            color: Quiet.warm;
+        }
+        VerticalLayout {
+            x: 14px * u;
+            y: 54px * u;
+            width: parent.width - 28px * u;
+            spacing: 2px * u;
+            LabRow { name: "Süre"; value: times(QuietMotion.pace); here: QuietMotion.lab-row == 0; }
+            LabRow { name: "Derinlik"; value: times(QuietMotion.depth); here: QuietMotion.lab-row == 1; }
+            LabRow { name: "Hareket mesafesi"; value: times(QuietMotion.travel); here: QuietMotion.lab-row == 2; }
+            LabRow { name: "Atmosfer ışığı"; value: times(QuietMotion.glow); here: QuietMotion.lab-row == 3; }
+            LabRow { name: "Katman ayrışması"; value: times(QuietMotion.parallax); here: QuietMotion.lab-row == 4; }
+            LabRow {
+                name: "Eğri";
+                value: QuietMotion.profile == 1 ? "Çevik" : QuietMotion.profile == 2 ? "Yumuşak" : "Ürün";
+                here: QuietMotion.lab-row == 5;
+            }
+            LabRow { name: "Hareket"; value: QuietMotion.on ? "Açık" : "Azaltılmış"; here: QuietMotion.lab-row == 6; }
+            LabRow { name: "Tekrar oynat"; value: "OK"; here: QuietMotion.lab-row == 7; }
+        }
+        Text {
+            x: 26px * u;
+            y: parent.height - 38px * u;
+            text: "Yukarı, Aşağı seç  ·  Sol, Sağ değiştir  ·  OK tekrar  ·  Menü, Geri kapat";
+            color: Quiet.dim;
+            font-size: 13px * u;
+        }
+    }
+}

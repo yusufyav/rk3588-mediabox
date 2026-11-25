@@ -1060,6 +1060,8 @@ impl Cooling {
             info: self.info(),
             prompt: self.prompt,
             prompt_focus: self.prompt_idx,
+            celsius: status.temperature_c,
+            duty_at: status.pwm.map(|pwm| f64::from(pwm) / 255.0),
         }
     }
 }
@@ -1191,6 +1193,9 @@ pub struct View {
     pub info: Vec<(String, String)>,
     pub prompt: bool,
     pub prompt_focus: usize,
+    /// The two readings as numbers, `None` where there is none.
+    pub celsius: Option<f64>,
+    pub duty_at: Option<f64>,
 }
 
 #[cfg(test)]
