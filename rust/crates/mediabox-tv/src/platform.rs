@@ -3032,6 +3032,10 @@ struct SplitWindow {
     renderer: FemtoVGRenderer,
     display: Rc<SplitDisplay>,
     redraw: Cell<bool>,
+    /// The panel's size Slint was last told of. Its own answer
+    /// (`slint::Window::size`) is this adapter's `size`, which is already
+    /// the new one the moment the mode is.
+    told: Cell<slint::PhysicalSize>,
     /// Draws every frame the panel will take, whether anything changed or not.
     ///
     /// The interface is event-driven and idles at nothing, which is right for a
@@ -3050,6 +3054,7 @@ impl SplitWindow {
             renderer,
             display,
             redraw: Cell::new(true),
+            told: Cell::default(),
             bench: std::env::var_os("MEDIABOX_TV_BENCH").is_some(),
         }))
     }
@@ -3064,9 +3069,11 @@ impl SplitWindow {
             self.window
                 .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
         }
-        let logical = self.size().to_logical(self.window.scale_factor());
-        if self.window.size().to_logical(self.window.scale_factor()) != logical {
-            self.window.dispatch_event(WindowEvent::Resized { size: logical });
+        let size = self.size();
+        if self.told.replace(size) != size {
+            self.window.dispatch_event(WindowEvent::Resized {
+                size: size.to_logical(self.window.scale_factor()),
+            });
         }
         self.redraw.set(true);
     }
@@ -3210,8 +3217,10 @@ impl WindowAdapter for SplitWindow {
             self.window.dispatch_event(WindowEvent::ScaleFactorChanged {
                 scale_factor: self.display.scale_factor(),
             });
+            let size = self.size();
+            self.told.set(size);
             self.window.dispatch_event(WindowEvent::Resized {
-                size: self.size().to_logical(self.window.scale_factor()),
+                size: size.to_logical(self.window.scale_factor()),
             });
             self.redraw.set(true);
         }
@@ -3839,7 +3848,7 @@ impl Platform for SplitPlatform {
             }
             // A switch the kernel refused has put the old size back.
             if self.window.display.switch.borrow().is_none()
-                && self.window.window.size() != self.window.size()
+                && self.window.told.get() != self.window.size()
             {
                 self.window.sync_size();
             }
