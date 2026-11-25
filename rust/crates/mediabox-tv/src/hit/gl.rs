@@ -309,7 +309,7 @@ impl Drawn {
 
     /// A frame of the moment Slint's clock is at.
     fn draw(&self) {
-        crate::spatial::frame(|| {
+        crate::spatial::frame(std::time::Duration::from_nanos(16_666_667), || {
             self.window.redraw.set(false);
             self.window.renderer.render()
         })

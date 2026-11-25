@@ -3173,7 +3173,7 @@ impl SplitWindow {
             #[cfg(feature = "gl-count")]
             let before = PHASES.with(Cell::get);
             let at = std::time::Instant::now();
-            crate::spatial::frame(|| {
+            crate::spatial::frame(self.display.frame_period(), || {
                 // What is asked for by now is in this frame.
                 self.redraw.set(false);
                 self.renderer.render()

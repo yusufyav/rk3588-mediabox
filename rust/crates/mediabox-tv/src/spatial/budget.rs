@@ -1,27 +1,31 @@
-//! How much of the appliance scenes may have. The numbers are measured on the
-//! slowest case it drives, a panel of 3840x2160 at 60 Hz on a Mali-G610
-//! (docs/quietos-advanced-graphics.md, "Bütçe"); a scene that would go past
-//! one is drawn by Slint instead, whole, never in part.
+//! How much of the appliance scenes may have. The numbers are measured
+//! (docs/quietos-advanced-graphics.md, "Bütçe"), not chosen; a scene that
+//! would go past one is drawn by Slint instead, whole, never in part.
+
+use std::time::Duration;
 
 use super::gl::Error;
 
-/// What a frame's scenes ask of the GPU.
+/// What drawing a scene once asks of the GPU.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Cost {
     pub triangles: u64,
     pub instances: u64,
-    /// Of one scene: how many times it may cover a pixel of its place. Of a
-    /// frame: how many pixels are covered, each time counted.
+    /// How many times it may blend over a pixel of its place.
     pub layers: u32,
 }
 
 impl Cost {
-    /// This frame's, and another scene of `pixels`.
-    pub fn add(&mut self, scene: &Cost, pixels: u64) {
-        self.triangles += scene.triangles;
-        self.instances += scene.instances;
-        // In hundredths of a megapixel: a frame's is far under what u32 holds.
-        self.layers += (pixels * u64::from(scene.layers)).div_ceil(10_000) as u32;
+    /// The GPU's cycles for it over `pixels`, from what scenes of every shape
+    /// took on a Mali-G610, at 3840x2160 and at 2560x1440: from a tenth under
+    /// what was counted to a third over.
+    pub fn cycles(&self, pixels: u64) -> u64 {
+        let layers = u64::from(self.layers);
+        // Its own pass, the one that makes it straight and Slint's drawing of
+        // it are 0.45 a pixel; a layer 0.05, for a shell covers its middle.
+        (pixels.saturating_mul(45 + 5 * layers) / 100)
+            .saturating_add(self.triangles.saturating_mul(6))
+            .saturating_add(self.instances.saturating_mul(40))
     }
 }
 
@@ -31,28 +35,25 @@ pub struct Budget {
     pub scenes: usize,
     /// Textures, depth and geometry.
     pub bytes: u64,
-    /// In a frame.
-    pub triangles: u64,
-    pub instances: u64,
-    /// Pixels covered in a frame, each time counted, in hundredths of a
-    /// megapixel.
-    pub fill: u32,
+    /// The scenes' part of a frame's time on the GPU at its full speed.
+    pub share: f32,
 }
 
+/// Mali-G610's, as the RK3588 runs it.
+const FULL_SPEED_HZ: f64 = 1e9;
+
 impl Budget {
-    pub const PRODUCT: Self =
-        Self { scenes: 6, bytes: 192 << 20, triangles: 600_000, instances: 60_000, fill: 2_400 };
+    pub const PRODUCT: Self = Self { scenes: 6, bytes: 192 << 20, share: 0.55 };
 
     /// Anything, for finding out what the numbers above should be.
     #[cfg(any(test, feature = "spatial-lab"))]
-    pub const NONE: Self =
-        Self { scenes: 64, bytes: 1 << 30, triangles: u64::MAX, instances: u64::MAX, fill: u32::MAX };
+    pub const NONE: Self = Self { scenes: 64, bytes: 1 << 30, share: f32::INFINITY };
 
-    /// Whether a frame of `spent` is within it.
-    pub fn holds(&self, spent: &Cost) -> Result<(), Error> {
-        let over = |have: u64, most: u64, what| if have > most { Err(Error::Budget(what)) } else { Ok(()) };
-        over(spent.triangles, self.triangles, "triangles")?;
-        over(spent.instances, self.instances, "instances")?;
-        over(spent.layers.into(), self.fill.into(), "fill")
+    /// Whether `cycles` in a frame of `period` are within it.
+    pub fn holds(&self, cycles: u64, period: Duration) -> Result<(), Error> {
+        if cycles as f64 > period.as_secs_f64() * FULL_SPEED_HZ * f64::from(self.share) {
+            return Err(Error::Budget("GPU time"));
+        }
+        Ok(())
     }
 }

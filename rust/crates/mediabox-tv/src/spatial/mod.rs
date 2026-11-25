@@ -288,9 +288,10 @@ struct Stage {
     failed: Vec<(Kind, bool)>,
     /// Elements there was no room for, and how many there was room for.
     refused: Vec<(String, usize)>,
-    panel: slint::PhysicalSize,
+    panel: (slint::PhysicalSize, Duration),
     frame: u64,
-    spent: Cost,
+    /// The GPU's cycles for what this frame has drawn.
+    spent: u64,
     /// Answered outside a frame, or with what is gone: to be asked again.
     asked_outside: bool,
     /// In this frame something fell back to Slint's own drawing.
@@ -333,14 +334,15 @@ impl OnGpu {
     }
 
     /// The shaders and the geometry of `kind`, once.
-    fn prepare(&mut self, kind: Kind, budget: &Budget) -> Result<(), Error> {
+    fn prepare(&mut self, kind: Kind, budget: &Budget, period: Duration) -> Result<(), Error> {
         if self.scenes.iter().any(|(have, _)| *have == kind) {
             return Ok(());
         }
         let _kept = Kept::of(&self.gpu.gl);
         let scene = kind.make(&self.gpu)?;
         if let Some(scene) = &scene {
-            budget.holds(&scene.cost())?;
+            // Whatever its size on the panel.
+            budget.holds(scene.cost().cycles(0), period)?;
         }
         self.scenes.push((kind, scene));
         Ok(())
@@ -430,9 +432,9 @@ impl Stage {
             on: None,
             failed: Vec::new(),
             refused: Vec::new(),
-            panel: slint::PhysicalSize::default(),
+            panel: Default::default(),
             frame: 0,
-            spent: Cost::default(),
+            spent: 0,
             asked_outside: false,
             fell: false,
             changed: false,
@@ -450,9 +452,9 @@ impl Stage {
 
     /// A frame begins, in the platform's context. Whether the roll is to be
     /// called.
-    fn open(&mut self, panel: slint::PhysicalSize) -> bool {
+    fn open(&mut self, panel: (slint::PhysicalSize, Duration)) -> bool {
         self.frame += 1;
-        self.spent = Cost::default();
+        self.spent = 0;
         let context = gl::current();
         if context != self.context {
             // The old one's names mean nothing in this: forgotten.
@@ -465,7 +467,7 @@ impl Stage {
             self.asked_outside = true;
         }
         if panel != self.panel {
-            // What could not be had at that size may be at this one.
+            // What could not be had of that mode may be of this one.
             self.panel = panel;
             self.changed |= !self.refused.is_empty() || self.failed.iter().any(|(_, lasts)| !lasts);
             self.refused.clear();
@@ -504,7 +506,7 @@ impl Stage {
             return Ok(());
         }
         let at = std::time::Instant::now();
-        on.prepare(kind, &self.shown.budget)?;
+        on.prepare(kind, &self.shown.budget, self.panel.1)?;
         eprintln!("mediabox-tv.spatial {kind:?} on the GPU in {:.1} ms held={}", at.elapsed().as_secs_f64() * 1e3, on.gpu.held());
         Ok(())
     }
@@ -553,9 +555,8 @@ impl Stage {
             return Err(Error::Context);
         };
         let (cam, place) = (Cam::from(cam), Place::from(place));
-        let mut spent = self.spent;
-        spent.add(&scene.cost(), place.w as u64 * place.h as u64);
-        self.shown.budget.holds(&spent)?;
+        let spent = self.spent.saturating_add(scene.cost().cycles(place.w as u64 * place.h as u64));
+        self.shown.budget.holds(spent, self.panel.1)?;
         #[cfg(feature = "spatial-lab")]
         let at = std::time::Instant::now();
         let gpu = on.gpu.clone();
@@ -723,15 +724,16 @@ impl Drop for Drawing {
     }
 }
 
-/// A frame: `draw` is Slint's renderer, the context is current.
-pub fn frame<T>(mut draw: impl FnMut() -> T) -> T {
+/// A frame of a panel that shows one every `period`: `draw` is Slint's
+/// renderer, the context is current.
+pub fn frame<T>(period: Duration, mut draw: impl FnMut() -> T) -> T {
     if STAGE.with(|stage| stage.borrow().is_none()) {
         return draw();
     }
     let mut again = AGAIN;
     loop {
         let Some(ui) = ui() else { return draw() };
-        let panel = ui.window().size();
+        let panel = (ui.window().size(), period);
         if stage(|stage| stage.open(panel)) == Some(true) {
             let spatial = ui.global::<Spatial>();
             spatial.set_tick(spatial.get_tick().wrapping_add(1));

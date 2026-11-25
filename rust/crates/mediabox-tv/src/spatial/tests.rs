@@ -80,23 +80,36 @@ fn a_scene_is_asked_for_in_words_and_bounded() {
     assert!(Shown::parse("stress").is_none());
 }
 
+/// What was counted on the televisions, and what the budget takes it for.
 #[test]
-fn a_frame_is_within_its_budget_or_says_what_it_is_not() {
-    let budget = Budget::PRODUCT;
-    let scene = Cost { triangles: budget.triangles / 3, instances: 10, layers: 2 };
-    let mut frame = Cost::default();
-    for _ in 0..3 {
-        frame.add(&scene, 1_000_000);
-        assert_eq!(budget.holds(&frame), Ok(()));
+fn the_budget_takes_a_scene_for_what_it_was_measured_to_be() {
+    let of = |triangles, instances, layers| Cost { triangles, instances, layers };
+    // Plus, 3840x2160: whole frame's cycles less the interface's own 1.6 M.
+    for (what, cost, pixels, counted) in [
+        ("L2", of(84_481, 32, 3), 2_761_403u64, 2.0e6),
+        ("L3", of(195_857, 5208, 3), 2_761_403, 3.1e6),
+        ("L2 full", of(84_481, 32, 3), 8_294_400, 4.3e6),
+        ("L2 full, 8 shells", of(109_057, 38, 9), 8_294_400, 6.7e6),
+        ("1000 objects", of(656_657, 6008, 3), 2_761_403, 5.5e6),
+        ("2000 objects", of(1_232_657, 7008, 3), 2_761_403, 8.6e6),
+        ("50000 particles", of(285_857, 50_208, 3), 2_761_403, 4.6e6),
+        // Ultra, 2560x1440, less 0.54 M.
+        ("Ultra L3", of(195_857, 5208, 3), 1_230_000, 2.35e6),
+        ("Ultra 100000 particles", of(284_000, 100_032, 3), 1_230_000, 5.15e6),
+    ] {
+        let taken = cost.cycles(pixels) as f64;
+        eprintln!("{what}: {taken:.2e} for {counted:.2e}");
+        assert!(taken > 0.89 * counted && taken < 1.34 * counted, "{what}: {taken:.2e} for {counted:.2e}");
     }
-    assert_eq!(frame.layers, 600);
-    frame.add(&scene, 0);
-    assert_eq!(budget.holds(&frame), Err(Error::Budget("triangles")));
-    let mut full = Cost::default();
-    full.add(&Cost { layers: 4, ..Cost::default() }, 3840 * 2160);
-    full.add(&Cost { layers: u32::MAX / 10_000, ..Cost::default() }, 100);
-    assert_eq!(budget.holds(&full), Err(Error::Budget("fill")));
-    assert_eq!(budget.holds(&Cost { instances: u64::MAX, ..Cost::default() }), Err(Error::Budget("instances")));
+    // A frame's: three of the heaviest at 60 Hz, one at 144.
+    let (sixty, fast) = (Duration::from_nanos(16_666_667), Duration::from_nanos(6_944_444));
+    let l3 = of(195_857, 5208, 3);
+    assert_eq!(Budget::PRODUCT.holds(3 * l3.cycles(2_761_403), sixty), Ok(()));
+    assert_eq!(Budget::PRODUCT.holds(l3.cycles(1_230_000), fast), Ok(()));
+    assert!(Budget::PRODUCT.holds(of(2_000_000, 0, 1).cycles(0), sixty).is_err());
+    assert!(Budget::PRODUCT.holds(of(1_000_000, 0, 1).cycles(0), fast).is_err());
+    assert!(Budget::PRODUCT.holds(of(u64::MAX, u64::MAX, u32::MAX).cycles(u64::MAX), sixty).is_err());
+    assert_eq!(Budget::NONE.holds(u64::MAX, fast), Ok(()));
 }
 
 #[test]
