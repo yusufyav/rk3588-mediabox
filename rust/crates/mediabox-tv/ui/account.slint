@@ -50,7 +50,7 @@ export component Account inherits Rectangle {
     property <length> col-x: (root.width - col-w) / 2;
     property <length> field-h: Metrics.root-font * 2.9;
 
-    background: Theme.bg;
+    background: Theme.quiet ? transparent : Theme.bg;
     clip: true;
 
     if Theme.quiet: QuietGround {
