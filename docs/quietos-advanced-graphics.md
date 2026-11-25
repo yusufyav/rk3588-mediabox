@@ -12,7 +12,8 @@ MHz, DDR 2400 MHz). Bağlı monitörün mod listesinde **3840x2160 yok**: 4K60
    çevrimi ister ve karelerin ~%20'sini kaçırır; kısmi çizimi çalıştırıldığında
    da durum değişmez.
 2. **Karmaşık sahneler GPU-resident olur** (`src/spatial`): çalışıyor, Slint'in
-   kendi context'inde, tek geçişle. Sahne CPU maliyeti nesne sayısından bağımsız.
+   kendi context'inde, kareden önce bir (MSAA'lı sahnede iki) geçişle. Süreç CPU
+   maliyeti nesne sayısıyla neredeyse değişmez (32 → 6000: 2,10 → 2,15 Mkomut/kare).
 3. **AFBC taraması bu libmali ile mümkün değil.** Neden aşağıda; kapandı.
 4. RGA: raster darboğazı bulunmadı, denenmedi. NPU/VPU: kapsam dışı.
 
@@ -37,7 +38,8 @@ Kısmi çizim üç ayrı nedenle **sessizce kapalıydı**; API'yi açmak yetmiyo
 Üçünden ikisi giderilince kısmi çizim **gerçekten** çalıştı. Kanıt donanım
 sayacı: kategori gezinmesinde gölgelenen quad 9,8 M → 3,2 M/kare, GPU 3,44 →
 2,15 Mçevrim. Ana ekranda ise bölge her karede 1280x720 (mantıksal) = %100:
-900 ms ışık geçişi zemini her kare değiştirir; kazanç sıfır. Süre kısaltılmadı.
+en olası neden zemini her kare değiştiren 900 ms ışık geçişi (bölge ölçüldü, neden
+koddan çıkarıldı); bu ekranda kazanç sıfır. Süre kısaltılmadı.
 
 | | FemtoVG | Skia | Skia kısmi (çalışır hâlde) | Skia kısmi + DMSAA |
 |---|---|---|---|---|
@@ -57,7 +59,7 @@ hücresi yaş=0'lı derlemedendir: fiilen tam çizim.)
 Neden: yolları CPU'da maskeye çevirip yüklüyor (8,7 MB/kare); DMSAA bunu GPU'ya
 taşır, bu kez fragment maliyeti artar. Path cache yardım etmiyor, sahnelerin
 yolları her kare değişir. FemtoVG'nin 139 draw'u Mali'de pahalı değil. Binary: ürün
-32,65 MB (kurulu 32,59), skia+spatial+sayaç 37,31 MB (+4,7); yeni bağımlılık `skia-safe/skia-bindings` (önceden derlenmiş C++
+32,65 MB (kurulu 32,59), yalnız spatial 32,72, skia+spatial+sayaç 37,31 (+4,7); yeni bağımlılık `skia-safe/skia-bindings` (önceden derlenmiş C++
 ikilisi) ve `libstdc++`.
 Görsel: aynı düzen; FemtoVG'ye 32–34 dB (gradyan dither'ı, glif ve kenar raster
 farkı; yakalamalar farklı dakikada, saat da farklı).
@@ -90,7 +92,7 @@ shader'da. Karede CPU: birkaç uniform. Aynı kamera tekrar sorulursa GL hiç
 çağrılmaz (model yenilenmesi dahil; testli). Bağlam değişirse (EGLContext
 kimliği) her şey yeniden kurulur, boyut değişirse yalnız doku; ekran verilirken
 hepsi silinir. GL durumu: framebuffer ve viewport saklanıp geri konur, kalanını
-FemtoVG her flush'ta kurar; VAO'lar yalıtır. Küre için shader derleme ve kurulum 45–47 ms,
+FemtoVG her flush'ta kurar; VAO'lar yalıtır. Küre için shader derleme ve kurulum 45–55 ms,
 açılışın ilk karesinde (hareketin ilk karesinde değil).
 
 İki Mali bulgusu:
@@ -132,9 +134,9 @@ Cihaz karesi göz kontrolünden geçti.
 ### Seviye 2 ve 3 — sahne sürekli hareketli, 144 Hz, 1440p
 
 `advanced`: perspektif kamera, derinlik, küre (shader ızgara), 5 iç içe halka, 24
-uydu, 2 cam kabuk, 4× MSAA. `stress`: +200 uydu, 5000 parçacık. Aşağısı
+uydu, 2 cam kabuk, 4× MSAA. `stress`: 24 yerine 200 uydu, 5000 parçacık. Aşağısı
 `advanced` üstünde tek değişken. Nokta başına 3 s; taban ve seviyeler iki kez (ortalama).
-"CPU µs" sahnenin karedeki bütün CPU süresi; Mkomut bütün süreç.
+"CPU µs" sahnenin karedeki CPU süresidir ve CPU saatiyle oynar (kıyas için Mkomut); Mkomut bütün süreç.
 
 | | fps | kaçan % | GPU Mçevrim | fragment / vertex M | CPU µs | süreç Mkomut | dış GB/s | draw · geçiş | nesne · instance | vertex · üçgen | alan Mpx |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -164,10 +166,10 @@ Frekanslar tavana çıkmadan okunan ms yanıltır: kıyas çevrimdedir; 1000 MHz
 
 **Sınır.** 144 Hz'te ~650 bin üçgen/kare (1000 nesne) veya 100 bin parçacık
 %71–76 GPU meşguliyetiyle kaçırmadan geçer; 1,8 M üçgende 84, 200 bin parçacıkta
-103 fps'e düşer. Tam ekranda 2 cam kat rahat, 8 kat sınırda, 32 kat 65 fps.
+103 fps'e düşer. Tam ekranda 2 cam kat rahat, 8 katta %1,6 kayıp (GPU %61, saat 960 MHz: tek ölçüm), 32 kat 65 fps.
 Geometri darboğazı vertex/tiler ve dış bellek (7 GB/s'te doyar), doldurma
 darboğazı fragmenttir. **CPU darboğaz olmaz**: 32 → 6000 nesnede süreç komutu 2,10 → 2,15 M/kare;
-sahnenin CPU payı bütçenin %2–5'i. Bütün `stress` noktalarında 1000 MHz'e çıkılır;
+sahnenin CPU payı kare bütçesinin %1–5'i. Bütün `stress` noktalarında 1000 MHz'e çıkılır;
 kalıcı frekans artışı yapılmadı. Bellek: L2 49, L3 52 MB GPU belleği; ağır
 noktalardan (10 bin nesne, tam ekran) sonra sürücü havuzu geri vermez (175–230 MB
 kalır): üretimde sahne karmaşıklığı tavanla sınırlanmalıdır. Sıcaklık 49 → 62 °C.
@@ -179,7 +181,7 @@ kalır): üretimde sahne karmaşıklığı tavanla sınırlanmalıdır. Sıcakl�
   `IMG_context_priority`. GLES: `EXT_multisampled_render_to_texture(2)`,
   `EXT_shader_framebuffer_fetch`, pixel local storage, `EXT_disjoint_timer_query`,
   `EXT_buffer_storage`, geometry/tessellation, ASTC. Tam liste
-  `tools/mali-afbc-probe.c` çıktısında.
+  `results/quietos-advanced-graphics/mali-probe.txt`.
 - Donanım sayaçları **erişilebilir** (kinstr_prfcnt, libGPUCounters;
   `tools/spatial-bench/mali-counters.cpp`): fragment/tiler çevrimi, karo, quad,
   dış bellek baytı.
@@ -190,8 +192,8 @@ kalır): üretimde sahne karmaşıklığı tavanla sınırlanmalıdır. Sıcakl�
 **AFBC neden olmuyor.** (a) Ekran denetleyicisi kabul ediyor: dumb tampon +
 AFBC modifier → `ADDFB2` OK. (b) `eglQueryDmaBufModifiersEXT(AR24)` yalnız
 LINEAR döner. (c) GBM her AFBC modifier'ını (bo, bo+RENDERING, bo+SCANOUT,
-surface) reddeder ve **errno yazmaz** (0 kalır): önceki `ENOENT` bayat
-errno'ydu, bir dosya aranmıyor. (d) GBM atlanıp tampon doğrudan verilince de
+surface) reddeder ve **errno yazmaz** (0 kalır): önceki `ENOENT`in bayat
+errno olduğu buradan çıkarımdır; o denemenin kodu yeniden koşulmadı. (d) GBM atlanıp tampon doğrudan verilince de
 `eglCreateImage` `EGL_BAD_MATCH` (0x3009); aynı yol LINEAR ile çiziyor. Yani
 engel kernel/VOP2 değil, libmali g24p0'ın dışa açtığı modifier kümesi. İç
 FBO dokuları için bir şey söylemez.
@@ -238,6 +240,42 @@ variant.sh idle.py <binary> MEDIABOX_TV_RENDERER=skia|skia-partial
 bench.py <çıktı> ; sweep.py <çıktı> <s> "<sahne> run ..."
 ```
 
-Ham veri (git'te değil): cihazda `/root/mediabox-verify/advgfx`, geliştirmede
-`/var/tmp/rk3588-mediabox/logs/advgfx`. PR #6'nın sonuçları
+## Build, test ve commit
+
+| | Beklenen | Gerçekleşen |
+|---|---|---|
+| ARM64 release, uyarısız: varsayılan / `spatial` / hepsi | derlenir | derlendi |
+| `tests/run-host-tests.sh` | 0 FAIL | 299 ok, 0 FAIL |
+| `mediabox-tv` testleri, varsayılan | 0 hata | 585 geçti, 2 yok sayıldı |
+| `mediabox-tv` testleri, `spatial` (`MEDIABOX_TV_GL=require`) | 0 hata | 589 geçti, 2 yok sayıldı |
+| clippy, yeni dosyalar | uyarı yok | uyarı yok |
+| clippy, varsayılan derleme | main'den kötü değil | 37 uyarı; ilk beş tür ve sayısı main ile aynı, tam liste kıyaslanmadı |
+
+İki tam `mediabox-tv` koşusu ayrı düz-alfa geçişinden (`second`) öncedir;
+sonrasında GPU sahne testleri tekrar koşuldu (4/4), tam takım yinelenmedi.
+
+| Commit | İçerik |
+|---|---|
+| `f3a3810` | kod, araçlar, rapor |
+| `7bfcf34` | raporda ölçülen ile çıkarım ayrıldı |
+| bu dosyayı en son değiştiren | rapor denetimi, ham veri |
+
+Küre turları `r5` deney derlemesiyle, kapasite taraması `r8` ile (commit'lenen
+kod) ölçüldü; aradaki farklar ölçüm sayacı ve `second` geçişidir, küre yolunu
+değiştirmez. Skia turları ilk üç deney derlemesiyledir.
+
+## Ham veri
+
+`results/quietos-advanced-graphics/`:
+
+- `capacity.jsonl`: seviyeler ve kapasite (bölüm 2)
+- `straight-alpha.jsonl`: düz alfa yöntemleri, MSAA
+- `globe-3rounds.jsonl`: A/T/G, dosya sırası `A T G | G T A | T A G`; her varyant
+  5 senaryo, senaryo başına iki satır (`name`, `extra`)
+- `skia-round1.jsonl`: FemtoVG, Skia, Skia kısmi (notifier takılı: fiilen kapalı)
+- `skia-round2.jsonl`: kısmi (yaş 0), kısmi+DMSAA, DMSAA, FemtoVG; sırayla
+- `skia-round3.jsonl`: kısmi, kısmi+DMSAA; ikisi de çalışır hâlde, sırayla
+- `mali-probe.txt`: EGL/GLES uzantıları, AFBC denemeleri
+
+Ekran yakalamaları git'te değildir (ağ adı görünüyor). PR #6'nın sonuçları
 `experiment/quietos-hardware-animation` dalında.
