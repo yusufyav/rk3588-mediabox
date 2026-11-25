@@ -33,9 +33,6 @@ mod route;
 mod rpc;
 mod screens;
 mod session;
-#[cfg(feature = "skia")]
-mod skia;
-#[cfg(feature = "spatial")]
 mod spatial;
 mod state;
 mod video;
@@ -9067,37 +9064,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let handle = window.as_weak();
         let reported = std::cell::Cell::new(false);
-        let drawn = move || {
+        platform::on_drawn(move || {
             with_app(|app| app.meter.frame());
             if !reported.replace(true) {
                 if let Some(window) = handle.upgrade() {
                     report_surface(&window);
                 }
             }
-        };
-        // Slint's Skia renderer draws the whole window whenever a rendering
-        // notifier is set, whatever was asked of it: the experiment is told
-        // of its frames by the platform instead.
-        #[cfg(feature = "skia")]
-        let drawn = {
-            let drawn = Rc::new(drawn);
-            let told = drawn.clone();
-            platform::on_drawn(move || told());
-            move || drawn()
-        };
-        if !platform::tells_frames() {
-            window
-                .window()
-                .set_rendering_notifier(move |state, _| {
-                    if matches!(state, slint::RenderingState::AfterRendering) {
-                        drawn();
-                    }
-                })
-                .expect("this renderer cannot report when it has drawn");
-        }
+        });
     }
 
-    #[cfg(feature = "spatial")]
     spatial::attach(&window);
 
     // Keys from the appliance's own keyboards, through libinput. The remote

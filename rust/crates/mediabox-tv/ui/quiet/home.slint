@@ -278,8 +278,11 @@ export component QuietHome inherits Rectangle {
         for tile[i] in apps: Rectangle {
             width: 100%;
             height: 100%;
-            // The experiment's GPU-resident globe in place of the drawn one.
-            if Spatial.on && tile.id == "browser" && QuietReach.scene(camera, i): SpatialScene {
+            // 0 unless the GPU draws this one's scene (spatial.slint).
+            property <int> spatial: Spatial.on ? Spatial.kind(tile.id, Spatial.epoch) : 0;
+            if spatial != 0 && QuietReach.scene(camera, i): SpatialScene {
+                name: tile.id;
+                kind: spatial;
                 property <float> extra: i == focus-row ? camera.arrive : 0;
                 width: 100%;
                 height: 100%;
@@ -291,7 +294,7 @@ export component QuietHome inherits Rectangle {
                 panel-w: root.width;
                 panel-h: root.height;
             }
-            if !(Spatial.on && tile.id == "browser") && QuietReach.scene(camera, i): Scene {
+            if spatial == 0 && QuietReach.scene(camera, i): Scene {
                 property <float> extra: i == focus-row ? camera.arrive : 0;
                 width: 100%;
                 height: 100%;

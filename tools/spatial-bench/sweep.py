@@ -8,13 +8,14 @@ ile başlatılmış olmalı (variant.sh). Sahne Tarayıcı satırındadır.
 """
 import glob, json, os, sys, time
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, HERE)
-out, secs, points = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
+args = sys.argv[1:]
+out, secs = args[0], float(args[1])
 sys.argv = [sys.argv[0], out]
 import measure as m, bench as b
 CONTROL = "/run/mediabox-spatial"
 def put(t): open(CONTROL, "w").write(t)
-def point(config):
-    put(config); time.sleep(2.5)
+def point(config, settle=2.5):
+    put(config); time.sleep(settle)
     if m.busy(): sys.exit("ABORT %s" % m.busy())
     os.mkdir("/run/mediabox-trace"); time.sleep(.6)
     c = b.counters_start(); d = b.Ddr(); d.start(); time.sleep(.2)
@@ -45,10 +46,13 @@ def point(config):
              ddr_load=round(sum(x[0] for x in d.l) / max(1, len(d.l)), 1), spatial=b.kv(log, "tv.spatial"), gl=b.kv(log, "tv.glcount"), gpu_mem=round(m.gmem(), 1), rss=round(m.rss()),
              temp=max(int(open(f).read()) for f in glob.glob("/sys/class/thermal/thermal_zone*/temp")) // 1000)
     print(json.dumps(r), flush=True); open(f"{out}/sweep.jsonl", "a").write(json.dumps(r) + "\n")
-put("nothing"); m.home(2)
-try:
-    for p in points: point(p)
-finally:
+def end():
     put("nothing"); time.sleep(2)
     for x in ("/run/mediabox-trace", "/run/mediabox-trace.done"): m.shutil.rmtree(x, ignore_errors=True)
-    m.home(0); os.unlink(CONTROL)
+    if not m.busy(): m.home(0)
+    os.unlink(CONTROL)
+if __name__ == "__main__":
+    put("nothing"); m.home(2)
+    try:
+        for p in args[2:]: point(p)
+    finally: end()

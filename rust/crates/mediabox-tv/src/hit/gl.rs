@@ -30,20 +30,29 @@ use slint::platform::femtovg_renderer::{FemtoVGRenderer, OpenGLInterface};
 /// The pbuffer: the largest panel the appliance drives.
 const MOST: (u32, u32) = (3840, 2160);
 
+/// The GPU's own scenes among Slint's (src/spatial).
+mod spatial;
+
 // ------------------------------------------------------- what GL was asked
 
 type Gen = unsafe extern "C" fn(i32, *mut u32);
 type Delete = unsafe extern "C" fn(i32, *const u32);
 type Bind = unsafe extern "C" fn(u32, u32);
 type Read = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8);
+type Clear = unsafe extern "C" fn(u32);
 type Image = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
 
 thread_local! {
-    static REAL: Cell<[*const c_void; 4]> = const { Cell::new([std::ptr::null(); 4]) };
+    static REAL: Cell<[*const c_void; 5]> = const { Cell::new([std::ptr::null(); 5]) };
     /// Textures alive.
     static TEXTURES: Cell<i64> = const { Cell::new(0) };
     /// Passes into a texture rather than the panel.
     static PASSES: Cell<u32> = const { Cell::new(0) };
+    /// Times FemtoVG cleared, which is how it begins to issue a frame.
+    static CLEARS: Cell<u32> = const { Cell::new(0) };
+    /// Frames presented, and frames drawn that were not.
+    static PRESENTED: Cell<u32> = const { Cell::new(0) };
+    static WITHHELD: Cell<u32> = const { Cell::new(0) };
     /// The longest side of any texture made.
     static LONGEST: Cell<i32> = const { Cell::new(0) };
 }
@@ -66,6 +75,12 @@ unsafe extern "C" fn bind_framebuffer(target: u32, which: u32) {
     }
     let real: Bind = unsafe { std::mem::transmute(REAL.get()[2]) };
     unsafe { real(target, which) }
+}
+
+unsafe extern "C" fn clear(what: u32) {
+    CLEARS.set(CLEARS.get() + 1);
+    let real: Clear = unsafe { std::mem::transmute(REAL.get()[4]) };
+    unsafe { real(what) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,6 +132,7 @@ impl Pbuffer {
         // SAFETY: the same.
         let surface = unsafe { display.create_pbuffer_surface(&config, &size) }.map_err(told)?;
         let context = context.make_current(&surface).map_err(told)?;
+        crate::spatial::gl::context_made();
         Ok(Self { display, context, surface })
     }
 }
@@ -129,6 +145,8 @@ unsafe impl OpenGLInterface for Pbuffer {
     }
 
     fn swap_buffers(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let count = if crate::spatial::withheld() { &WITHHELD } else { &PRESENTED };
+        count.set(count.get() + 1);
         Ok(())
     }
 
@@ -148,6 +166,7 @@ unsafe impl OpenGLInterface for Pbuffer {
             b"glGenTextures" => counted(0, gen_textures as *const c_void),
             b"glDeleteTextures" => counted(1, delete_textures as *const c_void),
             b"glBindFramebuffer" => counted(2, bind_framebuffer as *const c_void),
+            b"glClear" => counted(4, clear as *const c_void),
             b"glTexImage2D" => counted(3, tex_image as *const c_void),
             _ => real,
         }
@@ -232,7 +251,6 @@ impl Picture {
     }
 }
 
-#[cfg(feature = "spatial")]
 impl Drop for Drawn {
     fn drop(&mut self) {
         crate::spatial::stop();
@@ -291,11 +309,11 @@ impl Drawn {
 
     /// A frame of the moment Slint's clock is at.
     fn draw(&self) {
-        self.window.redraw.set(false);
-        #[cfg(feature = "spatial")]
-        crate::spatial::frame(|| self.window.renderer.render()).expect("a frame");
-        #[cfg(not(feature = "spatial"))]
-        self.window.renderer.render().expect("a frame");
+        crate::spatial::frame(|| {
+            self.window.redraw.set(false);
+            self.window.renderer.render()
+        })
+        .expect("a frame");
     }
 
     /// Drawn as it goes for `ms`, then at rest.
@@ -727,88 +745,4 @@ fn a_long_launcher_is_drawn_whole_and_its_texture_is_bounded() {
     });
     drawn.ui.window().dispatch_event(WindowEvent::PointerMoved { position: LogicalPosition::new(300.0, 815.0) });
     assert_eq!(*over.borrow(), [59]);
-}
-
-/// The GPU-resident globe is the drawn one: at rest and half way through a
-/// move, at the same instant, what Slint's own paths make and what the GPU's
-/// curves make differ by no more than two rasterisers' edges do.
-#[cfg(feature = "spatial")]
-#[test]
-fn the_gpu_globe_is_the_drawn_globe() {
-    let Some(drawn) = Drawn::open() else { return };
-    let apps = Rc::new(VecModel::from(launcher(6)));
-    let row = (0..6).find(|&i| slint::Model::row_data(&*apps, i).unwrap().id == "browser").expect("Tarayıcı") as i32;
-    crate::spatial::start_with(&drawn.ui, "globe");
-    let spatial = drawn.ui.global::<crate::Spatial>();
-    let show = |on: bool| {
-        spatial.set_on(on);
-        // The element comes into being on one frame and is drawn on the next.
-        drawn.draw();
-        drawn.draw();
-        drawn.read()
-    };
-    // Mean squared error and the largest difference, over the scene's side.
-    let compare = |a: &Picture, b: &Picture, what: &str| {
-        let (mut sum, mut worst, mut far, mut n) = (0u64, 0u8, 0usize, 0usize);
-        for (p, q) in a.pixels.as_chunks::<4>().0.iter().zip(b.pixels.as_chunks::<4>().0) {
-            for i in 0..3 {
-                let by = p[i].abs_diff(q[i]);
-                sum += u64::from(by) * u64::from(by);
-                worst = worst.max(by);
-                far += usize::from(by > 16);
-                n += 1;
-            }
-        }
-        let psnr = 10.0 * (255.0f64 * 255.0 / (sum as f64 / n as f64).max(1e-9)).log10();
-        eprintln!("{what}: PSNR {psnr:.1} dB, worst {worst}, over 16: {:.4}%", 100.0 * far as f64 / n as f64);
-        a.keep(&format!("globe-{what}-slint"));
-        b.keep(&format!("globe-{what}-gpu"));
-        psnr
-    };
-    for &(w, h, scale) in PANELS {
-        drawn.panel(w, h, scale);
-        drawn.vitals(false, true, 3);
-        drawn.home(&apps, row);
-        drawn.rest(1200);
-        let psnr = compare(&show(false), &show(true), &format!("{h}-rest"));
-        assert!(psnr > 42.0, "{h}: {psnr}");
-        for (to, ms) in [(row - 1, 90), (row, 260), (row + 1, 180), (row, 120), (row, 700)] {
-            drawn.ui.set_focus_col(to);
-            drawn.rest(ms);
-            let psnr = compare(&show(false), &show(true), &format!("{h}-{to}-{ms}"));
-            assert!(psnr > 40.0, "{h} {to} {ms}: {psnr}");
-        }
-    }
-}
-
-/// A scene at rest is not drawn: not by a frame that something else asked
-/// for, and not by the launcher's model being replaced under it. And what
-/// the foundation draws beyond the globe is there, at every size of panel.
-#[cfg(feature = "spatial")]
-#[test]
-fn a_gpu_scene_at_rest_is_not_drawn_again() {
-    let Some(drawn) = Drawn::open() else { return };
-    let apps = Rc::new(VecModel::from(launcher(6)));
-    let row = (0..6).find(|&i| slint::Model::row_data(&*apps, i).unwrap().id == "browser").expect("Tarayıcı") as i32;
-    crate::spatial::start_with(&drawn.ui, "stress objects=60 particles=800 msaa=4");
-    for &(w, h, scale) in PANELS {
-        drawn.panel(w, h, scale);
-        drawn.home(&apps, row);
-        drawn.rest(1200);
-        let there = drawn.picture();
-        there.keep(&format!("{h}-advanced"));
-        let before = crate::spatial::times_drawn();
-        assert!(before > 0);
-        drawn.vitals(true, false, 0);
-        drawn.rest(300);
-        drawn.ui.set_apps(ModelRc::from(Rc::new(VecModel::from(launcher(6)))));
-        drawn.rest(300);
-        assert_eq!(crate::spatial::times_drawn(), before, "{h}: drawn at rest");
-        drawn.ui.global::<crate::Spatial>().set_on(false);
-        drawn.frame();
-        let without = drawn.picture();
-        assert!(there.unlike(&without, 16) > (w * h / 100) as usize, "{h}: nothing to see");
-        drawn.ui.global::<crate::Spatial>().set_on(true);
-        drawn.frame();
-    }
 }

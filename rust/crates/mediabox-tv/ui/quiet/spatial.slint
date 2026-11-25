@@ -5,7 +5,9 @@ import { SceneBase } from "scenes.slint";
 // A scene whose geometry lives on the GPU (src/spatial): Slint keeps the
 // camera, the timing and the place on the panel, and shows the picture drawn
 // from them like any other image. Nothing here is drawn unless `Spatial.on`
-// says so, and nothing sets it outside the experiment.
+// says so, and nothing sets it unless a scene is named when it starts.
+//
+// Not under `cache-rendering-hint` (`Kept`, `Still`).
 
 // Where a scene stands and what the camera says of it: all the CPU hands the
 // GPU for a frame.
@@ -33,7 +35,6 @@ export struct SpatialCam {
     panel-h: float,
     // Device pixels in a logical one.
     scale: float,
-    tick: int,
 }
 
 // The part of the panel the picture covers, whole device pixels.
@@ -41,12 +42,21 @@ export struct SpatialPlace { x: int, y: int, w: int, h: int }
 
 export global Spatial {
     in property <bool> on: false;
+    // Every frame calls the roll: a scene still shown asks again.
     in property <int> tick;
-    pure callback place(SpatialCam) -> SpatialPlace;
-    pure callback picture(SpatialCam, SpatialPlace) -> image;
+    // Moves on when `kind` has another answer.
+    in property <int> epoch;
+    // What draws this element; 0 for the interface itself -- it never was
+    // the GPU's, or it could not be.
+    pure callback kind(string, int) -> int;
+    pure callback place(int, SpatialCam) -> SpatialPlace;
+    pure callback picture(string, int, SpatialCam, SpatialPlace, int) -> image;
 }
 
 export component SpatialScene inherits SceneBase {
+    // Whose picture it is, and what draws it (`Spatial.kind`).
+    in property <string> name;
+    in property <int> kind;
     in property <length> panel-w;
     in property <length> panel-h;
     // Device pixels in a logical one.
@@ -60,15 +70,14 @@ export component SpatialScene inherits SceneBase {
         depth: QuietMotion.depth, parallax: QuietMotion.parallax, travel: QuietMotion.travel,
         panel-w: root.panel-w / 1px * k, panel-h: root.panel-h / 1px * k,
         scale: k,
-        tick: Spatial.tick,
     };
-    property <SpatialPlace> place: Spatial.place(cam);
+    property <SpatialPlace> place: Spatial.place(kind, cam);
     if place.w > 0 && place.h > 0: Image {
         x: place.x / k * 1px - root.absolute-position.x;
         y: place.y / k * 1px - root.absolute-position.y;
         width: place.w / k * 1px;
         height: place.h / k * 1px;
-        source: Spatial.picture(cam, place);
+        source: Spatial.picture(root.name, root.kind, cam, place, Spatial.tick);
         source-clip-x: 0;
         source-clip-y: 0;
         source-clip-width: place.w;

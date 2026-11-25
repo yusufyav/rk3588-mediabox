@@ -4,9 +4,11 @@
 //! how visible each plane is -- forty-odd numbers a frame -- and draws one
 //! instanced strip: an instance is one curve, its parameters never change.
 
-use super::gl::{Drawn, Error, Mesh, MeshData, program};
-use super::{Cam, Place};
-use glow::{Context, HasContext, NativeProgram};
+use std::rc::Rc;
+
+use super::gl::{Drawn, Error, Gpu, Mesh, MeshData, Owned, program};
+use super::{Cam, Cost, Pass, Place, Scene};
+use glow::{HasContext, NativeProgram};
 
 /// Steps along a curve. The largest is a circle of 305 units: at 4K (1300
 /// pixels of box) a chord is 0.08 px off it.
@@ -187,9 +189,9 @@ void main() {
 ";
 
 pub struct Globe {
-    program: NativeProgram,
+    program: Owned<NativeProgram>,
     /// Straight alpha as it is drawn.
-    pub fetch: bool,
+    fetch: bool,
     mesh: Mesh,
     at: [Option<glow::NativeUniformLocation>; 8],
 }
@@ -261,8 +263,8 @@ pub fn place(cam: &Cam) -> Place {
 }
 
 impl Globe {
-    pub fn new(gl: &Context, fetch: bool) -> Result<Self, Error> {
-        let program = program(gl, VERTEX, &format!("{}{FRAGMENT}", FRAGMENT_HEAD[usize::from(fetch)]))?;
+    pub fn new(gpu: &Rc<Gpu>) -> Result<Self, Error> {
+        let program = program(gpu, VERTEX, &format!("{}{FRAGMENT}", FRAGMENT_HEAD[usize::from(gpu.fetch)]))?;
         let mut vertices = Vec::new();
         for i in 0..=STEPS {
             for side in [-1.0, 1.0] {
@@ -272,7 +274,7 @@ impl Globe {
         let indices: Vec<u32> = (0..(STEPS as u32 + 1) * 2).collect();
         let instances: Vec<f32> = curves().concat();
         let mesh = Mesh::new(
-            gl,
+            gpu,
             &MeshData {
                 vertices: &vertices,
                 vertex: &[2],
@@ -284,20 +286,29 @@ impl Globe {
         )?;
         let at = ["u_box", "u_view", "u_plane", "u_fade", "u_weight", "u_colour", "u_spin", "u_slip"]
             // SAFETY: the program was just linked on this context.
-            .map(|name| unsafe { gl.get_uniform_location(program, name) });
-        Ok(Self { program, mesh, at, fetch })
+            .map(|name| unsafe { gpu.gl.get_uniform_location(program.name, name) });
+        Ok(Self { program, mesh, at, fetch: gpu.fetch })
+    }
+}
+
+impl Scene for Globe {
+    /// Without `fetch` GL blends premultiplied, and the pass after divides.
+    fn pass(&self) -> Pass {
+        Pass { samples: 1, depth: false, straight: self.fetch }
     }
 
-    pub fn draw(&self, gl: &Context, cam: &Cam, place: &Place, drawn: &mut Drawn) {
+    fn cost(&self) -> Cost {
+        // The ball's faint disc under the lines: nothing else covers an area.
+        Cost { triangles: self.mesh.triangles(), instances: self.mesh.instances as u64, layers: 1 }
+    }
+
+    fn draw(&self, gpu: &Gpu, cam: &Cam, place: &Place, drawn: &mut Drawn) {
+        let gl = &gpu.gl;
         let [box_at, view, plane, fade, weight, colour, spin, slip] = &self.at;
         // SAFETY: the context is current and the pass is begun.
         unsafe {
-            gl.use_program(Some(self.program));
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            if self.fetch {
-                gl.disable(glow::BLEND);
-            } else {
+            gl.use_program(Some(self.program.name));
+            if !self.fetch {
                 gl.enable(glow::BLEND);
                 gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             }
@@ -312,13 +323,6 @@ impl Globe {
             gl.uniform_1_f32(slip.as_ref(), 0.5 * (1.0 - 1.0 / cam.scale));
             gl.uniform_1_f32(spin.as_ref(), 30.0 + (cam.d + 3.0) * 70.0);
         }
-        drawn.objects += self.mesh.instances as u64;
         self.mesh.draw(gl, drawn);
-    }
-
-    pub fn delete(self, gl: &Context) {
-        // SAFETY: see `draw`.
-        unsafe { gl.delete_program(self.program) };
-        self.mesh.delete(gl);
     }
 }

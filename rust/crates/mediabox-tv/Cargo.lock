@@ -2797,8 +2797,6 @@ dependencies = [
  "gbm",
  "glow",
  "glutin",
- "i-slint-core",
- "i-slint-renderer-skia",
  "image",
  "input",
  "libc",

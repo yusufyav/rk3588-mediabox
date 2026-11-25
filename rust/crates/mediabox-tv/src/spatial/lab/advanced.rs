@@ -7,9 +7,13 @@
 //! shader puts it where it is now. A frame costs the CPU two matrices, a
 //! handful of numbers and one draw per kind of thing, however many there are.
 
-use super::gl::{Drawn, Error, Mesh, MeshData, program};
-use super::{Cam, Config, Place, math};
-use glow::{Context, HasContext, NativeProgram};
+use std::rc::Rc;
+
+use super::super::gl::{Drawn, Error, Gpu, Mesh, MeshData, Owned, program};
+use super::super::{Cam, Cost, Pass, Place, Scene};
+use super::super::math;
+use super::Config;
+use glow::{HasContext, NativeProgram};
 
 const PI: f32 = std::f32::consts::PI;
 
@@ -166,9 +170,9 @@ fn scatter(i: usize, k: f32) -> f32 {
 }
 
 pub struct Advanced {
-    solid: NativeProgram,
+    solid: Owned<NativeProgram>,
     solid_at: [Option<glow::NativeUniformLocation>; 6],
-    dust: NativeProgram,
+    dust: Owned<NativeProgram>,
     dust_at: [Option<glow::NativeUniformLocation>; 5],
     opaque: Vec<Mesh>,
     glass: Option<Mesh>,
@@ -176,9 +180,9 @@ pub struct Advanced {
     of: Config,
 }
 
-fn solid(gl: &Context, (v, i): (Vec<f32>, Vec<u32>), instances: &[f32]) -> Result<Mesh, Error> {
+fn solid(gpu: &Rc<Gpu>, (v, i): (Vec<f32>, Vec<u32>), instances: &[f32]) -> Result<Mesh, Error> {
     Mesh::new(
-        gl,
+        gpu,
         &MeshData {
             vertices: &v,
             vertex: &[3, 3],
@@ -190,26 +194,35 @@ fn solid(gl: &Context, (v, i): (Vec<f32>, Vec<u32>), instances: &[f32]) -> Resul
     )
 }
 
-pub fn place(cam: &Cam, full: bool) -> Place {
-    if full {
+pub fn place(cam: &Cam) -> Place {
+    if cam.f_main <= 0.0 {
+        return Place::default();
+    }
+    if super::full() {
         return Place::covering(cam, [0.0, 0.0, cam.panel.0, cam.panel.1]);
     }
     let over = cam.size * 0.15;
     Place::covering(cam, [cam.x - over, cam.y - over, cam.x + cam.size + over, cam.y + cam.size + over])
 }
 
+/// For a measurement: moving for as long as it is shown.
+fn seconds() -> f32 {
+    static AT: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    AT.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()
+}
+
 impl Advanced {
-    pub fn new(gl: &Context, of: &Config) -> Result<Self, Error> {
-        let solid_program = program(gl, VERTEX, FRAGMENT)?;
-        let dust = program(gl, DUST_VERTEX, DUST_FRAGMENT)?;
+    pub fn new(gpu: &Rc<Gpu>, of: &Config) -> Result<Self, Error> {
+        let solid_program = program(gpu, VERTEX, FRAGMENT)?;
+        let dust = program(gpu, DUST_VERTEX, DUST_FRAGMENT)?;
         // SAFETY: programs just linked on this context.
         let (solid_at, dust_at) = unsafe {
             (
-                ["u_vp", "u_phase", "u_eye", "u_tint", "u_glow", "u_fade"].map(|n| gl.get_uniform_location(solid_program, n)),
-                ["u_vp", "u_phase", "u_size", "u_glow", "u_fade"].map(|n| gl.get_uniform_location(dust, n)),
+                ["u_vp", "u_phase", "u_eye", "u_tint", "u_glow", "u_fade"].map(|n| gpu.gl.get_uniform_location(solid_program.name, n)),
+                ["u_vp", "u_phase", "u_size", "u_glow", "u_fade"].map(|n| gpu.gl.get_uniform_location(dust.name, n)),
             )
         };
-        let mut opaque = vec![solid(gl, sphere(of.globe), &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.35])?];
+        let mut opaque = vec![solid(gpu, sphere(of.globe), &[0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.35])?];
         if of.rings > 0 {
             // Inside one another, each tilted and turning its own way. A ring
             // turns about its own axis, so it is its inclination that is seen
@@ -220,7 +233,7 @@ impl Advanced {
                     [0.0, 0.25 + 0.5 * i as f32, 0.5 * way, i as f32, 1.18 + 0.14 * i as f32, 1.0, 0.35, 0.3 * way]
                 })
                 .collect();
-            opaque.push(solid(gl, torus(of.detail * 16, of.detail * 2, 0.012), &instances)?);
+            opaque.push(solid(gpu, torus(of.detail * 16, of.detail * 2, 0.012), &instances)?);
         }
         if of.objects > 0 {
             let instances: Vec<f32> = (0..of.objects)
@@ -237,7 +250,7 @@ impl Advanced {
                     ]
                 })
                 .collect();
-            opaque.push(solid(gl, sphere(of.detail), &instances)?);
+            opaque.push(solid(gpu, sphere(of.detail), &instances)?);
         }
         let glass = (of.layers > 0)
             .then(|| {
@@ -246,7 +259,7 @@ impl Advanced {
                     .rev()
                     .flat_map(|i| [0.0, 0.0, 0.0, 0.0, 1.06 + 0.05 * i as f32, 2.0, 0.0, 0.0])
                     .collect();
-                solid(gl, sphere(32), &instances)
+                solid(gpu, sphere(32), &instances)
             })
             .transpose()?;
         let particles = (of.particles > 0)
@@ -262,7 +275,7 @@ impl Advanced {
                     })
                     .collect();
                 Mesh::new(
-                    gl,
+                    gpu,
                     &MeshData {
                         vertices: &[-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0],
                         vertex: &[2],
@@ -276,16 +289,28 @@ impl Advanced {
             .transpose()?;
         Ok(Self { solid: solid_program, solid_at, dust, dust_at, opaque, glass, particles, of: of.clone() })
     }
+}
 
-    /// Whether what is on the GPU is what `of` asks for.
-    pub fn is(&self, of: &Config) -> bool {
-        let shape = |c: &Config| (c.globe, c.rings, c.objects, c.detail, c.layers, c.particles);
-        shape(&self.of) == shape(of)
+impl Scene for Advanced {
+    fn pass(&self) -> Pass {
+        Pass { samples: self.of.samples, depth: true, straight: false }
     }
 
-    pub fn draw(&self, gl: &Context, cam: &Cam, place: &Place, of: &Config, drawn: &mut Drawn) {
+    fn cost(&self) -> Cost {
+        let all = || self.opaque.iter().chain(&self.glass).chain(&self.particles);
+        Cost {
+            triangles: all().map(Mesh::triangles).sum(),
+            instances: all().map(|mesh| mesh.instances as u64).sum(),
+            // A shell has a far side and a near one only where it is not
+            // culled: one layer each. The dust is small.
+            layers: 1 + self.of.layers as u32,
+        }
+    }
+
+    fn draw(&self, gpu: &Gpu, cam: &Cam, place: &Place, drawn: &mut Drawn) {
+        let (gl, of) = (&gpu.gl, &self.of);
         // The camera travels with the launcher's: nearer and round as it passes.
-        let phase = if of.run { cam.seconds } else { -2.0 * cam.d };
+        let phase = if of.run { seconds() } else { -2.0 * cam.d };
         let (distance, turn) = if of.run {
             (4.6 + 0.5 * (phase * 0.7).sin(), phase * 0.25)
         } else {
@@ -298,7 +323,7 @@ impl Advanced {
         let [u_vp, u_phase, u_eye, u_tint, u_glow, u_fade] = &self.solid_at;
         // SAFETY: the context is current and the pass is begun.
         unsafe {
-            gl.use_program(Some(self.solid));
+            gl.use_program(Some(self.solid.name));
             gl.uniform_matrix_4_f32_slice(u_vp.as_ref(), false, &vp);
             gl.uniform_1_f32(u_phase.as_ref(), phase);
             gl.uniform_3_f32(u_eye.as_ref(), eye[0], eye[1], eye[2]);
@@ -315,7 +340,6 @@ impl Advanced {
             gl.front_face(glow::CW);
         }
         for mesh in &self.opaque {
-            drawn.objects += mesh.instances as u64;
             mesh.draw(gl, drawn);
         }
         // SAFETY: see above.
@@ -325,7 +349,6 @@ impl Advanced {
             gl.depth_mask(false);
         }
         if let Some(glass) = &self.glass {
-            drawn.objects += glass.instances as u64;
             glass.draw(gl, drawn);
         }
         if let Some(particles) = &self.particles {
@@ -333,7 +356,7 @@ impl Advanced {
             let size = 0.018 * of.dust;
             // SAFETY: see above.
             unsafe {
-                gl.use_program(Some(self.dust));
+                gl.use_program(Some(self.dust.name));
                 gl.disable(glow::CULL_FACE);
                 gl.uniform_matrix_4_f32_slice(u_vp.as_ref(), false, &vp);
                 gl.uniform_1_f32(u_phase.as_ref(), phase);
@@ -342,22 +365,6 @@ impl Advanced {
                 gl.uniform_1_f32(u_fade.as_ref(), fade);
             }
             particles.draw(gl, drawn);
-        }
-        // SAFETY: see above.
-        unsafe {
-            gl.depth_mask(true);
-            gl.front_face(glow::CCW);
-        }
-    }
-
-    pub fn delete(self, gl: &Context) {
-        // SAFETY: see `draw`.
-        unsafe {
-            gl.delete_program(self.solid);
-            gl.delete_program(self.dust);
-        }
-        for mesh in self.opaque.into_iter().chain(self.glass).chain(self.particles) {
-            mesh.delete(gl);
         }
     }
 }

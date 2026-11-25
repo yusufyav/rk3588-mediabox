@@ -1,121 +1,164 @@
 //! GPU-resident spatial scenes: geometry that stays on the GPU, under a
-//! camera Slint animates. An experiment (docs/quietos-advanced-graphics.md),
-//! built only with the `spatial` feature and inert without
-//! MEDIABOX_TV_SPATIAL.
+//! camera Slint animates (docs/quietos-advanced-graphics.md).
 //!
-//! How a frame goes. The scene's element in ui/quiet/spatial.slint binds an
-//! image to a pure callback of its camera. Slint asks for that image while it
-//! draws, with the product's GL context current and its own drawing not yet
-//! submitted (FemtoVG queues a frame and issues it at the end), so the scene
-//! is drawn into its texture there and then, in a pass of its own *before*
-//! the frame's: no rendering notifier, no second context, no extra frame of
-//! latency, and the frame's pass is not cut in two -- on a tiled GPU a cut
-//! means storing and loading the whole panel again. The texture is what
-//! Slint calls a borrowed one: it is shown, not copied.
+//! A scene is an element of the interface (ui/quiet/spatial.slint). Slint
+//! keeps the camera, the timing and the place on the panel; the element's
+//! image is a pure callback of those, and what answers it draws the scene
+//! into a texture Slint then shows without copying it (a *borrowed* one).
+//! Nothing draws unless MEDIABOX_TV_SPATIAL names a scene: the interface's
+//! own scenes are Slint's, and cheaper drawn as they are.
 //!
-//! Nothing is drawn unless the camera, the place or the colours changed,
-//! because then the binding does not run. A panel of another size only makes
-//! the next texture larger; another GL context makes everything again.
+//! # A frame
+//!
+//! The platform draws a frame inside `frame`. Slint asks for the pictures
+//! while it walks the interface, when FemtoVG has only queued its own
+//! drawing, so a scene's pass is issued before the panel's and the panel's is
+//! not cut in two. That is an order of cost, not of correctness: a picture is
+//! drawn before the callback returns, so before anything that shows it can be
+//! issued; no texture is drawn twice in a frame, so nothing queued can show
+//! another's; and everything of GL's state is put back (`gl::Kept`), wherever
+//! in FemtoVG's work the callback came. Asked outside a frame, nothing is
+//! drawn: the picture there is is the answer, and the next frame asks again.
+//!
+//! # Who still shows a texture
+//!
+//! Slint says nothing when an element goes, so every frame calls the roll
+//! (`Spatial.tick`): each scene still shown asks for its picture again and is
+//! given the one there is, without GL, unless it moved. A texture nobody
+//! asked for is nobody's; it is kept a moment for the next scene -- a held
+//! key makes none -- and given back when the interface has been at rest.
+//! A texture that is replaced is deleted after the frame it was last shown in
+//! was issued, and by then its element has been given another.
+//!
+//! # When it cannot be done
+//!
+//! Shaders, textures, contexts and budgets fail. The frame that found out is
+//! not presented: the element it was for is told (`Spatial.kind`), Slint
+//! draws its own scene in that place, and the frame is drawn again.
+//!
+//! # A scene of one's own
+//!
+//! Implement `Scene`, name it in `Kind`, and bind a `SpatialScene` to it. Do
+//! not put one under `cache-rendering-hint`: the layer would keep a picture
+//! of a texture that has moved on.
 
-mod advanced;
-mod gl;
+mod budget;
+pub mod gl;
 mod globe;
+#[cfg(any(test, feature = "spatial-lab"))]
+mod lab;
+// For scenes with a lens; the product's first one takes the condition off.
+#[cfg(any(test, feature = "spatial-lab"))]
 mod math;
+#[cfg(test)]
+pub mod tests;
 
 use std::cell::{Cell, RefCell};
-use std::time::{Duration, Instant};
+use std::rc::Rc;
+use std::time::Duration;
 
-use glow::HasContext;
 use slint::ComponentHandle;
+
+pub use budget::{Budget, Cost};
+use gl::{Drawn, Error, Gpu, Kept, Scratch, Straight, Target};
 
 use crate::{MediaBoxWindow, Spatial, SpatialCam, SpatialPlace};
 
-/// What to draw, and how much of it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Config {
-    scene: Scene,
-    /// Quads from pole to pole of the globe.
-    globe: u32,
-    rings: usize,
-    objects: usize,
-    /// Quads from pole to pole of a satellite; a ring's are as fine.
-    detail: u32,
-    layers: usize,
-    particles: usize,
-    /// A particle's size, relative to its own.
-    dust: f32,
-    samples: i32,
-    /// Straight alpha by a pass of its own rather than in the tile it was
-    /// drawn in. With samples, reading the pixel under the shader is done for
-    /// every one of them: 2.4 million cycles of the GPU's a frame here, where
-    /// a second pass is cheaper than it can be measured (2026-11-25).
-    second: bool,
-    /// The whole panel rather than the scene's place in it.
-    full: bool,
-    /// Moving for as long as it is shown, for a measurement: not of the
-    /// camera's, and never at rest.
-    run: bool,
+/// How a scene is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pass {
+    pub samples: i32,
+    pub depth: bool,
+    /// Its picture is straight alpha as it draws it; otherwise premultiplied,
+    /// and made straight by a pass after it.
+    pub straight: bool,
 }
 
+impl Pass {
+    /// Drawn into its own texture, with nothing between.
+    fn alone(&self) -> bool {
+        self.straight && self.samples <= 1 && !self.depth
+    }
+}
+
+/// What draws one kind of scene. One per context, however many elements show
+/// it: its shaders and geometry are theirs together.
+pub trait Scene {
+    fn pass(&self) -> Pass;
+    fn cost(&self) -> Cost;
+    /// The pass is begun; the state is `Target::begin`'s.
+    fn draw(&self, gpu: &Gpu, cam: &Cam, place: &Place, drawn: &mut Drawn);
+}
+
+/// The scenes there are. `Spatial.kind` says them as numbers, 0 for none.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Scene {
-    /// The element is there and nothing is drawn: what a frame costs without.
-    Nothing,
+pub enum Kind {
     Globe,
+    /// The element is there and nothing is drawn: what a frame costs without.
+    #[cfg(any(test, feature = "spatial-lab"))]
+    Nothing,
+    #[cfg(any(test, feature = "spatial-lab"))]
     Advanced,
 }
 
-impl Config {
-    /// `globe`, `advanced`, `stress` or `nothing`, then `name=value`s.
-    fn parse(text: &str) -> Option<Self> {
-        let mut words = text.split([' ', ',', '\n']).filter(|word| !word.is_empty());
-        let base = Self {
-            scene: Scene::Advanced,
-            globe: 64,
-            rings: 5,
-            objects: 24,
-            detail: 12,
-            layers: 2,
-            particles: 0,
-            dust: 1.0,
-            samples: 4,
-            second: true,
-            full: false,
-            run: false,
-        };
-        let mut config = match words.next()? {
-            "nothing" => Self { scene: Scene::Nothing, ..base },
-            "globe" => Self { scene: Scene::Globe, samples: 1, second: false, ..base },
-            "advanced" => base,
-            "stress" => Self { objects: 200, particles: 5000, ..base },
-            _ => return None,
-        };
-        for word in words {
-            let (name, value) = word.split_once('=').unwrap_or((word, "1"));
-            let n: f32 = value.parse().ok()?;
-            // Bounded: this is a television, not a place to run out of memory.
-            let whole = |most: usize| (n.max(0.0) as usize).min(most);
-            match name {
-                "globe" => config.globe = whole(1024).max(3) as u32,
-                "rings" => config.rings = whole(512),
-                "objects" => config.objects = whole(200_000),
-                "detail" => config.detail = whole(256).max(3) as u32,
-                "layers" => config.layers = whole(64),
-                "particles" => config.particles = whole(2_000_000),
-                "dust" => config.dust = n,
-                "msaa" => config.samples = whole(16).max(1) as i32,
-                "second" => config.second = n != 0.0,
-                "full" => config.full = n != 0.0,
-                "run" => config.run = n != 0.0,
-                _ => return None,
-            }
+impl Kind {
+    fn number(self) -> i32 {
+        match self {
+            Self::Globe => 1,
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Nothing => 2,
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Advanced => 3,
         }
-        Some(config)
+    }
+
+    fn of(number: i32) -> Option<Self> {
+        match number {
+            1 => Some(Self::Globe),
+            #[cfg(any(test, feature = "spatial-lab"))]
+            2 => Some(Self::Nothing),
+            #[cfg(any(test, feature = "spatial-lab"))]
+            3 => Some(Self::Advanced),
+            _ => None,
+        }
+    }
+
+    /// The part of the panel it covers now; empty when there is nothing to
+    /// see.
+    fn place(self, cam: &Cam) -> Place {
+        match self {
+            Self::Globe => globe::place(cam),
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Nothing => Place::default(),
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Advanced => lab::advanced::place(cam),
+        }
+    }
+
+    /// The most of the panel it will cover, so a move makes no other texture:
+    /// passed by the camera it is half as large again as at rest.
+    fn room(self, cam: &Cam) -> (f32, f32) {
+        #[cfg(any(test, feature = "spatial-lab"))]
+        if self == Self::Advanced && lab::full() {
+            return cam.panel;
+        }
+        let most = cam.size * 1.35;
+        (most.min(cam.panel.0), most.min(cam.panel.1))
+    }
+
+    fn make(self, gpu: &Rc<Gpu>) -> Result<Option<Box<dyn Scene>>, Error> {
+        Ok(match self {
+            Self::Globe => Some(Box::new(globe::Globe::new(gpu)?)),
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Nothing => None,
+            #[cfg(any(test, feature = "spatial-lab"))]
+            Self::Advanced => Some(Box::new(lab::advanced::Advanced::new(gpu, &lab::config())?)),
+        })
     }
 }
 
 /// `SpatialCam`, in the scenes' own terms.
-struct Cam {
+pub struct Cam {
     d: f32,
     d_far: f32,
     d_near: f32,
@@ -135,11 +178,10 @@ struct Cam {
     travel: f32,
     panel: (f32, f32),
     scale: f32,
-    seconds: f32,
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
-struct Place {
+pub struct Place {
     x: i32,
     y: i32,
     w: i32,
@@ -155,6 +197,12 @@ impl Place {
             return Self::default();
         }
         Self { x: left, y: top, w: right - left, h: bottom - top }
+    }
+}
+
+impl From<&SpatialPlace> for Place {
+    fn from(p: &SpatialPlace) -> Self {
+        Self { x: p.x, y: p.y, w: p.w, h: p.h }
     }
 }
 
@@ -184,497 +232,537 @@ impl From<&SpatialCam> for Cam {
             travel: c.travel,
             panel: (c.panel_w, c.panel_h),
             scale: c.scale.max(1.0),
-            seconds: started().elapsed().as_secs_f32(),
         }
     }
 }
 
-fn started() -> Instant {
-    static AT: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    *AT.get_or_init(Instant::now)
+/// Which elements are whose, and what may be spent on them.
+#[derive(Clone, Debug, PartialEq)]
+struct Shown {
+    /// An element's name (a launcher tile's id; "*" for any), and its scene.
+    by: Vec<(String, Kind)>,
+    budget: Budget,
+}
+
+impl Shown {
+    fn kind(&self, name: &str) -> Option<Kind> {
+        self.by.iter().find(|(who, _)| who == "*" || who == name).map(|&(_, kind)| kind)
+    }
+
+    /// `globe`: the product's own scenes, by their names.
+    #[cfg(any(test, not(feature = "spatial-lab")))]
+    fn parse(text: &str) -> Option<Self> {
+        (text.trim() == "globe").then(|| Self { by: vec![("browser".into(), Kind::Globe)], budget: Budget::PRODUCT })
+    }
+}
+
+/// One element's picture.
+struct Slot {
+    name: String,
+    kind: Kind,
+    target: Target,
+    image: slint::Image,
+    /// What it is a picture of.
+    of: Option<(SpatialCam, SpatialPlace)>,
+    /// The last frame it was asked for in.
+    asked: u64,
+}
+
+/// What is on the GPU, and of which context. Fields in the order they go.
+struct OnGpu {
+    slots: Vec<Slot>,
+    /// Replaced in this frame, shown in it perhaps: gone after it.
+    retired: Vec<Target>,
+    scratch: Scratch,
+    scenes: Vec<(Kind, Option<Box<dyn Scene>>)>,
+    straight: Straight,
+    gpu: Rc<Gpu>,
+}
+
+struct Stage {
+    shown: Shown,
+    /// The context of the last frame, whatever could be made of it.
+    context: Option<gl::ContextId>,
+    on: Option<OnGpu>,
+    /// Kinds that cannot be drawn in this context, and whether ever.
+    failed: Vec<(Kind, bool)>,
+    /// Elements there was no room for, and how many there was room for.
+    refused: Vec<(String, usize)>,
+    panel: slint::PhysicalSize,
+    frame: u64,
+    spent: Cost,
+    /// Answered outside a frame, or with what is gone: to be asked again.
+    asked_outside: bool,
+    /// In this frame something fell back to Slint's own drawing.
+    fell: bool,
+    /// What draws an element has changed: `Spatial.epoch` is behind.
+    changed: bool,
+    /// Pictures drawn, ever.
+    #[cfg_attr(not(test), allow(dead_code))]
+    drawn: u64,
+    /// The most shown in one frame, ever.
+    #[cfg_attr(not(test), allow(dead_code))]
+    peak_slots: usize,
 }
 
 thread_local! {
     static STAGE: RefCell<Option<Stage>> = const { RefCell::new(None) };
-    /// The platform is inside a frame: its context is current and Slint's own
-    /// drawing has not been submitted.
-    static DRAWING: Cell<bool> = const { Cell::new(false) };
-    /// What was asked for outside one, drawn at the next.
-    static OWED: RefCell<Option<(SpatialCam, SpatialPlace)>> = const { RefCell::new(None) };
     static UI: RefCell<Option<slint::Weak<MediaBoxWindow>>> = const { RefCell::new(None) };
+    static REST: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+    /// The platform is inside a frame: the context is its own.
+    static DRAWING: Cell<bool> = const { Cell::new(false) };
+    /// The frame being drawn is not to be presented: it lacks something, and
+    /// is drawn again.
+    static WITHHELD: Cell<bool> = const { Cell::new(false) };
+    static MAY_WITHHOLD: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Everything on the GPU, and of which context it is.
-struct Stage {
-    config: Config,
-    context: usize,
-    on: Option<OnGpu>,
-    image: slint::Image,
-    /// What `image` is a picture of. An element made anew (the launcher's
-    /// model replaced under it) asks again for the picture there is.
-    of: Option<(SpatialCam, SpatialPlace)>,
-    report: Report,
-    /// GL said no: nothing more is tried, and the element shows nothing.
-    failed: bool,
-}
-
-struct OnGpu {
-    gl: glow::Context,
-    caps: gl::Caps,
-    target: Option<gl::Target>,
-    globe: Option<globe::Globe>,
-    advanced: Option<advanced::Advanced>,
-    finish: Finish,
-}
-
-#[derive(Default)]
-struct Report {
-    /// Ever, for the tests.
-    all: u64,
-    frames: u32,
-    cpu: Duration,
-    drawn: gl::Drawn,
-    since: Option<Instant>,
-}
-
-/// Straight alpha out of premultiplied, in the pass that drew it: Slint takes
-/// a borrowed texture as straight, and blending makes premultiplied.
-struct Finish {
-    /// In the tile, where the pixel under the shader can be read; and by a
-    /// pass of its own.
-    in_tile: Option<glow::NativeProgram>,
-    program: glow::NativeProgram,
-    vao: glow::NativeVertexArray,
-    /// No framebuffer fetch here: the picture is drawn into this and put
-    /// through a second pass.
-    second: Option<gl::Target>,
-}
-
-const WHOLE: &str = r"#version 300 es
-void main() {
-    vec2 p = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
-    gl_Position = vec4(p, 0.0, 1.0);
-}
-";
-const STRAIGHT_IN_TILE: &str = r"#version 300 es
-#extension GL_EXT_shader_framebuffer_fetch : require
-precision mediump float;
-inout vec4 colour;
-void main() { colour = colour.a > 0.0 ? vec4(colour.rgb / colour.a, colour.a) : vec4(0.0); }
-";
-const STRAIGHT: &str = r"#version 300 es
-precision mediump float;
-uniform sampler2D u_from;
-out vec4 colour;
-void main() {
-    vec4 c = texelFetch(u_from, ivec2(gl_FragCoord.xy), 0);
-    colour = c.a > 0.0 ? vec4(c.rgb / c.a, c.a) : vec4(0.0);
-}
-";
-
-impl Finish {
-    fn new(gl: &glow::Context, caps: &gl::Caps) -> Result<Self, gl::Error> {
-        let program = gl::program(gl, WHOLE, STRAIGHT)?;
-        let in_tile = caps.fetch.then(|| gl::program(gl, WHOLE, STRAIGHT_IN_TILE)).transpose()?;
-        // SAFETY: the context is current on this thread.
-        let vao = unsafe { gl.create_vertex_array()? };
-        Ok(Self { in_tile, program, vao, second: None })
-    }
-
-    fn delete(&self, gl: &glow::Context) {
-        // SAFETY: the context is the one they were made in.
-        unsafe {
-            gl.delete_program(self.program);
-            if let Some(program) = self.in_tile {
-                gl.delete_program(program);
-            }
-            gl.delete_vertex_array(self.vao);
-        }
-    }
-
-    fn draw(&self, gl: &glow::Context, from: Option<&gl::Target>, drawn: &mut gl::Drawn) {
-        // SAFETY: the same; the pass is begun.
-        unsafe {
-            gl.use_program(Some(if from.is_some() { self.program } else { self.in_tile.unwrap_or(self.program) }));
-            gl.disable(glow::BLEND);
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.bind_vertex_array(Some(self.vao));
-            if let Some(from) = from {
-                gl.active_texture(glow::TEXTURE0);
-                gl.bind_texture(glow::TEXTURE_2D, Some(from.texture));
-            }
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-        }
-        drawn.draws += 1;
-        drawn.vertices += 3;
-        drawn.triangles += 1;
-    }
-}
+/// How long a texture nobody shows is kept for the next that wants one.
+const KEPT_FOR: Duration = Duration::from_millis(1500);
+const KEPT_FRAMES: u64 = 600;
+/// How often a frame is drawn again for what fell back in it. Each time at
+/// least one element or one kind has; there are never this many.
+const AGAIN: u32 = 12;
 
 impl OnGpu {
-    fn new() -> Result<Self, gl::Error> {
-        // SAFETY: the loader is EGL's, the context current.
-        let gl = unsafe {
-            glow::Context::from_loader_function_cstr(|name| gl::load(name.to_str().expect("a GL function's name")))
-        };
-        let caps = gl::Caps::of(&gl);
-        let finish = Finish::new(&gl, &caps)?;
-        Ok(Self { gl, caps, target: None, globe: None, advanced: None, finish })
+    fn new(budget: &Budget) -> Result<Self, Error> {
+        let gpu = Gpu::new(budget.bytes)?;
+        let _kept = Kept::of(&gpu.gl);
+        let straight = Straight::new(&gpu)?;
+        Ok(Self { slots: Vec::new(), retired: Vec::new(), scratch: Scratch::default(), scenes: Vec::new(), straight, gpu: gpu.clone() })
     }
 
-    /// What the scene needs that is not on the GPU yet.
-    fn prepare(&mut self, config: &Config) -> Result<(), gl::Error> {
-        if config.scene != Scene::Globe && let Some(old) = self.globe.take() {
-            old.delete(&self.gl);
-        }
-        if config.scene != Scene::Advanced && let Some(old) = self.advanced.take() {
-            old.delete(&self.gl);
-        }
-        match config.scene {
-            Scene::Nothing => {}
-            Scene::Globe => {
-                if self.globe.is_none() {
-                    self.globe = Some(globe::Globe::new(&self.gl, self.caps.fetch)?);
-                }
-            }
-            Scene::Advanced => {
-                if !self.advanced.as_ref().is_some_and(|have| have.is(config)) {
-                    if let Some(old) = self.advanced.take() {
-                        old.delete(&self.gl);
-                    }
-                    self.advanced = Some(advanced::Advanced::new(&self.gl, config)?);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn target(&mut self, config: &Config, cam: &Cam, place: &Place) -> Result<(), gl::Error> {
-        let depth = config.scene == Scene::Advanced;
-        let fits = |t: &gl::Target| t.size.0 >= place.w && t.size.1 >= place.h;
-        if self.target.as_ref().is_some_and(fits) {
+    /// The shaders and the geometry of `kind`, once.
+    fn prepare(&mut self, kind: Kind, budget: &Budget) -> Result<(), Error> {
+        if self.scenes.iter().any(|(have, _)| *have == kind) {
             return Ok(());
         }
-        // Room for the scene at its largest, so a move does not make another:
-        // passed by the camera it is half as large again as at rest.
-        let room = |used: i32, panel: f32| {
-            let most = if config.full { panel } else { (cam.size * 1.35).min(panel) };
-            (used.max(most.ceil() as i32) + 15) & !15
-        };
-        let size = (room(place.w, cam.panel.0), room(place.h, cam.panel.1));
-        self.drop_target();
-        self.target = Some(gl::Target::new(&self.gl, &self.caps, size, config.samples, depth)?);
-        if !self.caps.fetch || config.second {
-            self.finish.second = Some(gl::Target::new(&self.gl, &self.caps, size, 1, false)?);
+        let _kept = Kept::of(&self.gpu.gl);
+        let scene = kind.make(&self.gpu)?;
+        if let Some(scene) = &scene {
+            budget.holds(&scene.cost())?;
         }
+        self.scenes.push((kind, scene));
         Ok(())
     }
 
-    fn drop_target(&mut self) {
-        for old in self.target.take().into_iter().chain(self.finish.second.take()) {
-            old.delete(&self.gl);
+    /// A slot to draw `name` into: its own, one nobody has asked for lately,
+    /// or a new one.
+    fn slot(&mut self, name: &str, kind: Kind, used: (i32, i32), room: (i32, i32), frame: u64, most: usize) -> Result<usize, Error> {
+        let own = self.slots.iter().position(|s| s.name == name && s.kind == kind && s.asked < frame);
+        if let Some(at) = own.filter(|&at| self.slots[at].target.holds(used)) {
+            return Ok(at);
         }
-    }
-
-    fn draw(&mut self, config: &Config, cam: &Cam, place: &Place) -> Result<(slint::Image, gl::Drawn), gl::Error> {
-        self.prepare(config)?;
-        let kept = gl::Kept::of(&self.gl);
-        let made = self.target(config, cam, place);
-        let mut drawn = gl::Drawn { pixels: place.w as u64 * place.h as u64, ..gl::Drawn::default() };
-        drawn.samples = self.target.as_ref().map_or(0, |target| target.samples);
-        if made.is_ok() && let Some(target) = &self.target {
-            let used = (place.w, place.h);
-            target.begin(&self.gl, used);
-            drawn.passes += 1;
-            match config.scene {
-                Scene::Nothing => {}
-                Scene::Globe => {
-                    if let Some(globe) = &self.globe {
-                        globe.draw(&self.gl, cam, place, &mut drawn);
-                    }
-                }
-                Scene::Advanced => {
-                    if let Some(advanced) = &self.advanced {
-                        advanced.draw(&self.gl, cam, place, config, &mut drawn);
-                    }
-                }
-            }
-            // The globe blends straight in its own shader.
-            if self.finish.second.is_none() && config.scene == Scene::Advanced {
-                self.finish.draw(&self.gl, None, &mut drawn);
-            }
-            target.end(&self.gl);
-            if let Some(second) = &self.finish.second {
-                second.begin(&self.gl, used);
-                drawn.passes += 1;
-                self.finish.draw(&self.gl, Some(target), &mut drawn);
-            }
+        // Not asked for in the last frame either: in this one it may be yet.
+        let idle = |s: &Slot| s.asked + 1 < frame;
+        let area = |size: (i32, i32)| size.0 as i64 * size.1 as i64;
+        let at = self.slots.iter().position(|s| idle(s) && s.target.holds(room) && area(s.target.size) <= 2 * area(room));
+        if own.is_none() && let Some(at) = at {
+            let slot = &mut self.slots[at];
+            (slot.name, slot.kind, slot.of) = (name.into(), kind, None);
+            return Ok(at);
         }
-        kept.put_back(&self.gl);
-        made?;
-        let shown = self.finish.second.as_ref().or(self.target.as_ref()).ok_or("no target")?;
-        // SAFETY: an RGBA texture of this context, the one Slint draws with,
-        // that outlives every frame that names it: it is deleted only where
-        // another takes its place, and the image with it.
+        // Room for another, from those nobody shows.
+        let bytes = Target::bytes(room, false);
+        while (own.is_none() && self.slots.len() >= most) || !self.gpu.room_for(bytes) {
+            let Some(oldest) = (0..self.slots.len()).filter(|&i| idle(&self.slots[i])).min_by_key(|&i| self.slots[i].asked) else {
+                return Err(Error::Budget(if self.slots.len() >= most { "scenes at once" } else { "memory" }));
+            };
+            self.slots.swap_remove(oldest);
+        }
+        let target = Target::new(&self.gpu, room, 1, false)?;
+        // SAFETY: an RGBA texture of this context, the one Slint draws with.
+        // It outlives every frame that names it: `OnGpu` lets go of one only
+        // after the frame in which it was last shown, or when nobody has
+        // asked for it in a whole frame (see the module's head).
         let image = unsafe {
             slint::BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
-                shown.texture.0,
-                (shown.size.0 as u32, shown.size.1 as u32).into(),
+                target.texture.name.0,
+                (target.size.0 as u32, target.size.1 as u32).into(),
             )
         }
         .origin(slint::BorrowedOpenGLTextureOrigin::TopLeft)
         .build();
-        Ok((image, drawn))
+        let slot = Slot { name: name.into(), kind, target, image, of: None, asked: 0 };
+        // Its own, outgrown (the panel's mode, the scale).
+        if let Some(at) = self.slots.iter().position(|s| s.name == name && s.kind == kind && s.asked < frame) {
+            let old = std::mem::replace(&mut self.slots[at], slot);
+            self.retired.push(old.target);
+            return Ok(at);
+        }
+        self.slots.push(slot);
+        Ok(self.slots.len() - 1)
+    }
+
+    fn draw(&self, at: usize, cam: &Cam, place: &Place) -> Result<Drawn, Error> {
+        let (gpu, slot) = (&self.gpu, &self.slots[at]);
+        let gl = &gpu.gl;
+        let Some((_, Some(scene))) = self.scenes.iter().find(|(kind, _)| *kind == slot.kind) else {
+            return Err(Error::Context);
+        };
+        let pass = scene.pass();
+        let used = (place.w, place.h);
+        let mut drawn = Drawn::default();
+        if pass.alone() {
+            slot.target.begin(gl, used);
+            scene.draw(gpu, cam, place, &mut drawn);
+            drawn.passes = 1;
+            return gpu.well().map(|()| drawn);
+        }
+        self.scratch.with(gpu, slot.target.size, (pass.samples, pass.depth), |target| {
+            target.begin(gl, used);
+            scene.draw(gpu, cam, place, &mut drawn);
+            target.end(gl);
+            slot.target.begin(gl, used);
+            self.straight.draw(gl, target, &mut drawn);
+            drawn.passes = 2;
+            Ok(())
+        })?;
+        gpu.well().map(|()| drawn)
     }
 }
 
 impl Stage {
-    /// This context's, made again if there was another before it.
-    fn gpu(&mut self) -> Result<&mut OnGpu, gl::Error> {
-        let context = gl::current();
-        if context == 0 {
-            return Err("no GL context".into());
+    fn new(shown: Shown) -> Self {
+        Self {
+            shown,
+            context: None,
+            on: None,
+            failed: Vec::new(),
+            refused: Vec::new(),
+            panel: slint::PhysicalSize::default(),
+            frame: 0,
+            spent: Cost::default(),
+            asked_outside: false,
+            fell: false,
+            changed: false,
+            drawn: 0,
+            peak_slots: 0,
         }
-        if self.context != context {
-            // The old context's names mean nothing in this one: forgotten,
-            // not deleted.
+    }
+
+    /// What draws this element now.
+    fn kind(&self, name: &str) -> Option<Kind> {
+        let kind = self.shown.kind(name)?;
+        let not = self.failed.iter().any(|(k, _)| *k == kind) || self.refused.iter().any(|(who, _)| who == name);
+        (!not).then_some(kind)
+    }
+
+    /// A frame begins, in the platform's context. Whether the roll is to be
+    /// called.
+    fn open(&mut self, panel: slint::PhysicalSize) -> bool {
+        self.frame += 1;
+        self.spent = Cost::default();
+        let context = gl::current();
+        if context != self.context {
+            // The old one's names mean nothing in this: forgotten.
             self.on = None;
             self.context = context;
+            self.changed |= !self.failed.is_empty() || !self.refused.is_empty();
+            self.failed.clear();
+            self.refused.clear();
+            // What was shown of it is to be shown again.
+            self.asked_outside = true;
         }
+        if panel != self.panel {
+            // What could not be had at that size may be at this one.
+            self.panel = panel;
+            self.changed |= !self.refused.is_empty() || self.failed.iter().any(|(_, lasts)| !lasts);
+            self.refused.clear();
+            self.failed.retain(|(_, lasts)| *lasts);
+        }
+        // On the GPU before it is first wanted: shaders are compiled on the
+        // first frame of all, not on the first of a move.
+        let mut kinds: Vec<Kind> = Vec::new();
+        for &(_, kind) in &self.shown.by {
+            if !kinds.contains(&kind) && !self.failed.iter().any(|(k, _)| *k == kind) {
+                kinds.push(kind);
+            }
+        }
+        for kind in kinds {
+            if let Err(error) = self.make(kind) {
+                self.fail(kind, &error);
+            }
+        }
+        // The interface is told of those before it draws.
+        self.fell = false;
+        std::mem::take(&mut self.asked_outside) || self.on.as_ref().is_some_and(|on| !on.slots.is_empty())
+    }
+
+    fn make(&mut self, kind: Kind) -> Result<(), Error> {
         if self.on.is_none() {
-            let at = Instant::now();
-            let mut on = OnGpu::new()?;
-            on.prepare(&self.config)?;
-            eprintln!(
-                "mediabox-tv.spatial on the GPU in {:.1} ms: {:?} fetch={}",
-                at.elapsed().as_secs_f64() * 1e3,
-                self.config,
-                on.caps.fetch
-            );
+            if self.context.is_none() {
+                return Err(Error::Context);
+            }
+            let at = std::time::Instant::now();
+            let on = OnGpu::new(&self.shown.budget)?;
+            eprintln!("mediabox-tv.spatial context ready in {:.1} ms fetch={}", at.elapsed().as_secs_f64() * 1e3, on.gpu.fetch);
             self.on = Some(on);
         }
-        self.on.as_mut().ok_or_else(|| "nothing on the GPU".into())
+        let Some(on) = &mut self.on else { return Err(Error::Context) };
+        if on.scenes.iter().any(|(have, _)| *have == kind) {
+            return Ok(());
+        }
+        let at = std::time::Instant::now();
+        on.prepare(kind, &self.shown.budget)?;
+        eprintln!("mediabox-tv.spatial {kind:?} on the GPU in {:.1} ms held={}", at.elapsed().as_secs_f64() * 1e3, on.gpu.held());
+        Ok(())
     }
 
-    fn draw(&mut self, cam: &SpatialCam, place: &SpatialPlace) {
-        if self.failed {
-            return;
-        }
-        let asked = Some((cam.clone(), place.clone()));
-        if self.of == asked && self.context == gl::current() {
-            return;
-        }
-        let at = Instant::now();
-        let config = self.config.clone();
-        let cam = Cam::from(cam);
-        let place = Place { x: place.x, y: place.y, w: place.w, h: place.h };
-        match self.gpu().and_then(|on| on.draw(&config, &cam, &place)) {
-            Ok((image, drawn)) => {
-                self.image = image;
-                self.of = asked;
-                self.report.add(at.elapsed(), drawn, &self.config);
+    /// No element is drawn as `kind` from here on: for this context's life,
+    /// or until the panel is another.
+    fn fail(&mut self, kind: Kind, error: &Error) {
+        eprintln!("mediabox-tv.spatial {kind:?} given back to the interface: {error}");
+        self.failed.push((kind, error.lasts()));
+        self.fell = true;
+        self.changed = true;
+    }
+
+    fn picture(&mut self, name: &str, kind: Kind, cam: &SpatialCam, place: &SpatialPlace) -> slint::Image {
+        match self.drawn_picture(name, kind, cam, place) {
+            Ok(image) => image,
+            Err(error @ Error::Budget(_)) => {
+                let shown = self.on.as_ref().map_or(0, |on| on.slots.iter().filter(|s| s.asked == self.frame).count());
+                eprintln!("mediabox-tv.spatial {name} given back to the interface, {shown} scenes drawn: {error}");
+                self.refused.push((name.into(), shown));
+                self.fell = true;
+                self.changed = true;
+                slint::Image::default()
             }
             Err(error) => {
-                eprintln!("mediabox-tv.spatial not drawn, and not tried again: {error}");
-                self.failed = true;
-                self.image = slint::Image::default();
-            }
-        }
-    }
-
-    fn change(&mut self, config: Config) {
-        if let Some(on) = &mut self.on {
-            let kept = gl::Kept::of(&on.gl);
-            on.drop_target();
-            kept.put_back(&on.gl);
-        }
-        eprintln!("mediabox-tv.spatial now {config:?}");
-        self.config = config;
-        self.of = None;
-        self.report = Report::default();
-        self.failed = false;
-    }
-}
-
-impl Report {
-    fn add(&mut self, cpu: Duration, drawn: gl::Drawn, config: &Config) {
-        self.all += 1;
-        self.frames += 1;
-        self.cpu += cpu;
-        self.drawn = drawn;
-        let now = Instant::now();
-        let since = *self.since.get_or_insert(now);
-        if now.duration_since(since) >= Duration::from_secs(1) {
-            let d = &self.drawn;
-            eprintln!(
-                "mediabox-tv.spatial {:?} frames={} cpu_us={:.1} passes={} draws={} objects={} instances={} vertices={} triangles={} pixels={} samples={}",
-                config.scene,
-                self.frames,
-                self.cpu.as_secs_f64() * 1e6 / f64::from(self.frames),
-                d.passes,
-                d.draws,
-                d.objects,
-                d.instances,
-                d.vertices,
-                d.triangles,
-                d.pixels,
-                d.samples
-            );
-            *self = Self { all: self.all, since: Some(now), ..Self::default() };
-        }
-    }
-}
-
-/// Turns the experiment on for this window, if it was asked for.
-pub fn attach(ui: &MediaBoxWindow) {
-    let Some(config) = std::env::var("MEDIABOX_TV_SPATIAL").ok().and_then(|text| Config::parse(&text)) else {
-        return;
-    };
-    start(ui, config);
-    // A measurement's own knob: another scene without another start.
-    if let Some(path) = std::env::var_os("MEDIABOX_TV_SPATIAL_CONTROL") {
-        let timer = slint::Timer::default();
-        let last = RefCell::new(String::new());
-        timer.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || {
-            let text = std::fs::read_to_string(&path).unwrap_or_default();
-            if *last.borrow() != text {
-                if let Some(config) = Config::parse(&text) {
-                    let run = config.run;
-                    STAGE.with(|stage| {
-                        if let Some(stage) = stage.borrow_mut().as_mut() {
-                            stage.change(config);
-                        }
-                    });
-                    if run {
-                        crate::platform::keep_drawing(Duration::from_secs(1));
-                    }
-                    again();
+                if !self.failed.iter().any(|(k, _)| *k == kind) {
+                    self.fail(kind, &error);
                 }
-                *last.borrow_mut() = text;
+                slint::Image::default()
             }
-        });
-        // For as long as the process.
-        std::mem::forget(timer);
+        }
+    }
+
+    fn drawn_picture(&mut self, name: &str, kind: Kind, cam: &SpatialCam, place: &SpatialPlace) -> Result<slint::Image, Error> {
+        let frame = self.frame;
+        let on = self.on.as_mut().ok_or(Error::Context)?;
+        if !on.gpu.is_current() {
+            return Err(Error::Context);
+        }
+        let asked = Some((cam.clone(), place.clone()));
+        if !running(kind) && let Some(slot) = on.slots.iter_mut().find(|s| s.name == name && s.kind == kind && s.of == asked) {
+            slot.asked = frame;
+            return Ok(slot.image.clone());
+        }
+        let Some((_, Some(scene))) = on.scenes.iter().find(|(k, _)| *k == kind) else {
+            return Err(Error::Context);
+        };
+        let (cam, place) = (Cam::from(cam), Place::from(place));
+        let mut spent = self.spent;
+        spent.add(&scene.cost(), place.w as u64 * place.h as u64);
+        self.shown.budget.holds(&spent)?;
+        #[cfg(feature = "spatial-lab")]
+        let at = std::time::Instant::now();
+        let gpu = on.gpu.clone();
+        let _kept = Kept::of(&gpu.gl);
+        gpu.listen();
+        let used = (place.w, place.h);
+        let room = kind.room(&cam);
+        let whole = |used: i32, room: f32| (used.max(room.ceil() as i32) + 15) & !15;
+        let room = (whole(used.0, room.0), whole(used.1, room.1));
+        let at_slot = on.slot(name, kind, used, room, frame, self.shown.budget.scenes)?;
+        on.slots[at_slot].of = None;
+        let drawn = on.draw(at_slot, &cam, &place);
+        // Asked for, whatever came of it: not another's in this frame.
+        let slot = &mut on.slots[at_slot];
+        slot.asked = frame;
+        let drawn = drawn?;
+        slot.of = asked;
+        let image = slot.image.clone();
+        self.spent = spent;
+        self.drawn += 1;
+        self.peak_slots = self.peak_slots.max(on.slots.iter().filter(|s| s.asked == frame).count());
+        #[cfg(feature = "spatial-lab")]
+        lab::drew(kind, at.elapsed(), drawn, (used, gpu.held(), on.slots.len()));
+        let _ = drawn;
+        #[cfg(test)]
+        tests::picture_drawn();
+        Ok(image)
+    }
+
+    /// The frame has been issued. Whether something is nobody's now.
+    fn close(&mut self) -> bool {
+        let frame = self.frame;
+        let Some(on) = &mut self.on else { return false };
+        on.retired.clear();
+        // However long it moves.
+        on.slots.retain(|s| s.asked + KEPT_FRAMES > frame);
+        on.slots.iter().any(|s| s.asked < frame)
+    }
+
+    /// The interface has been at rest: what nobody shows is given back, and
+    /// an element there was no room for may be tried again.
+    fn rest(&mut self) {
+        let frame = self.frame;
+        let Some(on) = &mut self.on else { return };
+        on.slots.retain(|s| s.asked >= frame);
+        let scratch = |s: &Slot| on.scenes.iter().any(|(k, scene)| *k == s.kind && scene.as_ref().is_some_and(|scene| !scene.pass().alone()));
+        if !on.slots.iter().any(scratch) {
+            on.scratch.clear();
+        }
+        if on.gpu.is_current() {
+            use glow::HasContext;
+            // SAFETY: the context is current; what was deleted is given back
+            // now rather than with the next frame, which may be long in
+            // coming.
+            unsafe { on.gpu.gl.flush() };
+        }
+        let live = on.slots.len();
+        let before = self.refused.len();
+        self.refused.retain(|&(_, shown)| live >= shown);
+        self.changed |= self.refused.len() != before;
     }
 }
 
-fn start(ui: &MediaBoxWindow, config: Config) {
-    STAGE.with(|stage| {
-        *stage.borrow_mut() = Some(Stage {
-            config,
-            context: 0,
-            on: None,
-            image: slint::Image::default(),
-            of: None,
-            report: Report::default(),
-            failed: false,
-        });
-    });
+/// Moving whether the camera is or not: a measurement's.
+fn running(_kind: Kind) -> bool {
+    #[cfg(any(test, feature = "spatial-lab"))]
+    return _kind == Kind::Advanced && lab::config().run;
+    #[cfg(not(any(test, feature = "spatial-lab")))]
+    false
+}
+
+fn ui() -> Option<MediaBoxWindow> {
+    UI.with(|cell| cell.borrow().as_ref().and_then(slint::Weak::upgrade))
+}
+
+fn stage<T>(f: impl FnOnce(&mut Stage) -> T) -> Option<T> {
+    STAGE.with(|stage| stage.borrow_mut().as_mut().map(f))
+}
+
+/// Says to the interface that what draws its elements has changed, if it has.
+fn tell() {
+    if stage(|stage| std::mem::take(&mut stage.changed)) == Some(true)
+        && let Some(ui) = ui()
+    {
+        let spatial = ui.global::<Spatial>();
+        spatial.set_epoch(spatial.get_epoch().wrapping_add(1));
+    }
+}
+
+/// The scenes MEDIABOX_TV_SPATIAL names, for this window; none, and nothing
+/// here ever runs.
+pub fn attach(ui: &MediaBoxWindow) {
+    let Ok(text) = std::env::var("MEDIABOX_TV_SPATIAL") else { return };
+    #[cfg(feature = "spatial-lab")]
+    let shown = lab::parse(&text);
+    #[cfg(not(feature = "spatial-lab"))]
+    let shown = Shown::parse(&text);
+    match shown {
+        Some(shown) => start(ui, shown),
+        None => eprintln!("mediabox-tv.spatial no such scene: {text}"),
+    }
+    #[cfg(feature = "spatial-lab")]
+    lab::listen();
+}
+
+fn start(ui: &MediaBoxWindow, shown: Shown) {
+    STAGE.with(|stage| *stage.borrow_mut() = Some(Stage::new(shown)));
     UI.with(|cell| *cell.borrow_mut() = Some(ui.as_weak()));
     let spatial = ui.global::<Spatial>();
-    spatial.on_place(|cam| {
-        let config = STAGE.with(|stage| stage.borrow().as_ref().map(|stage| stage.config.clone()));
-        let cam = Cam::from(&cam);
-        let place = match config {
-            Some(Config { scene: Scene::Globe, .. }) => globe::place(&cam),
-            Some(Config { scene: Scene::Advanced, full, .. }) if cam.f_main > 0.0 => advanced::place(&cam, full),
-            _ => Place::default(),
-        };
+    spatial.on_kind(|name, _epoch| stage(|stage| stage.kind(&name)).flatten().map_or(0, Kind::number));
+    spatial.on_place(|kind, cam| {
+        let place = Kind::of(kind).map(|kind| kind.place(&Cam::from(&cam))).unwrap_or_default();
         SpatialPlace { x: place.x, y: place.y, w: place.w, h: place.h }
     });
-    spatial.on_picture(|cam, place| {
-        STAGE.with(|stage| {
-            let Ok(mut stage) = stage.try_borrow_mut() else { return slint::Image::default() };
-            let Some(stage) = stage.as_mut() else { return slint::Image::default() };
-            if DRAWING.get() {
-                stage.draw(&cam, &place);
-            } else {
-                OWED.with(|owed| *owed.borrow_mut() = Some((cam, place)));
+    spatial.on_picture(|name, kind, cam, place, _tick| {
+        let Some(kind) = Kind::of(kind) else { return slint::Image::default() };
+        stage(|stage| {
+            if !DRAWING.get() {
+                stage.asked_outside = true;
+                let of = |s: &&Slot| s.name == name.as_str() && s.kind == kind;
+                return stage.on.as_ref().and_then(|on| on.slots.iter().find(of)).map(|s| s.image.clone()).unwrap_or_default();
             }
-            stage.image.clone()
+            let image = stage.picture(&name, kind, &cam, &place);
+            if stage.fell && MAY_WITHHOLD.get() {
+                WITHHELD.set(true);
+            }
+            image
         })
+        .unwrap_or_default()
     });
     spatial.set_on(true);
 }
 
-/// The element asks again, and is drawn.
-fn again() {
-    let ui = UI.with(|cell| cell.borrow().as_ref().and_then(slint::Weak::upgrade));
-    if let Some(ui) = ui {
-            let spatial = ui.global::<Spatial>();
-        spatial.set_tick(spatial.get_tick().wrapping_add(1));
-        ui.window().request_redraw();
+/// Everything given back, while its context is still there.
+pub fn stop() {
+    REST.with(|timer| timer.borrow_mut().take());
+    if let Some(ui) = ui() {
+        ui.global::<Spatial>().set_on(false);
+    }
+    drop(STAGE.with(|stage| stage.borrow_mut().take()));
+}
+
+/// Whether the frame being drawn is not to be presented.
+pub fn withheld() -> bool {
+    WITHHELD.get()
+}
+
+/// Ends the drawing however it ends.
+struct Drawing;
+
+impl Drawing {
+    fn begin(may_withhold: bool) -> Self {
+        WITHHELD.set(false);
+        MAY_WITHHOLD.set(may_withhold);
+        DRAWING.set(true);
+        Self
     }
 }
 
-/// Everything given back, while its context is still there.
-pub fn stop() {
-    let Some(mut stage) = STAGE.with(|stage| stage.borrow_mut().take()) else { return };
-    if let Some(mut on) = stage.on.take().filter(|_| stage.context != 0 && stage.context == gl::current()) {
-        on.drop_target();
-        on.finish.delete(&on.gl);
-        if let Some(globe) = on.globe.take() {
-            globe.delete(&on.gl);
-        }
-        if let Some(advanced) = on.advanced.take() {
-            advanced.delete(&on.gl);
-        }
+impl Drop for Drawing {
+    fn drop(&mut self) {
+        DRAWING.set(false);
+        MAY_WITHHOLD.set(false);
+        WITHHELD.set(false);
     }
 }
 
 /// A frame: `draw` is Slint's renderer, the context is current.
-pub fn frame<T>(draw: impl FnOnce() -> T) -> T {
-    let run = STAGE.with(|stage| {
-        let mut stage = stage.borrow_mut();
-        let stage = stage.as_mut()?;
-        // On the GPU before it is first wanted: the shaders are compiled on
-        // the first frame of all, not on the first of a move.
-        if !stage.failed
-            && stage.on.is_none()
-            && let Err(error) = stage.gpu().map(|_| ())
-        {
-            eprintln!("mediabox-tv.spatial not on the GPU: {error}");
-            stage.failed = true;
+pub fn frame<T>(mut draw: impl FnMut() -> T) -> T {
+    if STAGE.with(|stage| stage.borrow().is_none()) {
+        return draw();
+    }
+    let mut again = AGAIN;
+    loop {
+        let Some(ui) = ui() else { return draw() };
+        let panel = ui.window().size();
+        if stage(|stage| stage.open(panel)) == Some(true) {
+            let spatial = ui.global::<Spatial>();
+            spatial.set_tick(spatial.get_tick().wrapping_add(1));
         }
-        if let Some((cam, place)) = OWED.with(|owed| owed.borrow_mut().take()) {
-            stage.draw(&cam, &place);
+        tell();
+        let drawing = Drawing::begin(again > 0);
+        let answer = draw();
+        let withheld = withheld();
+        drop(drawing);
+        let idle = stage(Stage::close).unwrap_or_default();
+        tell();
+        if withheld && again > 0 {
+            again -= 1;
+            continue;
         }
-        Some(stage.config.run)
+        if idle {
+            settle();
+        }
+        #[cfg(feature = "spatial-lab")]
+        lab::keep_running();
+        return answer;
+    }
+}
+
+/// What nobody shows, given back once the interface has been at rest. Not a
+/// frame: nothing changes on the panel.
+fn settle() {
+    REST.with(|timer| {
+        timer.borrow_mut().get_or_insert_default().start(slint::TimerMode::SingleShot, KEPT_FOR, || {
+            stage(Stage::rest);
+            tell();
+        });
     });
-    if run == Some(true) {
-        crate::platform::keep_drawing(Duration::from_secs(1));
-        again();
-    }
-    DRAWING.set(run.is_some());
-    let answer = draw();
-    DRAWING.set(false);
-    answer
-}
-
-/// For the tests on the product's renderer (src/hit/gl.rs): the experiment on
-/// this window, as if started with it.
-#[cfg(test)]
-pub fn start_with(ui: &MediaBoxWindow, text: &str) {
-    start(ui, Config::parse(text).expect("a scene"));
-}
-
-/// How many times a scene has been drawn.
-#[cfg(test)]
-pub fn times_drawn() -> u64 {
-    STAGE.with(|stage| stage.borrow().as_ref().map_or(0, |stage| stage.report.all))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_scene_is_asked_for_in_words_and_bounded() {
-        assert_eq!(Config::parse("globe").unwrap().scene, Scene::Globe);
-        let config = Config::parse("stress,particles=20000 objects=64,msaa=1 full run\n").unwrap();
-        assert_eq!((config.particles, config.objects, config.samples, config.full, config.run), (20000, 64, 1, true, true));
-        assert_eq!(Config::parse("stress particles=1e12").unwrap().particles, 2_000_000);
-        assert!(Config::parse("").is_none() && Config::parse("advanced nonsense=1").is_none());
-    }
 }

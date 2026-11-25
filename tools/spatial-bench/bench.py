@@ -51,7 +51,7 @@ def wrap(name, go):
     r = dict(extra=name, ddr_load=round(sum(x[0] for x in d.l) / max(1, len(d.l)), 1), ddr_mhz=round(sum(x[1] for x in d.l) / max(1, len(d.l)) / 1e6),
              sys_minstr_s=round((a1 - a0) / 1e6 / wall, 1), commits=n, wall=round(wall, 1),
              hw_per_frame={k: round(v / n, 1) for k, v in g.items() if k != "seconds"}, hw_total=g,
-             gl=kv(log, "tv.glcount"), skia=kv(log, "tv.skia frames"), spatial=kv(log, "tv.spatial"), dmabuf=dmabuf(), gpu_mem=round(m.gmem(), 1), rss=round(m.rss()))
+             gl=kv(log, "tv.glcount"), spatial=kv(log, "tv.spatial"), dmabuf=dmabuf(), gpu_mem=round(m.gmem(), 1), rss=round(m.rss()))
     print(json.dumps(r), flush=True); open(f"{m.OUT}/extra.jsonl", "a").write(json.dumps(r) + "\n")
 def w(n, go): return lambda: wrap(n, go)
 def nav(n, col, keys, dur=880):

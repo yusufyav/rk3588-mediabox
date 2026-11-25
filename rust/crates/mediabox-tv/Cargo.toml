@@ -20,13 +20,11 @@ path = "src/main.rs"
 # A test's load on the interface (MEDIABOX_TV_UI_LOAD), for the heavy-interface
 # gate only; never in the product's binary.
 ui-test-load = []
-# The graphics foundation's experiments (docs/quietos-advanced-graphics.md).
-# Off in the product's binary, and inert in an experimental one until the
-# environment asks: Slint's Skia renderer on this platform's own EGL context
-# (MEDIABOX_TV_RENDERER=skia|skia-partial), GPU-resident spatial scenes
-# (MEDIABOX_TV_SPATIAL), and what a frame asks of GL (MEDIABOX_TV_GLCOUNT).
-skia = ["dep:i-slint-renderer-skia", "dep:i-slint-core"]
-spatial = ["dep:glow"]
+# Measuring the graphics foundation (docs/quietos-advanced-graphics.md), never
+# in the product's binary: scenes that load it and knobs to turn while it runs
+# (MEDIABOX_TV_SPATIAL, MEDIABOX_TV_SPATIAL_CONTROL), and what a frame asks of
+# GL (MEDIABOX_TV_GLCOUNT).
+spatial-lab = []
 gl-count = []
 
 [dependencies]
@@ -72,11 +70,8 @@ gbm = { version = "0.18.0", default-features = false, features = ["drm-support"]
 glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
 raw-window-handle = "0.6.2"
 input = "0.10.0"
-# Experiments only. Slint's own crates, at Slint's own version.
-i-slint-renderer-skia = { version = "=1.17.1", default-features = false, features = ["opengl"], optional = true }
-i-slint-core = { version = "=1.17.1", default-features = false, optional = true }
-# FemtoVG's own GL bindings, already in the tree.
-glow = { version = "0.17.0", optional = true }
+# FemtoVG's own GL bindings, already in the tree (src/spatial).
+glow = "0.17.0"
 
 [dev-dependencies]
 # Tests only: a window that needs no GPU, so a test can open the real
