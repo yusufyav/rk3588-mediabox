@@ -22,6 +22,27 @@ export global QuietPlaces {
 // smaller only for a name that would otherwise run into the scene -- down to
 // about half, and past that on two lines rather than smaller still. What it
 // is and what it says are `AboutBlock`, which follows it a beat later.
+//
+// How large that is, measured (`NameFit`): the text it measures is there with
+// no opacity rather than `visible: false`, which is a clip the renderer pays
+// for (kit.slint, `NetGlyph`).
+component NameFit inherits Rectangle {
+    in property <string> name;
+    property <float> u: Quiet.u;
+    measure := Text {
+        opacity: 0;
+        text: root.name;
+        font-size: Quiet.t-display;
+        font-weight: 560;
+        letter-spacing: -108px * u * 0.06;
+    }
+    out property <float> fit: max(0.52, min(1, root.width / max(1px, measure.preferred-width)));
+    // With a pixel's grace: at a fractional scale the fitted width lands a
+    // hair over the column and a name that fits was set on two lines.
+    out property <bool> two-lines: measure.preferred-width * fit > root.width + 1px;
+    out property <length> name-h: two-lines ? 2 * 108px * u * fit * 1.42 : 121px * u;
+}
+
 component NameBlock inherits Rectangle {
     in property <AppTile> tile;
     in property <float> d;
@@ -38,18 +59,11 @@ component NameBlock inherits Rectangle {
     changed here => { lead = here ? 1 : 0; }
     property <float> f: QuietMotion.word(d, lead);
 
-    measure := Text {
-        visible: false;
-        text: tile.name;
-        font-size: Quiet.t-display;
-        font-weight: 560;
-        letter-spacing: -108px * u * 0.06;
+    size := NameFit {
+        width: root.width;
+        height: 0;
+        name: tile.name;
     }
-    property <float> fit: max(0.52, min(1, root.width / max(1px, measure.preferred-width)));
-    // With a pixel's grace: at a fractional scale the fitted width lands a
-    // hair over the column and a name that fits was set on two lines.
-    property <bool> two-lines: measure.preferred-width * fit > root.width + 1px;
-    out property <length> name-h: two-lines ? 2 * 108px * u * fit * 1.42 : 121px * u;
 
     Text {
         x: 0;
@@ -58,14 +72,14 @@ component NameBlock inherits Rectangle {
         width: parent.width;
         // Two of the font's own lines (its line height is about 1.4 of its
         // size), from the top.
-        height: name-h;
+        height: size.name-h;
         text: tile.name;
         color: Quiet.ink;
         opacity: f;
-        font-size: Quiet.t-display * fit;
+        font-size: Quiet.t-display * size.fit;
         font-weight: 560;
-        letter-spacing: -108px * u * fit * 0.06;
-        vertical-alignment: two-lines ? top : center;
+        letter-spacing: -108px * u * size.fit * 0.06;
+        vertical-alignment: size.two-lines ? top : center;
         wrap: word-wrap;
         overflow: elide;
     }
@@ -434,7 +448,7 @@ export component QuietHome inherits Rectangle {
                 width: digits.preferred-width;
                 clip: true;
                 digits := Overline {
-                    visible: false;
+                    opacity: 0;
                     text: Quiet.two(count);
                 }
                 for tile[i] in apps: Rectangle {
@@ -473,11 +487,10 @@ export component QuietHome inherits Rectangle {
         }
     }
     // What the chosen one is, under however many lines its name took.
-    chosen-measure := NameBlock {
-        visible: false;
+    chosen-measure := NameFit {
         width: spot-w;
         height: 0;
-        tile: chosen;
+        name: chosen.name;
     }
     property <length> about-at: names.y + chosen-measure.name-h + 16px * u;
     property <length> about-y;
