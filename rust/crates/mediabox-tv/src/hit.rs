@@ -2324,7 +2324,7 @@ fn the_quiet_camera_keeps_up_with_the_focus() {
     assert_ne!(cam().cam, 2.0);
     ui.global::<QuietMotion>().set_reduced(true);
     step(&ui);
-    assert_eq!((cam().cam, cam().cam_far, cam().cam_late), (2.0, 2.0, 2.0));
+    assert_eq!((cam().cam, cam().cam_far, cam().cam_type), (2.0, 2.0, 2.0));
     ui.global::<QuietMotion>().set_reduced(false);
 }
 

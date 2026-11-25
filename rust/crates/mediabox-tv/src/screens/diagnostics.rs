@@ -86,6 +86,8 @@ fn soc(diagnostics: Option<&Value>) -> Soc {
 }
 
 pub struct Group {
+    /// What it is, whatever it is called (`icon`, and Quiet OS's emblem).
+    pub id: &'static str,
     pub title: String,
     pub rows: Vec<Reading>,
 }
@@ -198,15 +200,15 @@ fn share_tone(fraction: f64) -> &'static str {
 }
 
 /// The mark a group is drawn with in the column.
-pub fn icon(title: &str) -> &'static str {
-    match title {
-        "Makine" => "chip",
-        "Depolama" => "info",
-        "Ağ" => "network",
-        "Ekran ve GPU" => "monitor",
-        "Oynatma" => "play",
-        "CEC" => "tv",
-        "Servisler" => "bars",
+pub fn icon(id: &str) -> &'static str {
+    match id {
+        "system" => "chip",
+        "storage" => "info",
+        "links" => "network",
+        "output" => "monitor",
+        "playback" => "play",
+        "cec" => "tv",
+        "services" => "bars",
         _ => "info",
     }
 }
@@ -276,6 +278,7 @@ fn compose(
         }
     }
     groups.push(Group {
+        id: "system",
         title: "Makine".into(),
         rows: machine,
     });
@@ -316,6 +319,7 @@ fn compose(
         storage.push(reading("Bölüm", dash()));
     }
     groups.push(Group {
+        id: "storage",
         title: "Depolama".into(),
         rows: storage,
     });
@@ -339,6 +343,7 @@ fn compose(
         network.push(reading("Makine adı", hostname));
     }
     groups.push(Group {
+        id: "links",
         title: "Ağ".into(),
         rows: network,
     });
@@ -369,6 +374,7 @@ fn compose(
         ));
     }
     groups.push(Group {
+        id: "output",
         title: "Ekran ve GPU".into(),
         rows: screen,
     });
@@ -403,6 +409,7 @@ fn compose(
         playback.push(reading("Medya oturumu", format!("{sessions:.0}")));
     }
     groups.push(Group {
+        id: "playback",
         title: "Oynatma".into(),
         rows: playback,
     });
@@ -443,6 +450,7 @@ fn compose(
         ));
     }
     groups.push(Group {
+        id: "cec",
         title: "CEC".into(),
         rows: cec,
     });
@@ -481,6 +489,7 @@ fn compose(
         services.push(reading("Servis", dash()));
     }
     groups.push(Group {
+        id: "services",
         title: "Servisler".into(),
         rows: services,
     });

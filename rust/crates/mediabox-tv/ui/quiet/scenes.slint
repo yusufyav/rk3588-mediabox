@@ -37,7 +37,7 @@ import { Kept } from "materials.slint";
 // higher (passed by it). `layer` is how much it moves relative to the main
 // plane: under 1 behind, over 1 in front; the lab's `parallax` spreads or
 // closes that difference.
-component Plane inherits Rectangle {
+export component Plane inherits Rectangle {
     in property <float> d;
     in property <float> layer: 1;
     property <float> spread: max(0, 1 + (layer - 1) * QuietMotion.parallax);

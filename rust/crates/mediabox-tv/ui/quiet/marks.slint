@@ -1,0 +1,249 @@
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietCurves } from "motion.slint";
+
+// Micro-animated application marks: what the launcher's chosen row does with
+// the mark it already has.
+//
+// A movement is one number, `phase`, from 0 to 1, and a mark is at rest -- is
+// exactly `Quiet.mark` -- at both ends of it: the gear has turned by one
+// tooth, the film has run on by one frame, the globe by the angle between two
+// of its meridians. So nothing has to be played backwards or waited for, and
+// a movement cut short finishes the shorter way round.
+//
+// Nothing here runs at rest, nothing is larger than the mark's own box, and
+// there is no layer: fades are the strokes' own alpha, and a part that moves
+// is a path whose points are bound, or one that turns (materials.slint).
+
+// One stroke of a mark on its 24-unit grid.
+component Stroke inherits Path {
+    in property <color> ink;
+    in property <length> line;
+    width: 100%;
+    height: 100%;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    fill: transparent;
+    stroke: ink;
+    stroke-width: line;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// One that turns or shrinks about a point of the grid. Slint fits a viewbox
+// inside half its stroke all round, and FemtoVG puts a path back by half its
+// stroke in logical pixels where it means device ones (Slint 1.17.1,
+// `draw_path`): the point is where that has it, so what turns a whole step
+// ends on the very pixels it left.
+component Turning inherits Stroke {
+    in property <float> at-x: 12;
+    in property <float> at-y: 12;
+    property <length> unit: (root.width - root.line) / 24;
+    property <length> slip: root.line / 2 * (1 - 1 / max(1, Quiet.scale));
+    transform-origin: { x: root.line / 2 + at-x * unit - slip, y: root.line / 2 + at-y * unit - slip };
+}
+
+// 0 at both ends, 1 half way.
+export global MarkPhase {
+    public pure function swell(p: float) -> float { return 4 * p * (1 - p); }
+    // The same, over a part of the way only.
+    public pure function within(p: float, from: float, to: float) -> float {
+        return swell(clamp((p - from) / (to - from), 0, 1));
+    }
+}
+
+// Filmler ve Diziler: the strip above the picture runs on by one frame, and
+// the play mark leans with it.
+component FilmMark inherits Rectangle {
+    in property <color> ink;
+    in property <length> line;
+    in property <float> phase;
+    Stroke { ink: root.ink; line: root.line; commands: "M3.6 4.6h16.8v14.8H3.6V4.6ZM3.6 9.2h16.8"; }
+    for k in 3: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        // The frames' edges, 7.6 apart; one is out of sight at either end.
+        property <float> at: 8.2 + 7.6 * (k - phase);
+        stroke: root.ink.with-alpha(root.ink.alpha / 255 * clamp(min(at - 3.6, 20.4 - at) / 1.2, 0, 1));
+        MoveTo { x: clamp(at, 3.6, 20.4); y: 4.6; }
+        LineTo { x: clamp(at, 3.6, 20.4); y: 9.2; }
+    }
+    Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        property <float> by: 1.1 * MarkPhase.swell(phase);
+        stroke: root.ink;
+        MoveTo { x: 10.2 + by; y: 12.4; }
+        LineTo { x: 10.2 + by; y: 16.6; }
+        LineTo { x: 14.2 + by; y: 14.5; }
+        Close { }
+    }
+}
+
+// Canlı TV: two waves leave the aerial, one after the other.
+component LiveMark inherits Rectangle {
+    in property <color> ink;
+    in property <length> line;
+    in property <float> phase;
+    Stroke { ink: root.ink; line: root.line; commands: "M3.4 7.2h17.2v11H3.4v-11ZM8.6 21h6.8M8.4 3l3.6 4.2L15.6 3"; }
+    for k in 2: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        property <float> on: clamp((phase - k * 0.28) / 0.72, 0, 1);
+        property <float> r: 1.8 + 5 * on;
+        // Between the aerial's arms, which stand 49 degrees from level.
+        property <float> half: 31;
+        stroke: root.ink.with-alpha(root.ink.alpha / 255 * MarkPhase.swell(on));
+        MoveTo { x: 12 - r * sin(half * 1deg); y: 7.2 - r * cos(half * 1deg); }
+        ArcTo { x: 12 + r * sin(half * 1deg); y: 7.2 - r * cos(half * 1deg); radius-x: r; radius-y: r; sweep: true; }
+    }
+}
+
+// Tarayıcı: the globe turns on its axis by the angle between its meridians.
+component GlobeMark inherits Rectangle {
+    in property <color> ink;
+    in property <length> line;
+    in property <float> phase;
+    Stroke { ink: root.ink; line: root.line; commands: "M12 3.2a8.8 8.8 0 1 0 0 17.6 8.8 8.8 0 0 0 0-17.6ZM3.2 12h17.6"; }
+    for k in 3: Path {
+        width: 100%;
+        height: 100%;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        fill: transparent;
+        stroke-width: root.line;
+        stroke-line-cap: round;
+        stroke-line-join: round;
+        // Its meridians at rest are 23.4 degrees either side of the middle.
+        property <float> angle: (2 * (k - 1) - 1 + 2 * phase) * 23.4;
+        property <float> s: sin(angle * 1deg) / sin(23.4deg);
+        stroke: root.ink.with-alpha(root.ink.alpha / 255 * clamp((70 - abs(angle)) / 46, 0, 1));
+        MoveTo { x: 12; y: 3.2; }
+        CubicTo { control-1-x: 12 + 2.3 * s; control-1-y: 5.6; control-2-x: 12 + 3.5 * s; control-2-y: 8.6; x: 12 + 3.5 * s; y: 12; }
+        CubicTo { control-1-x: 12 + 3.5 * s; control-1-y: 15.4; control-2-x: 12 + 2.3 * s; control-2-y: 18.4; x: 12; y: 20.8; }
+    }
+}
+
+// Kodi: its four pieces draw in, one after another, and let go.
+component KodiMark inherits Rectangle {
+    in property <color> ink;
+    in property <length> line;
+    in property <float> phase;
+    property <float> in: 0.2;
+    Turning {
+        ink: root.ink;
+        line: root.line;
+        at-x: 12.03;
+        at-y: 5.6;
+        transform-scale: 1 - in * MarkPhase.within(phase, 0, 0.58);
+        commands: "M12.03.047c-.226 0-.452.107-.669.324-.922.922-1.842 1.845-2.763 2.768-.233.233-.455.48-.703.695-.31.267-.405.583-.399.988.02 1.399.008 2.799.008 4.198 0 1.453-.002 2.907 0 4.36 0 .11.002.223.03.327.087.337.303.393.546.15 1.31-1.31 2.618-2.622 3.928-3.933l4.449-4.453c.43-.431.43-.905 0-1.336L12.697.37c-.216-.217-.442-.324-.668-.324z";
+    }
+    Turning {
+        ink: root.ink;
+        line: root.line;
+        at-x: 19.25;
+        at-y: 12.03;
+        transform-scale: 1 - in * MarkPhase.within(phase, 0.14, 0.72);
+        commands: "M19.254 7.277c-.223 0-.445.104-.65.309L14.82 11.37c-.428.429-.427.895 0 1.322l3.76 3.766c.44.44.908.44 1.346.002 1.215-1.216 2.427-2.433 3.644-3.647.182-.18.353-.364.43-.615v-.33c-.077-.251-.246-.436-.428-.617-1.224-1.22-2.443-2.445-3.666-3.668-.205-.205-.429-.307-.652-.307z";
+    }
+    Turning {
+        ink: root.ink;
+        line: root.line;
+        at-x: 12.09;
+        at-y: 19.2;
+        transform-scale: 1 - in * MarkPhase.within(phase, 0.28, 0.86);
+        commands: "M12.088 14.449c-.224 0-.447.106-.656.315L7.66 18.537c-.433.434-.433.899.002 1.334 1.215 1.216 2.43 2.43 3.643 3.649.18.18.361.354.611.433h.33c.244-.069.423-.226.598-.402 1.222-1.23 2.45-2.453 3.676-3.68.43-.43.427-.905-.004-1.338l-3.772-3.773c-.208-.208-.432-.311-.656-.31z";
+    }
+    Turning {
+        ink: root.ink;
+        line: root.line;
+        at-x: 2.3;
+        at-y: 12;
+        transform-scale: 1 - in * MarkPhase.within(phase, 0.42, 1);
+        commands: "M4.18 7.611c-.086.014-.145.094-.207.157L.209 11.572c-.28.284-.278.677.004.96l2.043 2.046c.59.59 1.177 1.182 1.767 1.772.169.168.33.139.416-.084.044-.114.062-.242.063-.364.004-1.283.004-2.567.004-3.851h-.002V8.184c0-.085-.01-.169-.022-.252-.019-.135-.072-.258-.207-.309a.186.186 0 0 0-.095-.012z";
+    }
+}
+
+// An application's mark at a moment of its movement, by the application's
+// own id; one this face has no movement for draws in a little and lets go.
+export component QuietMark inherits Rectangle {
+    in property <string> id;
+    in property <string> mark;
+    in property <color> ink;
+    in property <length> line;
+    in property <float> phase;
+
+    property <bool> rests: phase <= 0 || phase >= 1;
+    property <bool> known: id == "media" || id == "livetv" || id == "browser" || id == "kodi";
+    // Standing still it is the mark itself, whole.
+    if rests: Stroke {
+        ink: root.ink;
+        line: root.line;
+        commands: Quiet.mark(root.id, root.mark);
+    }
+    if !rests && id == "media": FilmMark { width: 100%; height: 100%; ink: root.ink; line: root.line; phase: root.phase; }
+    if !rests && id == "livetv": LiveMark { width: 100%; height: 100%; ink: root.ink; line: root.line; phase: root.phase; }
+    if !rests && id == "browser": GlobeMark { width: 100%; height: 100%; ink: root.ink; line: root.line; phase: root.phase; }
+    if !rests && id == "kodi": KodiMark { width: 100%; height: 100%; ink: root.ink; line: root.line; phase: root.phase; }
+    // Ayarlar: by one of its eight teeth.
+    if !rests && !known: Turning {
+        ink: root.ink;
+        line: root.line;
+        commands: Quiet.mark(root.id, root.mark);
+        transform-rotation: root.id == "settings" ? root.phase * 45deg : 0deg;
+        transform-scale: root.id == "settings" ? 1 : 1 - 0.1 * MarkPhase.swell(root.phase);
+    }
+}
+
+// A mark that moves when it is taken and comes to rest when it is left,
+// wherever it had got to: the launcher's chosen row, or the one just left.
+export component AnimatedMark inherits QuietMark {
+    property <bool> snap: true;
+    property <bool> leaving;
+    property <float> t;
+    animate t { duration: snap ? 0ms : leaving ? QuietMotion.t-wash : QuietMotion.t-mark; easing: leaving ? QuietCurves.ease : QuietCurves.camera; }
+    phase: t;
+    out property <bool> still: t <= 0 || t >= 1;
+
+    // Taken: from the beginning, or on from where it was being left.
+    public function play() {
+        if still {
+            snap = true;
+            t = 0;
+        }
+        snap = false;
+        leaving = false;
+        t = 1;
+    }
+    // Left: to rest, the nearer way.
+    public function leave() {
+        if !still {
+            leaving = true;
+            t = t > 0.5 ? 1 : 0;
+        }
+    }
+    // There at once.
+    public function rest() {
+        snap = true;
+        t = 0;
+    }
+    property <bool> moving: QuietMotion.on;
+    changed moving => { if !moving { rest(); } }
+}

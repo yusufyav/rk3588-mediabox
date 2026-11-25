@@ -12,6 +12,41 @@ pub fn mul(a: &Mat4, b: &Mat4) -> Mat4 {
     out
 }
 
+pub const IDENTITY: Mat4 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+
+pub fn translate(by: [f32; 3]) -> Mat4 {
+    let mut m = IDENTITY;
+    m[12..15].copy_from_slice(&by);
+    m
+}
+
+pub fn scale(by: f32) -> Mat4 {
+    let mut m = IDENTITY;
+    (m[0], m[5], m[10]) = (by, by, by);
+    m
+}
+
+/// Turned by `a` in the plane of `x` and `y` (columns 0, 1, 2).
+fn turned(a: f32, x: usize, y: usize) -> Mat4 {
+    let (s, c) = a.sin_cos();
+    let mut m = IDENTITY;
+    (m[x * 5], m[y * 5]) = (c, c);
+    (m[x * 4 + y], m[y * 4 + x]) = (s, -s);
+    m
+}
+
+pub fn rotate_x(a: f32) -> Mat4 {
+    turned(a, 1, 2)
+}
+
+pub fn rotate_y(a: f32) -> Mat4 {
+    turned(a, 2, 0)
+}
+
+pub fn rotate_z(a: f32) -> Mat4 {
+    turned(a, 0, 1)
+}
+
 /// A pinhole of `fovy` radians. `y` is flipped: the picture's first row is
 /// its top one, which is what Slint is told (`BorrowedOpenGLTextureOrigin`).
 pub fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) -> Mat4 {

@@ -8016,6 +8016,7 @@ impl App {
         let page = self.settings.page();
         window.set_settings_page(self.settings.page_label().into());
         window.set_settings_page_icon(page.map_or("", |page| page.icon()).into());
+        window.set_settings_scene(self.settings.scene().into());
         let (title, blurb) = self.settings.heading();
         window.set_settings_title(title.into());
         window.set_settings_blurb(blurb.into());
@@ -8591,6 +8592,8 @@ impl App {
 
     fn paint_diagnostics(&mut self, window: &MediaBoxWindow) {
         window.set_diag_group(self.diagnostics.group as i32);
+        let scene = self.diagnostics.groups.get(self.diagnostics.group).map_or("", |group| group.id);
+        window.set_diag_scene(scene.into());
         let soc = &self.diagnostics.soc;
         let measured = |value: Option<f32>| value.unwrap_or(-1.0);
         window.set_diag_soc(SocView {
@@ -8615,7 +8618,7 @@ impl App {
                 .iter()
                 .map(|group| SettingNav {
                     label: group.title.clone().into(),
-                    icon: screens::diagnostics::icon(&group.title).into(),
+                    icon: screens::diagnostics::icon(group.id).into(),
                     blurb: "".into(),
                 })
                 .collect::<Vec<_>>(),

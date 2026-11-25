@@ -55,16 +55,16 @@ export global QuietMotion {
     out property <duration> t-camera: 560ms * k;
     out property <duration> t-camera-far: 760ms * k;
     out property <duration> t-camera-near: 420ms * k;
-    // ---- the type that names what is chosen: the name, then what it is
+    // ---- the type that names what is chosen
     out property <duration> t-type: 300ms * k;
-    out property <duration> t-type-late: 440ms * k;
+    // ---- an application's mark, as its row is taken (marks.slint)
+    out property <duration> t-mark: 520ms * k;
     // ---- the camera while it is already moving, or has far to go: a held key
     // and a reversal keep the scene and the words close behind the focus
     out property <duration> t-brisk: 300ms * k;
     out property <duration> t-brisk-far: 360ms * k;
     out property <duration> t-brisk-near: 240ms * k;
     out property <duration> t-brisk-type: 170ms * k;
-    out property <duration> t-brisk-late: 230ms * k;
     // ---- the light
     out property <duration> t-aura: 900ms * k;
     // ---- a page arriving, an element carried from one screen to the next
@@ -110,12 +110,11 @@ export struct QuietCam {
     row: int,
     // Before Ayarlar, whose scene the settings' emblem is.
     settings: bool,
-    // The main, far and near planes of a scene, the name, and what it says.
+    // The main, far and near planes of a scene, and the name.
     cam: float,
     cam-far: float,
     cam-near: float,
     cam-type: float,
-    cam-late: float,
     // How far the chosen scene still has to come as the home screen opens.
     arrive: float,
     // The settings' emblem: 0 where the home screen's scene stands, 1 in its
@@ -141,9 +140,135 @@ export global QuietReach {
     public pure function scene(c: QuietCam, i: int) -> bool {
         return wanted(c, i) && (near(c, i) < 0.995 || (i == c.row && c.arrive > 0));
     }
-    // Whether row `i`'s words are: its name's, or what it says (`late`).
-    public pure function words(c: QuietCam, i: int, late: bool) -> bool {
-        return wanted(c, i) && abs(i - (late ? c.cam-late : c.cam-type)) < 0.995;
+    // Whether row `i`'s name is.
+    public pure function words(c: QuietCam, i: int) -> bool {
+        return wanted(c, i) && abs(i - c.cam-type) < 0.995;
+    }
+}
+
+// The settings' emblems, on their deck (emblems.slint): three places that take
+// turns, where each is, and the camera's three planes. A scene is known by
+// its id alone.
+export struct QuietDeck {
+    id0: string,
+    id1: string,
+    id2: string,
+    at0: int,
+    at1: int,
+    at2: int,
+    // The place it stands at, or goes to.
+    to: int,
+    cam: float,
+    cam-far: float,
+    cam-near: float,
+}
+
+export global QuietDecks {
+    public pure function id(deck: QuietDeck, n: int) -> string { return n == 0 ? deck.id0 : n == 1 ? deck.id1 : deck.id2; }
+    public pure function at(deck: QuietDeck, n: int) -> int { return n == 0 ? deck.at0 : n == 1 ? deck.at1 : deck.at2; }
+    public pure function near(deck: QuietDeck, n: int) -> bool {
+        let i = at(deck, n);
+        return min(abs(i - deck.cam), min(abs(i - deck.cam-far), abs(i - deck.cam-near))) < 0.995;
+    }
+    public pure function moving(deck: QuietDeck) -> bool {
+        return deck.cam != deck.to || deck.cam-far != deck.to || deck.cam-near != deck.to;
+    }
+    // How far the mechanism is from the camera: gone, where it has no place.
+    public pure function mechanism(deck: QuietDeck) -> float {
+        return deck.id0 == "settings" && near(deck, 0) ? deck.at0 - deck.cam
+             : deck.id1 == "settings" && near(deck, 1) ? deck.at1 - deck.cam
+             : deck.id2 == "settings" && near(deck, 2) ? deck.at2 - deck.cam
+             : 1;
+    }
+}
+
+// What moves the deck, as `QuietRig` moves the camera: assigned, never bound,
+// and from wherever it has got to. A change never waits for the last one:
+// turned round it goes back to the scene it was leaving, and one that comes
+// while the last is hardly in takes that one's place.
+export component QuietDeckRig inherits Rectangle {
+    width: 0px;
+    height: 0px;
+
+    property <string> id0: "settings";
+    property <string> id1;
+    property <string> id2;
+    property <int> at0: 300;
+    property <int> at1;
+    property <int> at2;
+    property <int> to: 300;
+    property <float> cam: 300;
+    property <float> cam-far: 300;
+    property <float> cam-near: 300;
+    out property <QuietDeck> view: {
+        id0: id0, id1: id1, id2: id2, at0: at0, at1: at1, at2: at2, to: to,
+        cam: cam, cam-far: cam-far, cam-near: cam-near,
+    };
+    property <bool> snap;
+    property <bool> brisk;
+    animate cam { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk : QuietMotion.t-camera; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+    animate cam-far { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-far : QuietMotion.t-camera-far; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+    animate cam-near { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-near : QuietMotion.t-camera-near; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
+
+    function put(at: float) {
+        cam = at;
+        cam-far = at;
+        cam-near = at;
+    }
+    function set(at: int, id: string) {
+        let n = mod(at, 3);
+        if n == 0 {
+            id0 = id;
+            at0 = at;
+        } else if n == 1 {
+            id1 = id;
+            at1 = at;
+        } else {
+            id2 = id;
+            at2 = at;
+        }
+    }
+    pure function there(at: int) -> string {
+        let n = mod(at, 3);
+        return n == 0 ? (at0 == at ? id0 : "") : n == 1 ? (at1 == at ? id1 : "") : (at2 == at ? id2 : "");
+    }
+    // At a scene at once.
+    public function land(id: string) {
+        snap = true;
+        id0 = "";
+        id1 = "";
+        id2 = "";
+        to = 300;
+        set(300, id);
+        put(300);
+        snap = false;
+    }
+    // To a scene, the way the screen went.
+    public function go(id: string, way: int) {
+        if there(to) != id {
+            snap = false;
+            brisk = abs(cam - round(cam)) > 0.01;
+            if abs(to - cam) > 0.02 && there(to - 1) == id && cam < to {
+                to -= 1;
+            } else if abs(to - cam) > 0.02 && there(to + 1) == id && cam > to {
+                to += 1;
+            } else if abs(to - cam) > 0.55 {
+                set(to, id);
+            } else {
+                to += way;
+                set(to, id);
+            }
+            put(to);
+        }
+    }
+    // Whatever is moving, where it was going: reduced motion turned on.
+    property <bool> on: QuietMotion.on;
+    changed on => {
+        if !on {
+            snap = true;
+            put(to);
+            snap = false;
+        }
     }
 }
 
@@ -173,13 +298,12 @@ export component QuietRig inherits Rectangle {
     property <float> cam-far;
     property <float> cam-near;
     property <float> cam-type;
-    property <float> cam-late;
     property <float> arrive;
     property <float> flight: 1;
     property <float> shrink;
     out property <QuietCam> view: {
         row: at-row, settings: id == "settings",
-        cam: cam, cam-far: cam-far, cam-near: cam-near, cam-type: cam-type, cam-late: cam-late,
+        cam: cam, cam-far: cam-far, cam-near: cam-near, cam-type: cam-type,
         arrive: arrive, flight: flight, shrink: shrink, leap: leap, lo: lo, hi: hi,
     };
 
@@ -194,7 +318,6 @@ export component QuietRig inherits Rectangle {
     animate cam-far { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-far : QuietMotion.t-camera-far; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
     animate cam-near { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-near : QuietMotion.t-camera-near; easing: brisk ? QuietCurves.glide : QuietCurves.camera; }
     animate cam-type { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-type : QuietMotion.t-type; easing: QuietCurves.glide; }
-    animate cam-late { duration: snap ? 0ms : brisk ? QuietMotion.t-brisk-late : QuietMotion.t-type-late; easing: QuietCurves.glide; }
     animate arrive { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
     animate flight { duration: snap ? 0ms : QuietMotion.t-shared; easing: turned ? QuietCurves.glide : QuietCurves.camera; }
     animate shrink { duration: snap ? 0ms : QuietMotion.t-shared; easing: QuietCurves.camera; }
@@ -204,7 +327,6 @@ export component QuietRig inherits Rectangle {
         cam-far = at;
         cam-near = at;
         cam-type = at;
-        cam-late = at;
     }
     // To another row, from wherever it is.
     public function travel(to: int) {

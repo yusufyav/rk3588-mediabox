@@ -19,6 +19,8 @@ export component Diagnostics inherits Rectangle {
     in property <[DiagGroup]> groups;
     in property <[SettingNav]> nav;
     in property <int> group;
+    // The group, by its own id (Quiet OS's emblem).
+    in property <string> scene;
     in property <SocView> soc;
     in property <VitalsModel> vitals;
 
@@ -45,6 +47,7 @@ export component Diagnostics inherits Rectangle {
         active: true;
         pointer-zone: "diagnostics-groups";
         emblem: !root.machine;
+        scene: root.scene;
         overline: "AYARLAR  /  TANILAMA";
         title: groups.length > 0 ? groups[group].title : "Tanılama";
         blurb: "Salt okunur · teknik ayrıntılar";

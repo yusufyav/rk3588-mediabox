@@ -5,8 +5,8 @@
 //! keeps the camera, the timing and the place on the panel; the element's
 //! image is a pure callback of those, and what answers it draws the scene
 //! into a texture Slint then shows without copying it (a *borrowed* one).
-//! Nothing draws unless MEDIABOX_TV_SPATIAL names a scene: the interface's
-//! own scenes are Slint's, and cheaper drawn as they are.
+//! The product's are the settings' solid emblems (emblem.rs); the home
+//! screen's scenes are Slint's, and cheaper drawn as they are.
 //!
 //! # A frame
 //!
@@ -43,12 +43,11 @@
 //! of a texture that has moved on.
 
 mod budget;
+mod emblem;
 pub mod gl;
 mod globe;
 #[cfg(any(test, feature = "spatial-lab"))]
 mod lab;
-// For scenes with a lens; the product's first one takes the condition off.
-#[cfg(any(test, feature = "spatial-lab"))]
 mod math;
 #[cfg(test)]
 pub mod tests;
@@ -94,6 +93,7 @@ pub trait Scene {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
     Globe,
+    Emblem(emblem::Model),
     /// The element is there and nothing is drawn: what a frame costs without.
     #[cfg(any(test, feature = "spatial-lab"))]
     Nothing,
@@ -102,6 +102,9 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The first emblem's number.
+    const EMBLEMS: i32 = 16;
+
     fn number(self) -> i32 {
         match self {
             Self::Globe => 1,
@@ -109,6 +112,7 @@ impl Kind {
             Self::Nothing => 2,
             #[cfg(any(test, feature = "spatial-lab"))]
             Self::Advanced => 3,
+            Self::Emblem(model) => Self::EMBLEMS + model as i32,
         }
     }
 
@@ -119,7 +123,7 @@ impl Kind {
             2 => Some(Self::Nothing),
             #[cfg(any(test, feature = "spatial-lab"))]
             3 => Some(Self::Advanced),
-            _ => None,
+            n => emblem::Model::ALL.into_iter().map(Self::Emblem).find(|kind| kind.number() == n),
         }
     }
 
@@ -128,6 +132,7 @@ impl Kind {
     fn place(self, cam: &Cam) -> Place {
         match self {
             Self::Globe => globe::place(cam),
+            Self::Emblem(_) => emblem::place(cam),
             #[cfg(any(test, feature = "spatial-lab"))]
             Self::Nothing => Place::default(),
             #[cfg(any(test, feature = "spatial-lab"))]
@@ -142,13 +147,25 @@ impl Kind {
         if self == Self::Advanced && lab::full() {
             return cam.panel;
         }
+        if let Self::Emblem(_) = self {
+            let most = emblem::room(cam);
+            return (most, most);
+        }
         let most = cam.size * 1.35;
         (most.min(cam.panel.0), most.min(cam.panel.1))
     }
 
-    fn make(self, gpu: &Rc<Gpu>) -> Result<Option<Box<dyn Scene>>, Error> {
+    /// `tools` are the emblems' together.
+    fn make(self, gpu: &Rc<Gpu>, tools: &mut Option<Rc<emblem::Tools>>) -> Result<Option<Box<dyn Scene>>, Error> {
         Ok(match self {
             Self::Globe => Some(Box::new(globe::Globe::new(gpu)?)),
+            Self::Emblem(model) => {
+                let tools = match tools {
+                    Some(tools) => tools.clone(),
+                    None => tools.insert(Rc::new(emblem::Tools::new(gpu)?)).clone(),
+                };
+                Some(Box::new(emblem::Emblem::new(gpu, tools, model)?))
+            }
             #[cfg(any(test, feature = "spatial-lab"))]
             Self::Nothing => None,
             #[cfg(any(test, feature = "spatial-lab"))]
@@ -236,6 +253,9 @@ impl From<&SpatialCam> for Cam {
     }
 }
 
+/// What an emblem's element is named, before its scene's id.
+const EMBLEM: &str = "emblem/";
+
 /// Which elements are whose, and what may be spent on them.
 #[derive(Clone, Debug, PartialEq)]
 struct Shown {
@@ -245,14 +265,29 @@ struct Shown {
 }
 
 impl Shown {
+    /// ("*" is of the launcher's: an emblem is asked for by its name.)
     fn kind(&self, name: &str) -> Option<Kind> {
-        self.by.iter().find(|(who, _)| who == "*" || who == name).map(|&(_, kind)| kind)
+        let all = |who: &str| who == "*" && !name.starts_with(EMBLEM);
+        self.by.iter().find(|(who, _)| all(who) || who == name).map(|&(_, kind)| kind)
     }
 
-    /// `globe`: the product's own scenes, by their names.
+    /// The product's own: the settings' emblems.
+    fn product() -> Self {
+        let by = emblem::Model::ALL.iter().map(|&model| (format!("{EMBLEM}{}", model.id()), Kind::Emblem(model))).collect();
+        Self { by, budget: Budget::PRODUCT }
+    }
+
+    /// The product's, changed for a comparison: `off`, none of them; `globe`,
+    /// and the Tarayıcı scene's.
     #[cfg(any(test, not(feature = "spatial-lab")))]
     fn parse(text: &str) -> Option<Self> {
-        (text.trim() == "globe").then(|| Self { by: vec![("browser".into(), Kind::Globe)], budget: Budget::PRODUCT })
+        let mut shown = Self::product();
+        match text.trim() {
+            "off" => shown.by.clear(),
+            "globe" => shown.by.push(("browser".into(), Kind::Globe)),
+            _ => return None,
+        }
+        Some(shown)
     }
 }
 
@@ -275,6 +310,7 @@ struct OnGpu {
     retired: Vec<Target>,
     scratch: Scratch,
     scenes: Vec<(Kind, Option<Box<dyn Scene>>)>,
+    tools: Option<Rc<emblem::Tools>>,
     straight: Straight,
     gpu: Rc<Gpu>,
 }
@@ -330,7 +366,7 @@ impl OnGpu {
         let gpu = Gpu::new(budget.bytes)?;
         let _kept = Kept::of(&gpu.gl);
         let straight = Straight::new(&gpu)?;
-        Ok(Self { slots: Vec::new(), retired: Vec::new(), scratch: Scratch::default(), scenes: Vec::new(), straight, gpu: gpu.clone() })
+        Ok(Self { slots: Vec::new(), retired: Vec::new(), scratch: Scratch::default(), scenes: Vec::new(), tools: None, straight, gpu: gpu.clone() })
     }
 
     /// The shaders and the geometry of `kind`, once.
@@ -339,7 +375,7 @@ impl OnGpu {
             return Ok(());
         }
         let _kept = Kept::of(&self.gpu.gl);
-        let scene = kind.make(&self.gpu)?;
+        let scene = kind.make(&self.gpu, &mut self.tools)?;
         if let Some(scene) = &scene {
             // Whatever its size on the panel.
             budget.holds(scene.cost().cycles(0), period)?;
@@ -646,20 +682,22 @@ fn tell() {
     }
 }
 
-/// The scenes MEDIABOX_TV_SPATIAL names, for this window; none, and nothing
-/// here ever runs.
+/// The product's scenes for this window; MEDIABOX_TV_SPATIAL's, where it says
+/// others.
 pub fn attach(ui: &MediaBoxWindow) {
-    let Ok(text) = std::env::var("MEDIABOX_TV_SPATIAL") else { return };
+    let text = std::env::var("MEDIABOX_TV_SPATIAL").unwrap_or_default();
     #[cfg(feature = "spatial-lab")]
     let shown = lab::parse(&text);
     #[cfg(not(feature = "spatial-lab"))]
     let shown = Shown::parse(&text);
-    match shown {
-        Some(shown) => start(ui, shown),
-        None => eprintln!("mediabox-tv.spatial no such scene: {text}"),
+    if shown.is_none() && !text.is_empty() {
+        eprintln!("mediabox-tv.spatial no such scene: {text}");
     }
+    start(ui, shown.unwrap_or_else(Shown::product));
     #[cfg(feature = "spatial-lab")]
-    lab::listen();
+    if !text.is_empty() {
+        lab::listen();
+    }
 }
 
 fn start(ui: &MediaBoxWindow, shown: Shown) {

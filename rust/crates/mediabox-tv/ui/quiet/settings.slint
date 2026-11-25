@@ -6,9 +6,9 @@ import { OutputPane, OutputView } from "../output.slint";
 import { EthernetPane, EthernetView } from "../ethernet.slint";
 import { AudioPane, AudioView } from "../audio.slint";
 import { Quiet } from "core.slint";
-import { QuietMotion, QuietCurves, QuietCam } from "motion.slint";
+import { QuietMotion, QuietCurves, QuietCam, QuietDeck, QuietDeckRig } from "motion.slint";
 import { QuietGround, LivingFocus, Kept, Still } from "materials.slint";
-import { SettingsScene } from "scenes.slint";
+import { EmblemDeck } from "emblems.slint";
 import { Overline, HomeCrumb, QuietBar, QuietToggle, QuietChoice } from "controls.slint";
 import { QuietPlaces } from "home.slint";
 
@@ -20,15 +20,26 @@ import { QuietPlaces } from "home.slint";
 // nothing outlives a screen but what Rust holds; continuity is drawn, not
 // kept. The settings' emblem -- the home screen's Ayarlar scene -- flies from
 // where that scene stood when the settings are opened from the home screen
-// (`came-from`), and back again (home.slint). Between categories the heading
-// and the rows move in the direction the column moved, the emblem's
-// mechanism turns a notch, and the focus is one capsule travelling.
+// (`came-from`), and back again (home.slint); once there it gives way to the
+// scene of the category or the page. Between categories the heading, the rows
+// and the scene move in the direction the column moved, and the focus is one
+// capsule travelling.
 
-// The settings' emblem: the home screen's Ayarlar scene, smaller, at the top
-// right, its mechanism turning a notch when the category changes.
+// The settings' emblem, at the top right: the scene of what is on screen
+// (emblems.slint), on a deck it changes on. Arriving it is the home screen's
+// Ayarlar scene, flying in.
 component SettingsEmblem inherits Rectangle {
-    // The category, as a number: it turns when this does.
-    in property <float> turn;
+    // What is on screen, by its own id, and where that stands in the screen's
+    // order: a higher one arrives from below.
+    in property <string> scene;
+    in property <float> order;
+    in property <QuietDeck> deck;
+    callback deck-go(string, int);
+    callback deck-land(string);
+    // It flies in from the home screen.
+    in property <bool> flown;
+    in property <length> panel-w;
+    in property <length> panel-h;
     in property <bool> small;
     property <float> u: Quiet.u;
     // Where the window's camera has it; in its place, on a screen that does
@@ -37,18 +48,34 @@ component SettingsEmblem inherits Rectangle {
     callback shrink-to(float);
     property <float> fly: 1 - camera.flight;
 
-    property <bool> snap: true;
-    property <float> notch;
-    animate notch { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
+    // All but in its place: the mechanism gives way to the scene.
+    property <bool> arrived: camera.flight > 0.72;
+    property <float> last-order;
     init => {
-        notch = turn;
-        snap = false;
+        last-order = order;
         // First: without motion it is there by the next line, and nothing
         // has changed to be told of.
         root.shrink-to(small ? 1 : 0);
         stand();
+        if arrived {
+            root.deck-land(scene);
+        }
     }
-    changed turn => { notch = turn; }
+    changed arrived => {
+        if arrived {
+            if flown {
+                root.deck-go(scene, 1);
+            } else {
+                root.deck-land(scene);
+            }
+        }
+    }
+    changed scene => {
+        if arrived {
+            root.deck-go(scene, order >= last-order ? 1 : -1);
+        }
+        last-order = order;
+    }
     // In its place, and which of its two (-1 on its way): assigned when that
     // changes, not bound -- the camera is one value, and all that reads it is
     // told of every part of it that moves. The place is what is told apart,
@@ -75,17 +102,18 @@ component SettingsEmblem inherits Rectangle {
 
     // What the home screen's camera still had to travel when it was left.
     property <float> owed: camera.settings ? camera.row - camera.cam + camera.arrive : 0;
-    property <float> d: clamp((notch - turn) * 0.3, -0.45, 0.45);
-    SettingsScene {
+    EmblemDeck {
         width: 100%;
         height: 100%;
+        deck: root.deck;
         tint: Quiet.aura("settings");
-        d: root.d + root.owed;
-        d-far: root.d * 0.7 + root.owed;
-        d-near: root.d * 1.3 + root.owed;
-        presence: 0.55 + 0.35 * fly;
-        kept: standing;
+        presence: 0.8 + 0.1 * fly;
+        owed: root.owed;
+        standing: root.standing;
         box: resting;
+        side: QuietPlaces.emblem-size(camera.shrink);
+        panel-w: root.panel-w;
+        panel-h: root.panel-h;
     }
 }
 
@@ -342,6 +370,8 @@ export component QuietFrame inherits Rectangle {
     in property <string> pointer-zone;
     // Off where the screen draws an instrument of its own in its place.
     in property <bool> emblem: true;
+    // What is on screen, by its own id (emblems.slint).
+    in property <string> scene;
     in property <string> page-label;
     in property <string> page-icon;
     in property <string> overline;
@@ -366,8 +396,15 @@ export component QuietFrame inherits Rectangle {
         crumb: root.crumb;
     }
     if emblem: SettingsEmblem {
-        turn: root.current;
+        scene: root.scene;
+        order: root.current;
+        deck: deck.view;
+        deck-go(id, way) => { deck.go(id, way); }
+        deck-land(id) => { deck.land(id); }
+        panel-w: root.width;
+        panel-h: root.height;
     }
+    deck := QuietDeckRig { }
 
     HomeCrumb {
         x: left;
@@ -475,6 +512,8 @@ export component QuietSettings inherits Rectangle {
     in property <int> row-index;
     in property <string> page;
     in property <string> page-icon;
+    // The category or the page, by its own id (emblems.slint).
+    in property <string> scene;
     in property <string> title;
     in property <string> blurb;
     in property <bool> cooling;
@@ -530,6 +569,9 @@ export component QuietSettings inherits Rectangle {
     // settling does not start them over, so a held key never holds the list
     // away from its place.
     in property <QuietCam> camera;
+    in property <QuietDeck> deck;
+    callback deck-go(string, int);
+    callback deck-land(string);
     callback fly(float, bool);
     callback shrink-to(float);
     property <bool> snap: true;
@@ -570,7 +612,14 @@ export component QuietSettings inherits Rectangle {
     }
 
     SettingsEmblem {
-        turn: root.order;
+        scene: root.scene;
+        order: root.order;
+        deck: root.deck;
+        deck-go(id, way) => { root.deck-go(id, way); }
+        deck-land(id) => { root.deck-land(id); }
+        flown: came-from == "home" && camera.settings;
+        panel-w: root.width;
+        panel-h: root.height;
         small: editor;
         camera: root.camera;
         shrink-to(to) => { root.shrink-to(to); }

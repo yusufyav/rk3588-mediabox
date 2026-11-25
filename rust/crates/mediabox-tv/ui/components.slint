@@ -54,8 +54,9 @@ export struct AppTile {
     hue: float,
     ready: bool,
     note: string,
-    // One line on what it is for: Quiet OS's home screen shows it under the
-    // chosen application's name. "" when the interface does not know.
+    // One line on what it is for, the control plane's own summary among them;
+    // "" when the interface does not know. Neither face of the home screen
+    // writes it out.
     about: string,
 }
 

@@ -4,7 +4,7 @@
 //! whatever goes wrong there is a scene on the panel.
 
 use super::*;
-use crate::spatial::tests::{Fault, State, budget, fault, on_picture, start_with, state};
+use crate::spatial::tests::{Fault, State, budget, fault, on_picture, start_product, start_with, state};
 
 /// A launcher of `ids`.
 fn tiles(ids: &[&str]) -> Rc<VecModel<crate::AppTile>> {
@@ -375,6 +375,19 @@ fn a_failure_in_the_middle_of_a_move_is_never_seen() {
     fault(None);
 }
 
+/// NVIDIA's driver does not survive the process's end with framebuffers left
+/// in a context that never ended (620.73): what was forgotten on purpose,
+/// deleted after all.
+fn delete_what_was_forgotten() {
+    crate::spatial::stop();
+    let gpu = crate::spatial::gl::Gpu::new(0).expect("GLES 3");
+    for n in (1..4000).map(|n| NonZeroU32::new(n).unwrap()) {
+        use glow::HasContext;
+        // SAFETY: nothing is drawn after this.
+        unsafe { gpu.gl.delete_framebuffer(glow::NativeFramebuffer(n)) };
+    }
+}
+
 /// Another context: nothing of the old one is used, nothing of it deleted by
 /// a name that is another's by now, and the scene is there.
 #[test]
@@ -404,16 +417,7 @@ fn another_context_begins_again() {
     drawn.draw();
     assert_eq!((state().failed, state().live), (0, 1), "{:?}", state());
     assert_eq!(drawn.read().unlike(&before, 1), 0);
-    // NVIDIA's driver does not survive the process's end with framebuffers
-    // left in a context that never ended (620.73): what was forgotten on
-    // purpose, deleted after all.
-    crate::spatial::stop();
-    let gpu = crate::spatial::gl::Gpu::new(0).expect("GLES 3");
-    for n in (1..400).map(|n| NonZeroU32::new(n).unwrap()) {
-        use glow::HasContext;
-        // SAFETY: nothing is drawn after this.
-        unsafe { gpu.gl.delete_framebuffer(glow::NativeFramebuffer(n)) };
-    }
+    delete_what_was_forgotten();
 }
 
 /// Two real contexts: what was made in one and let go of in the other leaves
@@ -620,4 +624,264 @@ fn reduced_motion_lands_a_gpu_scene() {
     drawn.frame();
     assert_eq!(state().live, 0, "gone at once");
     drawn.ui.global::<crate::QuietMotion>().set_reduced(false);
+}
+
+/// An emblem is whole, all along its way: what it draws is inside the place
+/// it says it is in. And at rest there is something to see of each.
+#[test]
+fn an_emblem_is_not_cut_by_its_place() {
+    let Ok(_pbuffer) = Pbuffer::new() else { return };
+    let mut cut = std::collections::BTreeMap::<String, (u8, f32)>::new();
+    crate::spatial::tests::emblem_edges(|id, d, edge, inside| {
+        assert!(d != 0.0 || inside > 2000, "{id}: {inside} pixels at rest");
+        let worst = cut.entry(id.into()).or_default();
+        // Fainter than a level of the panel's is nothing.
+        if edge > worst.0.max(6) {
+            *worst = (edge, d);
+        }
+    });
+    cut.retain(|_, worst| worst.0 > 0);
+    assert!(cut.is_empty(), "cut: {cut:?}");
+}
+
+/// The settings' scenes, by their own ids.
+const EMBLEMS: &[&str] = &[
+    "media", "picture", "links", "remote", "live", "device", "system", "diagnostics", "playback", "account", "cec", "output", "cooling",
+    "audio", "ethernet", "wifi", "storage", "services",
+];
+
+/// Pictures of every emblem, at rest and on the way, the GPU's and Slint's.
+/// As `shots_family`, only with MEDIABOX_TV_SHOTS set.
+#[test]
+#[ignore]
+fn shots_emblems() {
+    let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else { return };
+    std::fs::create_dir_all(&out).unwrap();
+    let drawn = Drawn::open().expect("a GLES device to draw with");
+    start_product(&drawn.ui);
+    drawn.panel(3840, 2160, 2.0);
+    let crop = |name: &str| {
+        let picture = drawn.picture();
+        let (x, y, side) = (3100, 340, 620);
+        let pixels = (y..y + side).flat_map(|row| (x..x + side).flat_map(move |col| [col, row])).collect::<Vec<u32>>();
+        let pixels = pixels.as_chunks::<2>().0.iter().flat_map(|&[col, row]| {
+            let [r, g, b] = picture.at(col, row);
+            [r, g, b, 255]
+        });
+        Picture { size: (side, side), pixels: pixels.collect() }.save(&out.join(format!("{name}.png")));
+    };
+    wear(crate::layout::Layout::Quiet);
+    drawn.settings("Sistem");
+    drawn.rest(1500);
+    for id in EMBLEMS {
+        // Slowly: a picture takes a while to keep.
+        drawn.ui.global::<crate::QuietMotion>().set_pace(12.0);
+        drawn.ui.set_settings_scene((*id).into());
+        for (n, ms) in [(0, 1500), (1, 300), (2, 300)] {
+            drawn.rest(ms);
+            crop(&format!("emblem-{id}-{n}"));
+        }
+        drawn.rest(9000);
+        crop(&format!("emblem-{id}-3"));
+        drawn.ui.global::<crate::Spatial>().set_on(false);
+        drawn.rest(60);
+        crop(&format!("emblem-{id}-slint"));
+        drawn.ui.global::<crate::Spatial>().set_on(true);
+        drawn.rest(60);
+    }
+    eprintln!("{:?}", state());
+    // Down the column, as it moves: each frame named by its moment.
+    const PACE: f32 = 12.0;
+    let start = std::time::Instant::now();
+    for id in &EMBLEMS[..8] {
+        drawn.ui.set_settings_scene((*id).into());
+        let until = std::time::Instant::now() + std::time::Duration::from_millis((1100.0 * PACE) as u64);
+        while std::time::Instant::now() < until {
+            drawn.frame();
+            crop(&format!("seq-{:06}", (start.elapsed().as_millis() as f32 / PACE) as u32));
+        }
+    }
+}
+
+/// Pictures of the launcher's marks on the way, as `shots_emblems`.
+#[test]
+#[ignore]
+fn shots_marks() {
+    let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else { return };
+    std::fs::create_dir_all(&out).unwrap();
+    let drawn = Drawn::open().expect("a GLES device to draw with");
+    drawn.panel(3840, 2160, 2.0);
+    let display = serde_json::json!({ "applications": [{ "id": "kodi", "name": "KODI", "installed": true }] });
+    let tiles: Vec<crate::AppTile> = app(|app| {
+        app.home.set_apps(crate::state::app_tiles_from(&serde_json::from_value(display).unwrap()));
+        slint::Model::iter(&*app.home.app_tiles).collect()
+    });
+    let apps = Rc::new(VecModel::from(tiles));
+    drawn.home(&apps, 4);
+    drawn.rest(1200);
+    drawn.ui.global::<crate::QuietMotion>().set_pace(16.0);
+    for row in 0..5 {
+        drawn.ui.set_focus_col(row);
+        for n in 0..6 {
+            drawn.rest(900);
+            let picture = drawn.picture();
+            let (x, y, side) = (270u32, 520 + 166 * row as u32 + 40, 72u32);
+            let pixels = (y..y + side).flat_map(|row| (x..x + side).map(move |col| (col, row)));
+            let pixels = pixels.flat_map(|(col, row)| { let [r, g, b] = picture.at(col, row); [r, g, b, 255] }).collect();
+            Picture { size: (side, side), pixels }.save(&out.join(format!("mark-{row}-{n}.png")));
+        }
+    }
+}
+
+/// The settings' emblems, as the product has them: the GPU's and Slint's on
+/// one deck, one at rest, drawn only while it moves, whatever is done to the
+/// column; landed by reduced motion; Slint's where the GPU fails; and nothing
+/// held of them on another screen.
+#[test]
+fn the_emblems_change_with_what_is_on_screen() {
+    let Some(drawn) = Drawn::open() else { return };
+    start_product(&drawn.ui);
+    let apps = Rc::new(VecModel::from(launcher(6)));
+    drawn.home(&apps, 3);
+    drawn.rest(1200);
+    assert_eq!((state().live, state().drawn), (0, 0), "nothing of it on the home screen");
+    let there = || {
+        let deck = drawn.ui.get_quiet_deck();
+        [(deck.at0, deck.id0), (deck.at1, deck.id1), (deck.at2, deck.id2)].into_iter().find(|(at, _)| *at == deck.to).unwrap().1.to_string()
+    };
+    // In from the home screen: the mechanism first, then the category's own.
+    drawn.ui.global::<crate::QuietMotion>().set_pace(6.0);
+    drawn.settings("Sistem");
+    drawn.rest(40);
+    assert_eq!((there().as_str(), state().live), ("settings", 0));
+    drawn.rest(9000);
+    drawn.ui.global::<crate::QuietMotion>().set_pace(1.0);
+    assert_eq!((there().as_str(), state().live, state().slots <= 2), ("system", 1, true));
+    // At rest: not for a frame something else asked for.
+    let before = state().drawn;
+    drawn.vitals(true, false, 0);
+    drawn.rest(300);
+    assert!(!drawn.window.redraw.get() && state().drawn == before);
+    // Every category and back, at every speed, turned round half way.
+    let groups = ["Medya", "Görüntü ve Ses", "Bağlantılar", "TV ve Kumanda", "Canlı TV", "Cihaz", "Sistem", "Tanılama"];
+    for every in [20, 60, 110, 250] {
+        for group in groups.iter().chain(groups.iter().rev()).chain(["Cihaz", "Sistem", "Cihaz", "Sistem"].iter()) {
+            drawn.settings(group);
+            drawn.rest(every);
+            assert!(state().live <= 3, "{:?}", state());
+        }
+    }
+    drawn.rest(1200);
+    assert_eq!((there().as_str(), state().live, state().failed, state().refused), ("system", 1, 0, 0));
+    // Pages: the small emblem, and Slint's own.
+    for (name, id, live) in [("cooling", "cooling", 1), ("ethernet", "ethernet", 0), ("cec", "cec", 0), ("audio", "audio", 1), ("output", "output", 1)] {
+        family_show(&drawn.ui, name);
+        drawn.rest(1500);
+        assert_eq!((there().as_str(), state().live), (id, live), "{name}");
+        drawn.is_what_it_is(&format!("emblem-page-{name}"));
+    }
+    // Reduced motion: there, now.
+    drawn.ui.global::<crate::QuietMotion>().set_reduced(true);
+    drawn.settings("Cihaz");
+    drawn.frame();
+    drawn.frame();
+    assert_eq!((there().as_str(), state().live), ("device", 1));
+    let before = state().drawn;
+    drawn.rest(200);
+    assert_eq!(state().drawn, before, "still moving");
+    drawn.ui.global::<crate::QuietMotion>().set_reduced(false);
+    // What the GPU cannot draw is there all the same.
+    let emblem = |picture: &Picture| {
+        let ground = picture.at(1590, 190)[1];
+        (1592..1820).flat_map(|x| (196..424).map(move |y| (x, y))).filter(|&(x, y)| picture.at(x, y)[1] > ground.saturating_add(30)).count()
+    };
+    for what in [Fault::Shader, Fault::Texture, Fault::Framebuffer, Fault::Draw] {
+        fault(Some(what));
+        crate::spatial::gl::context_made();
+        let presented = PRESENTED.get();
+        drawn.draw();
+        assert_eq!(PRESENTED.get(), presented + 1, "{what:?}");
+        assert_eq!(state().live, 0, "{what:?} {:?}", state());
+        let seen = emblem(&drawn.read());
+        assert!(seen > 300, "{what:?}: {seen}");
+        fault(None);
+        crate::spatial::gl::context_made();
+        drawn.draw();
+        assert_eq!(state().live, 1, "{what:?} {:?}", state());
+    }
+    // Home, half way through the change: the mechanism, and nothing left.
+    drawn.settings("Sistem");
+    drawn.rest(120);
+    drawn.home(&apps, 3);
+    drawn.rest(1500);
+    assert_eq!(there(), "settings");
+    let home = settled(&drawn);
+    assert_eq!((home.live, home.slots), (0, 0), "{home:?}");
+    wear(crate::layout::Layout::Classic);
+    drawn.settings("Sistem");
+    assert_eq!(settled(&drawn).live, 0);
+    delete_what_was_forgotten();
+}
+
+/// The marks end where they began, however fast the focus goes and wherever
+/// it is turned round; with no motion they never leave; and the list they
+/// stand in is not drawn for them.
+#[test]
+fn a_mark_at_rest_is_the_mark() {
+    let Some(drawn) = Drawn::open() else { return };
+    let apps = Rc::new(VecModel::from(launcher(6)));
+    drawn.home(&apps, 0);
+    drawn.rest(1200);
+    let column = |picture: &Picture| {
+        let pixels = (268..780).flat_map(|y| (135..180).map(move |x| (x, y)));
+        Picture { size: (45, 512), pixels: pixels.flat_map(|(x, y)| { let [r, g, b] = picture.at(x, y); [r, g, b, 255] }).collect() }
+    };
+    let still: Vec<Picture> = (0..6)
+        .map(|row| {
+            drawn.ui.set_focus_col(row);
+            drawn.rest(1200);
+            column(&drawn.picture())
+        })
+        .collect();
+    for every in [10, 40, 90, 200] {
+        for row in [0, 1, 2, 3, 4, 5, 4, 3, 2, 3, 2, 1, 2, 1, 0, 5, 0, 2] {
+            drawn.ui.set_focus_col(row);
+            drawn.rest(every);
+        }
+        drawn.rest(1200);
+        assert_eq!(column(&drawn.picture()).unlike(&still[2], 2), 0, "every {every}");
+        drawn.is_what_it_is(&format!("marks-{every}"));
+    }
+    // It moves, and is drawn over the list, which is not drawn again.
+    drawn.ui.global::<crate::QuietMotion>().set_pace(4.0);
+    drawn.ui.set_focus_col(3);
+    drawn.rest(1000);
+    assert!(column(&drawn.picture()).unlike(&still[3], 8) > 20, "the mark does not move");
+    for _ in 0..5 {
+        let was = PASSES.get();
+        drawn.frame();
+        assert_eq!(PASSES.get(), was, "a pass for a mark that moves");
+    }
+    // The same application under another row: nothing moves.
+    let rows: Vec<crate::AppTile> = slint::Model::iter(&*apps).collect();
+    drawn.rest(4000);
+    let mut moved = rows.clone();
+    moved.remove(0);
+    apps.set_vec(moved);
+    drawn.ui.set_focus_col(2);
+    drawn.rest(60);
+    let there = column(&drawn.picture());
+    drawn.rest(1200);
+    assert!(there.unlike(&column(&drawn.picture()), 40) == 0, "a mark moved under an application that did not");
+    apps.set_vec(rows);
+    // Reduced motion.
+    drawn.ui.global::<crate::QuietMotion>().set_reduced(true);
+    for row in [0, 3, 4, 2] {
+        drawn.ui.set_focus_col(row);
+        drawn.frame();
+        drawn.frame();
+        let at_once = column(&drawn.picture());
+        drawn.rest(200);
+        assert_eq!(at_once.unlike(&column(&drawn.picture()), 2), 0, "row {row}: still moving");
+    }
 }
