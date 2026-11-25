@@ -7046,7 +7046,13 @@ impl App {
             return;
         }
         show(&window, route.name());
-        window.set_layout(self.layout.name().into());
+        // Quiet OS over the other face, once its scenes are there.
+        if self.layout != layout::Layout::Quiet
+            || window.get_layout() == self.layout.name()
+            || spatial::ready_or(|| with_app(App::paint))
+        {
+            window.set_layout(self.layout.name().into());
+        }
 
         self.paint_sheet(&window);
 

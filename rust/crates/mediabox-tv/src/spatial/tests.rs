@@ -47,6 +47,8 @@ pub struct State {
     pub slots: usize,
     pub bytes: u64,
     pub objects: u32,
+    /// Scenes whose shaders and geometry are there.
+    pub made: usize,
     pub failed: usize,
     pub refused: usize,
 }
@@ -61,6 +63,7 @@ pub fn state() -> State {
             slots: on.map_or(0, |on| on.slots.len()),
             bytes: on.map_or(0, |on| on.gpu.held()),
             objects: on.map_or(0, |on| on.gpu.objects()),
+            made: on.map_or(0, |on| on.scenes.len()),
             failed: stage.failed.len(),
             refused: stage.refused.len(),
         }

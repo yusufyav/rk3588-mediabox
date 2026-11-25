@@ -301,6 +301,9 @@ struct Slot {
     of: Option<(SpatialCam, SpatialPlace)>,
     /// The last frame it was asked for in.
     asked: u64,
+    /// Made for a panel of another size: shown until it is drawn again, and
+    /// then replaced, not drawn into.
+    old: bool,
 }
 
 /// What is on the GPU, and of which context. Fields in the order they go.
@@ -334,6 +337,8 @@ struct Stage {
     fell: bool,
     /// What draws an element has changed: `Spatial.epoch` is behind.
     changed: bool,
+    /// Quiet OS is about to be put on: made in the next frame, whosever.
+    soon: bool,
     /// Pictures drawn, ever.
     #[cfg_attr(not(test), allow(dead_code))]
     drawn: u64,
@@ -346,6 +351,8 @@ thread_local! {
     static STAGE: RefCell<Option<Stage>> = const { RefCell::new(None) };
     static UI: RefCell<Option<slint::Weak<MediaBoxWindow>>> = const { RefCell::new(None) };
     static REST: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
+    /// What waits for the scenes to be made (`ready_or`).
+    static THEN: Cell<Option<fn()>> = const { Cell::new(None) };
     /// The platform is inside a frame: the context is its own.
     static DRAWING: Cell<bool> = const { Cell::new(false) };
     /// The frame being drawn is not to be presented: it lacks something, and
@@ -388,13 +395,13 @@ impl OnGpu {
     /// or a new one.
     fn slot(&mut self, name: &str, kind: Kind, used: (i32, i32), room: (i32, i32), frame: u64, most: usize) -> Result<usize, Error> {
         let own = self.slots.iter().position(|s| s.name == name && s.kind == kind && s.asked < frame);
-        if let Some(at) = own.filter(|&at| self.slots[at].target.holds(used)) {
+        if let Some(at) = own.filter(|&at| !self.slots[at].old && self.slots[at].target.holds(used)) {
             return Ok(at);
         }
         // Not asked for in the last frame either: in this one it may be yet.
         let idle = |s: &Slot| s.asked + 1 < frame;
         let area = |size: (i32, i32)| size.0 as i64 * size.1 as i64;
-        let at = self.slots.iter().position(|s| idle(s) && s.target.holds(room) && area(s.target.size) <= 2 * area(room));
+        let at = self.slots.iter().position(|s| idle(s) && !s.old && s.target.holds(room) && area(s.target.size) <= 2 * area(room));
         if own.is_none() && let Some(at) = at {
             let slot = &mut self.slots[at];
             (slot.name, slot.kind, slot.of) = (name.into(), kind, None);
@@ -421,7 +428,7 @@ impl OnGpu {
         }
         .origin(slint::BorrowedOpenGLTextureOrigin::TopLeft)
         .build();
-        let slot = Slot { name: name.into(), kind, target, image, of: None, asked: 0 };
+        let slot = Slot { name: name.into(), kind, target, image, of: None, asked: 0, old: false };
         // Its own, outgrown (the panel's mode, the scale).
         if let Some(at) = self.slots.iter().position(|s| s.name == name && s.kind == kind && s.asked < frame) {
             let old = std::mem::replace(&mut self.slots[at], slot);
@@ -430,6 +437,17 @@ impl OnGpu {
         }
         self.slots.push(slot);
         Ok(self.slots.len() - 1)
+    }
+
+    /// The panel is another size: nothing made for the last one is drawn into
+    /// again. Kept, what an element happened to have from before would be as
+    /// large as that panel wanted for as long as it is shown, and the target
+    /// they share as large as the largest there ever was.
+    fn resized(&mut self) {
+        for slot in &mut self.slots {
+            slot.old = true;
+        }
+        self.scratch.clear();
     }
 
     fn draw(&self, at: usize, cam: &Cam, place: &Place) -> Result<Drawn, Error> {
@@ -474,6 +492,7 @@ impl Stage {
             asked_outside: false,
             fell: false,
             changed: false,
+            soon: false,
             drawn: 0,
             peak_slots: 0,
         }
@@ -487,8 +506,8 @@ impl Stage {
     }
 
     /// A frame begins, in the platform's context. Whether the roll is to be
-    /// called.
-    fn open(&mut self, panel: (slint::PhysicalSize, Duration)) -> bool {
+    /// called. `quiet`: it is Quiet OS's, whose scenes these are.
+    fn open(&mut self, panel: (slint::PhysicalSize, Duration), quiet: bool) -> bool {
         self.frame += 1;
         self.spent = 0;
         let context = gl::current();
@@ -504,15 +523,22 @@ impl Stage {
         }
         if panel != self.panel {
             // What could not be had of that mode may be of this one.
+            if panel.0 != self.panel.0
+                && let Some(on) = &mut self.on
+            {
+                on.resized();
+            }
             self.panel = panel;
             self.changed |= !self.refused.is_empty() || self.failed.iter().any(|(_, lasts)| !lasts);
             self.refused.clear();
             self.failed.retain(|(_, lasts)| *lasts);
         }
         // On the GPU before it is first wanted: shaders are compiled on the
-        // first frame of all, not on the first of a move.
+        // first frame of the face they are for, before anything of it is
+        // drawn and not on the first of a move. The other face has no use
+        // for them, and pays nothing; worn again, they are still there.
         let mut kinds: Vec<Kind> = Vec::new();
-        for &(_, kind) in &self.shown.by {
+        for &(_, kind) in self.shown.by.iter().filter(|_| quiet || self.soon) {
             if !kinds.contains(&kind) && !self.failed.iter().any(|(k, _)| *k == kind) {
                 kinds.push(kind);
             }
@@ -525,6 +551,15 @@ impl Stage {
         // The interface is told of those before it draws.
         self.fell = false;
         std::mem::take(&mut self.asked_outside) || self.on.as_ref().is_some_and(|on| !on.slots.is_empty())
+    }
+
+    /// Whether a frame of Quiet OS's would make nothing first: all there is to
+    /// make is there, or cannot be.
+    fn ready(&self) -> bool {
+        self.shown.by.iter().all(|&(_, kind)| {
+            self.failed.iter().any(|(k, _)| *k == kind)
+                || self.on.as_ref().is_some_and(|on| on.scenes.iter().any(|(have, _)| *have == kind))
+        })
     }
 
     fn make(&mut self, kind: Kind) -> Result<(), Error> {
@@ -700,6 +735,25 @@ pub fn attach(ui: &MediaBoxWindow) {
     }
 }
 
+/// Whether Quiet OS may be put on now. Not yet, where the window shows the
+/// other face and the scenes are still to be made: that takes a few frames'
+/// time, and what begins to move as the face changes would lose them. They
+/// are made in a frame of the face that is leaving, and `then` is called --
+/// soon, not from in here.
+pub fn ready_or(then: fn()) -> bool {
+    let ready = stage(|stage| {
+        let ready = stage.frame == 0 || stage.ready();
+        stage.soon |= !ready;
+        ready
+    })
+    .unwrap_or(true);
+    if !ready && let Some(ui) = ui() {
+        THEN.set(Some(then));
+        ui.window().request_redraw();
+    }
+    ready
+}
+
 fn start(ui: &MediaBoxWindow, shown: Shown) {
     STAGE.with(|stage| *stage.borrow_mut() = Some(Stage::new(shown)));
     UI.with(|cell| *cell.borrow_mut() = Some(ui.as_weak()));
@@ -772,7 +826,7 @@ pub fn frame<T>(period: Duration, mut draw: impl FnMut() -> T) -> T {
     loop {
         let Some(ui) = ui() else { return draw() };
         let panel = (ui.window().size(), period);
-        if stage(|stage| stage.open(panel)) == Some(true) {
+        if stage(|stage| stage.open(panel, ui.get_layout() == "quiet")) == Some(true) {
             let spatial = ui.global::<Spatial>();
             spatial.set_tick(spatial.get_tick().wrapping_add(1));
         }
@@ -782,6 +836,11 @@ pub fn frame<T>(period: Duration, mut draw: impl FnMut() -> T) -> T {
         let withheld = withheld();
         drop(drawing);
         let idle = stage(Stage::close).unwrap_or_default();
+        if stage(|stage| std::mem::take(&mut stage.soon)) == Some(true)
+            && let Some(then) = THEN.take()
+        {
+            slint::Timer::single_shot(Duration::ZERO, then);
+        }
         tell();
         if withheld && again > 0 {
             again -= 1;

@@ -386,6 +386,15 @@ impl Drawn {
 
     fn home(&self, apps: &Rc<VecModel<crate::AppTile>>, row: i32) {
         wear(crate::layout::Layout::Quiet);
+        // From the other face, once its scenes are made (`spatial::ready_or`):
+        // the launcher below is put in after the application has painted.
+        for _ in 0..3 {
+            if self.ui.get_layout() == "quiet" {
+                break;
+            }
+            self.frame();
+        }
+        assert_eq!(self.ui.get_layout(), "quiet");
         app(|app| app.go_home());
         self.ui.set_apps(ModelRc::from(apps.clone()));
         self.ui.set_focus_col(row);

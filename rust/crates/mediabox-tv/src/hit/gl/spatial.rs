@@ -217,6 +217,10 @@ fn what_scenes_hold_is_given_back() {
     let names: Vec<String> = (0..12).map(|n| format!("app-{n}")).collect();
     let apps = tiles(&names.iter().map(String::as_str).collect::<Vec<_>>());
     start_with(&drawn.ui, "advanced on=* objects=8 detail=6 globe=12 bounded");
+    wear(crate::layout::Layout::Quiet);
+    drawn.frame();
+    let geometry = state().bytes;
+    assert!(geometry > 0 && state().slots == 0);
     let round = || -> State {
         for (w, h, scale) in [(1920, 1080, 1.0), (3840, 2160, 2.0)] {
             drawn.panel(w, h, scale);
@@ -234,6 +238,9 @@ fn what_scenes_hold_is_given_back() {
     round();
     let (once, textures) = (round(), TEXTURES.get());
     assert_eq!((once.live, once.slots), (1, 1), "{once:?}");
+    // One texture and the target it is drawn in, of this panel's size and not
+    // of the one before it: 880 pixels a side, with its colour and its depth.
+    assert_eq!(once.bytes, geometry + 880 * 880 * (4 + 8), "{once:?}");
     for _ in 0..4 {
         round();
     }
@@ -821,6 +828,55 @@ fn the_emblems_change_with_what_is_on_screen() {
     drawn.settings("Sistem");
     assert_eq!(settled(&drawn).live, 0);
     delete_what_was_forgotten();
+}
+
+/// The other face makes nothing of these: not on its first frame and not on
+/// any screen of it. Quiet OS put on, all of it is made in a frame of the face
+/// that leaves, before anything of the new one begins to move, and nothing is
+/// made in a move after it; taken off and put on again, nothing is.
+#[test]
+fn the_other_face_makes_no_scenes() {
+    let Some(drawn) = Drawn::open() else { return };
+    start_product(&drawn.ui);
+    wear(crate::layout::Layout::Classic);
+    let apps = Rc::new(VecModel::from(launcher(6)));
+    let classic = || {
+        wear(crate::layout::Layout::Classic);
+        app(|app| app.go_home());
+        drawn.ui.set_apps(ModelRc::from(apps.clone()));
+        drawn.rest(300);
+        drawn.settings("Sistem");
+        drawn.rest(900);
+    };
+    classic();
+    let none = state();
+    assert_eq!((none.made, none.objects, none.bytes, none.drawn), (0, 0, 0, 0), "{none:?}");
+    // The face changes where a person changes it: in the settings.
+    wear(crate::layout::Layout::Quiet);
+    assert_eq!((drawn.ui.get_layout().as_str(), state().made), ("classic", 0), "put on before its scenes are there");
+    drawn.draw();
+    let made = state();
+    assert!(made.made > 0 && made.live == 0, "{made:?}");
+    assert_eq!(drawn.ui.get_layout(), "classic", "a frame that makes them is the other face's");
+    step(&drawn.ui);
+    assert_eq!(drawn.ui.get_layout(), "quiet");
+    drawn.draw();
+    drawn.draw();
+    let first = state();
+    assert_eq!((first.live, first.failed, first.made, first.objects > made.objects), (1, 0, made.made, true), "{first:?}");
+    assert!(first.made > 0);
+    for group in ["Medya", "Cihaz", "Canlı TV", "Sistem", "Tanılama", "Bağlantılar"] {
+        drawn.settings(group);
+        drawn.rest(200);
+        assert_eq!(state().made, first.made, "{group}: made in a move");
+    }
+    let held = settled(&drawn);
+    classic();
+    let off = settled(&drawn);
+    assert_eq!((off.live, off.slots, off.made), (0, 0, first.made), "{off:?}");
+    wear(crate::layout::Layout::Quiet);
+    drawn.rest(1500);
+    assert_eq!((settled(&drawn).objects, state().made), (held.objects, first.made));
 }
 
 /// The marks end where they began, however fast the focus goes and wherever

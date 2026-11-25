@@ -490,8 +490,44 @@ A: kurulu main (`25b8bd8d`), R: bu dal. Ana Menü ve `category-repeat` 2'şer, d
 - Bellek: +16–31 MB, tek sahnenin dokusu ve ortak hedef (üçü ≤ 10 MB) ile sürücü havuzu. 12 tur
   Ayarlar giriş-çıkışında ana ekranda 55–95 MB arasında salınır, artmaz; fd 46 sabit. İlk
   derlemede (`r2`) doku uçuşla büyüyor ve havuz 120–138 MB'a çıkıyordu; sahne boyu sabitlendi.
-- Açılış: shader ve geometri ilk karede 49 ms, bağlam 10 ms — Klasik yüzde de ödenir.
+- Hazırlık: shader ve geometri 49–61 ms, bağlam 7–32 ms. Yalnız QuietOS için yapılır: Klasik
+  açılışta hiçbir şey hazırlanmaz (cihazda journal'da `tv.spatial` satırı yok, GPU 19,7 MB).
+  QuietOS'a geçişte Klasik'in son karesinde hazırlanır; yeni yüz ondan sonra konur, yani
+  hiçbir QuietOS animasyonu hazırlık sırasında başlamaz (testli; cihazda geçişte 35 flip'te 1
+  kaçan vblank). Sonraki geçişlerde hazırlık yok.
 - Bütçe aşımı veya Slint'e geri dönüş: 0 (journal, bütün koşular).
+
+Kategori geçişlerinde **tuş başına** toplam CPU komutu (süreç; A 1, R 2 tur, `r3`). Tuş başına
+kare de arttı: uzak katman 760 ms sürer.
+
+| Senaryo | Mkomut/tuş A → R | kare/tuş A → R | GPU Mçevrim/tuş A → R |
+|---|---|---|---|
+| category (800 ms arayla) | 71,5 → 105,9 (+%48) | 36,1 → 47,9 | 47,8 → 82,3 |
+| category-repeat (80 ms) | 14,4 → 16,4 (+%14) | 5,3 → 5,1 | 6,4 → 8,3 |
+| category-reverse (150 ms) | 21,9 → 25,1 (+%15) | 9,6 → 9,6 | 12,2 → 14,6 |
+| page (Ekran aç/kapa) | 248,1 → 253,3 (+%2) | 35,9 → 47,2 | 63,0 → 94,3 |
+| home-settings | 161,5 → 195,0 (+%21) | 45,4 → 59,8 | 78,5 → 111,8 |
+
+Tek tuşla kategori değişimi bir çekirdeğin 1,8 GHz'te yaklaşık 50 ms'sine eşittir; kare
+başına artış %12'dir, gerisi daha uzun süren harekettir.
+
+**Panel modu değişince** (`what_scenes_hold_is_given_back`'in kararsızlığı): bir elemanın eski
+moddan kalan dokusu, yeni modda da yetiyorsa yeniden kullanılıyordu; ortak hedef de hiç
+küçülmüyordu. Sonuç zamanlamaya bağlıydı: eleman 4K'dayken bir kez çizildiyse 1080p'de 4K
+dokuyla kalıyordu (37,3 MB), çizilmediyse kalmıyordu (28,1 MB; testteki iki değer bu ikisi).
+main'de de vardı. Artık panelin boyu değişince eski dokular gösterilmeye devam eder ama içine
+çizilmez, ilk çizimde yenisiyle değişir; ortak hedef bırakılır. Test, değeri doğrudan sınar
+(tek doku ve hedef, 880², bu modun boyunda); 17 koşu, 4'ü eşzamanlı, hepsi geçti.
+
+**Oynatma regresyonu** (Plus, kurulu `be70d2fa`, Ayarlar'da Soğutma'nın GPU amblemi
+açıkken):
+
+| | Beklenen | Gerçekleşen |
+|---|---|---|
+| SDR 4K | hevc_rkmpp, NV12, SDR; dönüşte RGB888, aynı süreç | geçti |
+| HDR10 4K | NV15, HDR10 tel; dönüşte RGB888, aynı süreç | geçti |
+| Dönüşte amblem ve gezinme | geri dönüş ve GL hatası yok | geçti; GPU 58–73 MB, fd 46 |
+| Kodi'ye geçiş ve dönüş | 2160p60 korunur, hata yok | geçti |
 
 Ham veri ve görseller `results/quietos-spatial-refinement/`. Görseller host'ta ürünün
 renderer'ından alındı; panel fotoğraflanmadı.
