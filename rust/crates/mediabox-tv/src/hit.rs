@@ -31,6 +31,9 @@ use crate::{
     PosterItem, RailModel, SettingNav, SettingRow, WifiRow,
 };
 
+/// The same, drawn by the product's own renderer.
+mod gl;
+
 const W: u32 = 1920;
 const H: u32 = 1080;
 /// The walk's step, in logical pixels: finer than the smallest target drawn
@@ -959,6 +962,11 @@ fn driven() -> (MediaBoxWindow, Scratch) {
     }))
     .expect("one platform");
     SHOT_WINDOW.with(|slot| *slot.borrow_mut() = Some(window.clone()));
+    driven_in_place()
+}
+
+/// The same, on the platform already set.
+fn driven_in_place() -> (MediaBoxWindow, Scratch) {
     let ui = MediaBoxWindow::new().expect("the interface");
     ui.window().set_size(slint::PhysicalSize::new(W, H));
     ui.show().expect("shown");
@@ -2007,17 +2015,17 @@ fn quiet_rests_when_the_same_data_is_polled_again() {
 /// Pictures of both faces at the panel sizes the appliance drives, for a
 /// person to look at: 1080p (scale 1), 1440p and 4K (scale 2, as
 /// `platform::scale_factor` chooses). Only with MEDIABOX_TV_SHOTS set to a
-/// directory; the software renderer draws them, so a rotation or a
-/// GPU-only effect is not in them.
+/// directory, and drawn by the product's renderer (`gl`): the software one
+/// neither turns nor scales, and Quiet OS does both.
 #[test]
 #[ignore]
 fn shots() {
-    use slint::platform::software_renderer::PremultipliedRgbaColor;
     let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else {
         return;
     };
     std::fs::create_dir_all(&out).unwrap();
-    let (ui, _scratch) = driven();
+    let drawn = gl::Drawn::open().expect("a GLES device to draw with");
+    let ui = &drawn.ui;
     let display = crate::model::DisplayStatus {
         owner: None,
         applications: serde_json::from_value(serde_json::json!([
@@ -2049,47 +2057,16 @@ fn shots() {
         eth_up: true,
         ..Default::default()
     };
-    let window = ui.window();
     for (w, h, scale, name) in [(1920u32, 1080u32, 1.0f32, "1080p"), (2560, 1440, 2.0, "1440p"), (3840, 2160, 2.0, "4k")] {
-        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
-        window.set_size(slint::PhysicalSize::new(w, h));
+        drawn.panel(w, h, scale);
         // Long enough for Quiet OS's slowest move (the far plane, 760 ms) to
         // come to rest: these are pictures of where things settle.
-        let settle = std::time::Duration::from_millis(900);
-        // A screen's conditional component is built by the first frame
-        // that draws it, and its entrance starts there: one frame first,
-        // then the wait.
-        let prime = || {
-            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
-            SHOT_WINDOW.with(|slot| {
-                let slot = slot.borrow();
-                let window = slot.as_ref().expect("the software window");
-                window.request_redraw();
-                window.draw_if_needed(|renderer| {
-                    renderer.render(&mut pixels, w as usize);
-                })
-            })
+        let edge_shoot = |file: String, vitals: crate::VitalsModel| {
+            ui.set_vitals(vitals);
+            drawn.rest(900);
+            drawn.picture().save(&out.join(file));
         };
-        let shoot = |file: String| {
-            ui.set_vitals(vitals());
-            slint::platform::update_timers_and_animations();
-            prime();
-            std::thread::sleep(settle);
-            slint::platform::update_timers_and_animations();
-            window.request_redraw();
-            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
-            let rendered = SHOT_WINDOW.with(|slot| {
-                let slot = slot.borrow();
-                let window = slot.as_ref().expect("the software window");
-                window.request_redraw();
-                window.draw_if_needed(|renderer| {
-                    renderer.render(&mut pixels, w as usize);
-                })
-            });
-            assert!(rendered, "a frame");
-            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
-            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
-        };
+        let shoot = |file: String| edge_shoot(file, vitals());
         for layout in [crate::layout::Layout::Classic, crate::layout::Layout::Quiet] {
             app(|app| {
                 app.layout = layout;
@@ -2203,25 +2180,6 @@ fn shots() {
             wifi_ssid: "Çok-Uzun-Kablosuz-Ağ-Adı-5GHz-Misafir-Katı-Ofis".into(),
             eth_up: online && !wifi,
             ..Default::default()
-        };
-        let edge_shoot = |file: String, vitals: crate::VitalsModel| {
-            slint::platform::update_timers_and_animations();
-            ui.set_vitals(vitals);
-            prime();
-            std::thread::sleep(settle);
-            slint::platform::update_timers_and_animations();
-            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
-            let rendered = SHOT_WINDOW.with(|slot| {
-                let slot = slot.borrow();
-                let window = slot.as_ref().expect("the software window");
-                window.request_redraw();
-                window.draw_if_needed(|renderer| {
-                    renderer.render(&mut pixels, w as usize);
-                })
-            });
-            assert!(rendered, "a frame");
-            let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
-            image::RgbImage::from_raw(w, h, rgb).unwrap().save(out.join(file)).unwrap();
         };
         let home_with = |display: &crate::model::DisplayStatus, focus: usize| {
             app(|app| {
@@ -2894,50 +2852,29 @@ fn family_show(ui: &MediaBoxWindow, name: &str) {
 #[test]
 #[ignore]
 fn shots_family() {
-    use slint::platform::software_renderer::PremultipliedRgbaColor;
     let Some(out) = std::env::var_os("MEDIABOX_TV_SHOTS").map(std::path::PathBuf::from) else {
         return;
     };
     let only = std::env::var("MEDIABOX_TV_SHOTS_ONLY").unwrap_or_default();
     std::fs::create_dir_all(&out).unwrap();
-    let (ui, _scratch) = driven();
-    let window = ui.window();
+    let drawn = gl::Drawn::open().expect("a GLES device to draw with");
+    let ui = &drawn.ui;
     for (w, h, scale, size) in [(1920u32, 1080u32, 1.0f32, "1080p"), (2560, 1440, 2.0, "1440p"), (3840, 2160, 2.0, "4k")] {
-        window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
-        window.set_size(slint::PhysicalSize::new(w, h));
-        let frame = || {
-            let mut pixels = vec![PremultipliedRgbaColor::default(); (w * h) as usize];
-            slint::platform::update_timers_and_animations();
-            SHOT_WINDOW.with(|slot| {
-                let slot = slot.borrow();
-                let window = slot.as_ref().expect("the software window");
-                window.request_redraw();
-                window.draw_if_needed(|renderer| {
-                    renderer.render(&mut pixels, w as usize);
-                })
-            });
-            pixels
-        };
+        drawn.panel(w, h, scale);
         for layout in [crate::layout::Layout::Classic, crate::layout::Layout::Quiet] {
             wear(layout);
             for name in FAMILY {
                 if !format!("{size}-{}-{name}", layout.name()).contains(&only) {
                     continue;
                 }
-                family_show(&ui, name);
+                family_show(ui, name);
                 ui.set_vitals(crate::vitals::read(Some(&family_diagnostics())));
                 let mut vitals = ui.get_vitals();
                 vitals.time = "13:34".into();
                 vitals.date = "24 Kasım".into();
                 ui.set_vitals(vitals);
-                frame();
-                std::thread::sleep(std::time::Duration::from_millis(900));
-                let pixels = frame();
-                let rgb: Vec<u8> = pixels.iter().flat_map(|p| [p.red, p.green, p.blue]).collect();
-                image::RgbImage::from_raw(w, h, rgb)
-                    .unwrap()
-                    .save(out.join(format!("{size}-{}-family-{name}.png", layout.name())))
-                    .unwrap();
+                drawn.rest(900);
+                drawn.picture().save(&out.join(format!("{size}-{}-family-{name}.png", layout.name())));
             }
         }
     }
