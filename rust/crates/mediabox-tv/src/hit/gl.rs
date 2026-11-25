@@ -30,20 +30,29 @@ use slint::platform::femtovg_renderer::{FemtoVGRenderer, OpenGLInterface};
 /// The pbuffer: the largest panel the appliance drives.
 const MOST: (u32, u32) = (3840, 2160);
 
+/// The GPU's own scenes among Slint's (src/spatial).
+mod spatial;
+
 // ------------------------------------------------------- what GL was asked
 
 type Gen = unsafe extern "C" fn(i32, *mut u32);
 type Delete = unsafe extern "C" fn(i32, *const u32);
 type Bind = unsafe extern "C" fn(u32, u32);
 type Read = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8);
+type Clear = unsafe extern "C" fn(u32);
 type Image = unsafe extern "C" fn(u32, i32, i32, i32, i32, i32, u32, u32, *const c_void);
 
 thread_local! {
-    static REAL: Cell<[*const c_void; 4]> = const { Cell::new([std::ptr::null(); 4]) };
+    static REAL: Cell<[*const c_void; 5]> = const { Cell::new([std::ptr::null(); 5]) };
     /// Textures alive.
     static TEXTURES: Cell<i64> = const { Cell::new(0) };
     /// Passes into a texture rather than the panel.
     static PASSES: Cell<u32> = const { Cell::new(0) };
+    /// Times FemtoVG cleared, which is how it begins to issue a frame.
+    static CLEARS: Cell<u32> = const { Cell::new(0) };
+    /// Frames presented, and frames drawn that were not.
+    static PRESENTED: Cell<u32> = const { Cell::new(0) };
+    static WITHHELD: Cell<u32> = const { Cell::new(0) };
     /// The longest side of any texture made.
     static LONGEST: Cell<i32> = const { Cell::new(0) };
 }
@@ -66,6 +75,12 @@ unsafe extern "C" fn bind_framebuffer(target: u32, which: u32) {
     }
     let real: Bind = unsafe { std::mem::transmute(REAL.get()[2]) };
     unsafe { real(target, which) }
+}
+
+unsafe extern "C" fn clear(what: u32) {
+    CLEARS.set(CLEARS.get() + 1);
+    let real: Clear = unsafe { std::mem::transmute(REAL.get()[4]) };
+    unsafe { real(what) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,6 +132,7 @@ impl Pbuffer {
         // SAFETY: the same.
         let surface = unsafe { display.create_pbuffer_surface(&config, &size) }.map_err(told)?;
         let context = context.make_current(&surface).map_err(told)?;
+        crate::spatial::gl::context_made();
         Ok(Self { display, context, surface })
     }
 }
@@ -129,6 +145,8 @@ unsafe impl OpenGLInterface for Pbuffer {
     }
 
     fn swap_buffers(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let count = if crate::spatial::withheld() { &WITHHELD } else { &PRESENTED };
+        count.set(count.get() + 1);
         Ok(())
     }
 
@@ -148,6 +166,7 @@ unsafe impl OpenGLInterface for Pbuffer {
             b"glGenTextures" => counted(0, gen_textures as *const c_void),
             b"glDeleteTextures" => counted(1, delete_textures as *const c_void),
             b"glBindFramebuffer" => counted(2, bind_framebuffer as *const c_void),
+            b"glClear" => counted(4, clear as *const c_void),
             b"glTexImage2D" => counted(3, tex_image as *const c_void),
             _ => real,
         }
@@ -232,6 +251,12 @@ impl Picture {
     }
 }
 
+impl Drop for Drawn {
+    fn drop(&mut self) {
+        crate::spatial::stop();
+    }
+}
+
 impl Drawn {
     /// None where this machine has no GLES to draw with.
     pub(super) fn open() -> Option<Self> {
@@ -279,8 +304,16 @@ impl Drawn {
     /// One pass of the platform's loop, drawn.
     fn frame(&self) {
         step(&self.ui);
-        self.window.redraw.set(false);
-        self.window.renderer.render().expect("a frame");
+        self.draw();
+    }
+
+    /// A frame of the moment Slint's clock is at.
+    fn draw(&self) {
+        crate::spatial::frame(std::time::Duration::from_nanos(16_666_667), || {
+            self.window.redraw.set(false);
+            self.window.renderer.render()
+        })
+        .expect("a frame");
     }
 
     /// Drawn as it goes for `ms`, then at rest.
@@ -295,6 +328,10 @@ impl Drawn {
 
     pub(super) fn picture(&self) -> Picture {
         self.frame();
+        self.read()
+    }
+
+    fn read(&self) -> Picture {
         let size = self.window.size.get();
         let mut pixels = vec![0u8; (size.width * size.height * 4) as usize];
         // SAFETY: the context is current (it just drew), and the buffer is

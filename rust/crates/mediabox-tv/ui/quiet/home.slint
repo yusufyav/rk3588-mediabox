@@ -4,6 +4,7 @@ import { Quiet } from "core.slint";
 import { QuietMotion, QuietCurves, QuietCam, QuietReach } from "motion.slint";
 import { QuietGround, LivingFocus, Kept, Still } from "materials.slint";
 import { Scene } from "scenes.slint";
+import { Spatial, SpatialScene } from "spatial.slint";
 import { Overline, KeyCap, QuietBar } from "controls.slint";
 
 // Where the settings' emblem stands (settings.slint, `SettingsEmblem`), so
@@ -277,7 +278,23 @@ export component QuietHome inherits Rectangle {
         for tile[i] in apps: Rectangle {
             width: 100%;
             height: 100%;
-            if QuietReach.scene(camera, i): Scene {
+            // 0 unless the GPU draws this one's scene (spatial.slint).
+            property <int> spatial: Spatial.on ? Spatial.kind(tile.id, Spatial.epoch) : 0;
+            if spatial != 0 && QuietReach.scene(camera, i): SpatialScene {
+                name: tile.id;
+                kind: spatial;
+                property <float> extra: i == focus-row ? camera.arrive : 0;
+                width: 100%;
+                height: 100%;
+                d: i - camera.cam + extra;
+                d-far: i - camera.cam-far + extra * 0.6;
+                d-near: i - camera.cam-near + extra * 1.4;
+                tint: Quiet.aura(tile.id);
+                presence: 0.9 - 0.35 * stage.fly;
+                panel-w: root.width;
+                panel-h: root.height;
+            }
+            if spatial == 0 && QuietReach.scene(camera, i): Scene {
                 property <float> extra: i == focus-row ? camera.arrive : 0;
                 width: 100%;
                 height: 100%;

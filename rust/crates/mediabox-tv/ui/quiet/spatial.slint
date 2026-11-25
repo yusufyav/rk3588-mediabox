@@ -1,0 +1,88 @@
+import { Quiet } from "core.slint";
+import { QuietMotion } from "motion.slint";
+import { SceneBase } from "scenes.slint";
+
+// A scene whose geometry lives on the GPU (src/spatial): Slint keeps the
+// camera, the timing and the place on the panel, and shows the picture drawn
+// from them like any other image. Nothing here is drawn unless `Spatial.on`
+// says so, and nothing sets it unless a scene is named when it starts.
+//
+// Not under `cache-rendering-hint` (`Kept`, `Still`).
+
+// Where a scene stands and what the camera says of it: all the CPU hands the
+// GPU for a frame.
+export struct SpatialCam {
+    d: float,
+    d-far: float,
+    d-near: float,
+    f-main: float,
+    f-far: float,
+    f-near: float,
+    tint: color,
+    ink: color,
+    glow: color,
+    // The scene's box on the panel, and its line weights: device pixels.
+    x: float,
+    y: float,
+    size: float,
+    line: float,
+    fine: float,
+    depth: float,
+    parallax: float,
+    travel: float,
+    // The panel.
+    panel-w: float,
+    panel-h: float,
+    // Device pixels in a logical one.
+    scale: float,
+}
+
+// The part of the panel the picture covers, whole device pixels.
+export struct SpatialPlace { x: int, y: int, w: int, h: int }
+
+export global Spatial {
+    in property <bool> on: false;
+    // Every frame calls the roll: a scene still shown asks again.
+    in property <int> tick;
+    // Moves on when `kind` has another answer.
+    in property <int> epoch;
+    // What draws this element; 0 for the interface itself -- it never was
+    // the GPU's, or it could not be.
+    pure callback kind(string, int) -> int;
+    pure callback place(int, SpatialCam) -> SpatialPlace;
+    pure callback picture(string, int, SpatialCam, SpatialPlace, int) -> image;
+}
+
+export component SpatialScene inherits SceneBase {
+    // Whose picture it is, and what draws it (`Spatial.kind`).
+    in property <string> name;
+    in property <int> kind;
+    in property <length> panel-w;
+    in property <length> panel-h;
+    // Device pixels in a logical one.
+    property <float> k: Quiet.scale;
+    property <SpatialCam> cam: {
+        d: root.d, d-far: root.d-far, d-near: root.d-near,
+        f-main: root.f-main, f-far: root.f-far, f-near: root.f-near,
+        tint: root.tint, ink: root.ink, glow: root.glow,
+        x: root.absolute-position.x / 1px * k, y: root.absolute-position.y / 1px * k,
+        size: root.width / 1px * k, line: root.line / 1px * k, fine: root.fine / 1px * k,
+        depth: QuietMotion.depth, parallax: QuietMotion.parallax, travel: QuietMotion.travel,
+        panel-w: root.panel-w / 1px * k, panel-h: root.panel-h / 1px * k,
+        scale: k,
+    };
+    property <SpatialPlace> place: Spatial.place(kind, cam);
+    if place.w > 0 && place.h > 0: Image {
+        x: place.x / k * 1px - root.absolute-position.x;
+        y: place.y / k * 1px - root.absolute-position.y;
+        width: place.w / k * 1px;
+        height: place.h / k * 1px;
+        source: Spatial.picture(root.name, root.kind, cam, place, Spatial.tick);
+        source-clip-x: 0;
+        source-clip-y: 0;
+        source-clip-width: place.w;
+        source-clip-height: place.h;
+        image-fit: fill;
+        image-rendering: pixelated;
+    }
+}

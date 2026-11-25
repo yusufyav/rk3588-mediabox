@@ -14,6 +14,8 @@ mod textfit;
 mod actions;
 mod detail;
 mod fdstore;
+#[cfg(feature = "gl-count")]
+mod glcount;
 #[cfg(test)]
 mod hit;
 mod images;
@@ -31,6 +33,7 @@ mod route;
 mod rpc;
 mod screens;
 mod session;
+mod spatial;
 mod state;
 mod video;
 mod vitals;
@@ -9061,21 +9064,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let handle = window.as_weak();
         let reported = std::cell::Cell::new(false);
-        window
-            .window()
-            .set_rendering_notifier(move |state, _| {
-                if !matches!(state, slint::RenderingState::AfterRendering) {
-                    return;
+        platform::on_drawn(move || {
+            with_app(|app| app.meter.frame());
+            if !reported.replace(true) {
+                if let Some(window) = handle.upgrade() {
+                    report_surface(&window);
                 }
-                with_app(|app| app.meter.frame());
-                if !reported.replace(true) {
-                    if let Some(window) = handle.upgrade() {
-                        report_surface(&window);
-                    }
-                }
-            })
-            .expect("this renderer cannot report when it has drawn");
+            }
+        });
     }
+
+    spatial::attach(&window);
 
     // Keys from the appliance's own keyboards, through libinput. The remote
     // does not come this way — the daemon is the authority for it — and the

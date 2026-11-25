@@ -2828,6 +2828,7 @@ impl GlContext {
             "mediabox-tv.gpu EGL_VENDOR={} EGL_VERSION={} GL_VENDOR={} GL_RENDERER={}",
             egl_vendor, egl_version, gl_vendor, gl_renderer
         );
+        crate::spatial::gl::context_made();
         let generation = display.generation.get();
         Ok(Self {
             context,
@@ -2982,6 +2983,16 @@ unsafe impl OpenGLInterface for GlContext {
     }
 
     fn swap_buffers(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Something in it is to be drawn another way: the frame that has it
+        // is drawn over this one.
+        if crate::spatial::withheld() {
+            return Ok(());
+        }
+        ON_DRAWN.with(|told| {
+            if let Some(told) = told.borrow().as_ref() {
+                told();
+            }
+        });
         // Only wait when there is nothing left to draw into. With a surface
         // that allocates a third buffer this lets the GPU start the next frame
         // while the panel is still showing the last one; with two it is the
@@ -3023,7 +3034,10 @@ unsafe impl OpenGLInterface for GlContext {
     }
 
     fn get_proc_address(&self, name: &CStr) -> *const std::ffi::c_void {
-        self.context.display().get_proc_address(name)
+        let real = self.context.display().get_proc_address(name);
+        #[cfg(feature = "gl-count")]
+        let real = crate::glcount::wrap(name, real);
+        real
     }
 }
 
@@ -3050,6 +3064,20 @@ impl Told {
     fn is(&self, size: slint::PhysicalSize) -> bool {
         self.0.get() == size
     }
+}
+
+thread_local! {
+    static ON_DRAWN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+/// Called after every frame is drawn, before it is presented. Slint's own
+/// rendering notifier says the same and costs more: while one is set FemtoVG
+/// issues the frame's clear by itself, before anything is drawn
+/// (i-slint-renderer-femtovg 1.17.1, `internal_render_with_post_callback`),
+/// and a scene's pass between that and the rest (src/spatial) is a panel
+/// stored and loaded again.
+pub fn on_drawn(told: impl Fn() + 'static) {
+    ON_DRAWN.with(|cell| *cell.borrow_mut() = Some(Box::new(told)));
 }
 
 struct SplitWindow {
@@ -3141,10 +3169,24 @@ impl SplitWindow {
     }
 
     fn render_if_needed(&self) -> Result<(), PlatformError> {
-        if self.redraw.replace(false) {
+        if self.redraw.get() {
+            #[cfg(feature = "gl-count")]
+            let before = PHASES.with(Cell::get);
             let at = std::time::Instant::now();
-            self.renderer.render()?;
+            crate::spatial::frame(self.display.frame_period(), || {
+                // What is asked for by now is in this frame.
+                self.redraw.set(false);
+                self.renderer.render()
+            })?;
             let total = at.elapsed();
+            #[cfg(feature = "gl-count")]
+            crate::glcount::frame({
+                let after = PHASES.with(Cell::get);
+                let waited = (after.flip_wait_us - before.flip_wait_us)
+                    + (after.swap_us - before.swap_us)
+                    + (after.present_us - before.present_us);
+                total.saturating_sub(Duration::from_micros(waited))
+            });
             add_phase(|phases| {
                 phases.frames += 1;
                 phases.total_us += total.as_micros() as u64;
@@ -3935,6 +3977,7 @@ impl Platform for SplitPlatform {
                 }
             }
         }
+        crate::spatial::stop();
         self.window.display.release_display();
         Ok(())
     }

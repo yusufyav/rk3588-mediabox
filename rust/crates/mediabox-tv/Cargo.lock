@@ -2795,6 +2795,7 @@ dependencies = [
  "drm-ffi",
  "env_logger",
  "gbm",
+ "glow",
  "glutin",
  "image",
  "input",

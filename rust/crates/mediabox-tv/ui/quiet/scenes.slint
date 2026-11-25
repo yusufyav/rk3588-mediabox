@@ -48,7 +48,7 @@ component Plane inherits Rectangle {
 
 // The parts every scene shares: its colour, its line weights and how its
 // three planes fade with distance.
-component SceneBase inherits Rectangle {
+export component SceneBase inherits Rectangle {
     in property <float> d;
     in property <float> d-far;
     in property <float> d-near;

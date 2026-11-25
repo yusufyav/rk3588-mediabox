@@ -20,6 +20,12 @@ path = "src/main.rs"
 # A test's load on the interface (MEDIABOX_TV_UI_LOAD), for the heavy-interface
 # gate only; never in the product's binary.
 ui-test-load = []
+# Measuring the graphics foundation (docs/quietos-advanced-graphics.md), never
+# in the product's binary: scenes that load it and knobs to turn while it runs
+# (MEDIABOX_TV_SPATIAL, MEDIABOX_TV_SPATIAL_CONTROL), and what a frame asks of
+# GL (MEDIABOX_TV_GLCOUNT).
+spatial-lab = []
+gl-count = []
 
 [dependencies]
 # A custom direct-KMS platform, drawn by FemtoVG on GLES. Not the default feature set:
@@ -64,6 +70,8 @@ gbm = { version = "0.18.0", default-features = false, features = ["drm-support"]
 glutin = { version = "0.32.3", default-features = false, features = ["egl"] }
 raw-window-handle = "0.6.2"
 input = "0.10.0"
+# FemtoVG's own GL bindings, already in the tree (src/spatial).
+glow = "0.17.0"
 
 [dev-dependencies]
 # Tests only: a window that needs no GPU, so a test can open the real
