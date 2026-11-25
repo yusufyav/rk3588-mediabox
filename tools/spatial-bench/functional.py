@@ -123,12 +123,23 @@ def modes():
 def prefs(): return open("/var/lib/mediabox-ui/interface-preferences.json").read()
 @step
 def faces():
-    """Ayarlar > arayüz düzeni: Klasik ve geri. Kumandayla, kullanıcının yolundan."""
-    t, p, was = time.time(), pid(), prefs(); print("      ", was)
-    print("       elle: functional-faces.txt"); well(t, "faces", p); say(prefs() == was, "seçili yüz", prefs())
+    """Ayarlar > Sistem > Arayüz düzeni: Klasik ve geri, kumandayla. Quiet OS seçiliyken."""
+    t, p, was = time.time(), pid(), prefs()
+    if '"quiet"' not in was: return say(False, "Quiet OS seçili değil", was)
+    def choose(way): m.key("ok"); time.sleep(1.2); m.key(way); time.sleep(.5); m.key("ok"); time.sleep(2.5)
+    for n in range(3):
+        m.settings(); m.key("left"); time.sleep(.5)
+        for _ in range(9): m.key("up"); time.sleep(.2)
+        for _ in range(6): m.key("down"); time.sleep(.2)
+        m.key("right"); time.sleep(1)
+        choose("up"); other, held = prefs(), gmem(); choose("down")
+        say('"classic"' in other and prefs() == was, "Klasik ve geri", f"GPU belleği Klasik'te {held:.1f} MB")
+        m.home(2); time.sleep(3); print(f"      ana ekran {gmem():.1f} MB")
+    well(t, "faces", p)
 @step
 def reduced():
     t, p = time.time(), pid()
+    # Lab'ın satırı süreçte kalır: yeni başlatılmış bir arayüzde koşulur.
     m.home(2); m.key("menu"); time.sleep(1)
     for _ in range(6): m.key("down"); time.sleep(.2)
     snap("lab"); m.key("right"); time.sleep(.6); snap("lab-reduced"); m.key("back"); time.sleep(.6)
@@ -144,18 +155,21 @@ def mouse():
     """Sanal bir fare (uinput): imleç, hover ve tıklama."""
     t, p = time.time(), pid()
     U = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
-    for req, v in ((0x40045564, 1), (0x40045564, 2), (0x40045565, 0x110), (0x40045566, 0), (0x40045566, 1)): fcntl.ioctl(U, req, v)
-    os.write(U, struct.pack("80sHHHHi", b"spatial-regresyon-fare", 3, 1, 1, 1, 0) + b"\0" * (64 * 4 * 4)); fcntl.ioctl(U, 0x5501); time.sleep(2)
+    for req, v in ((0x40045564, 1), (0x40045564, 2), (0x40045565, 0x110), (0x40045565, 0x111), (0x40045566, 0), (0x40045566, 1)): fcntl.ioctl(U, req, v)
+    os.write(U, struct.pack("80sHHHHI", b"spatial-regresyon-fare", 3, 0x46d, 0x4001, 1, 0) + b"\0" * (64 * 4 * 4)); fcntl.ioctl(U, 0x5501); time.sleep(3)
     def ev(*e):
         for ty, c, v in e: os.write(U, struct.pack("llHHi", 0, 0, ty, c, v))
         os.write(U, struct.pack("llHHi", 0, 0, 0, 0, 0))
-    m.home(2)
-    for _ in range(80): ev((2, 0, -60), (2, 1, -60)); time.sleep(.005)
-    for _ in range(60): ev((2, 0, 6), (2, 1, 9)); time.sleep(.01)
-    time.sleep(1); snap("mouse"); 
-    for _ in range(40): ev((2, 1, 4)); time.sleep(.01)
-    time.sleep(.5); snap("mouse-2"); fcntl.ioctl(U, 0x5502); os.close(U); time.sleep(1)
-    m.key("up"); time.sleep(1); say(True, "fare ve kumanda", "görüntüden okunur"); well(t, "mouse", p)
+    try:
+        m.home(0)
+        for _ in range(200): ev((2, 0, -60), (2, 1, -60)); time.sleep(.004)
+        for _ in range(70): ev((2, 0, 3), (2, 1, 3)); time.sleep(.012)
+        for _ in range(110): ev((2, 1, 3)); time.sleep(.012)
+        time.sleep(.5); snap("mouse")
+        ev((2, 0, 1)); time.sleep(.3); ev((1, 0x110, 1)); time.sleep(.08); ev((1, 0x110, 0)); time.sleep(2)
+        st = m.state(); say(st["screen"] != "home" or st["home_col"] != 0, "tıklama seçti", st); snap("mouse-click")
+    finally: fcntl.ioctl(U, 0x5502); os.close(U)
+    time.sleep(1); m.key("up"); time.sleep(1); well(t, "mouse", p)
 os.makedirs(OUT, exist_ok=True)
 try:
     for n in ONLY or S:
