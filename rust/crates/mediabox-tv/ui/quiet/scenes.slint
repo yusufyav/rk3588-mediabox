@@ -1,4 +1,4 @@
-import { Quiet } from "core.slint";
+import { Quiet, QuietOffload } from "core.slint";
 import { QuietMotion } from "motion.slint";
 import { Kept } from "materials.slint";
 
@@ -425,7 +425,12 @@ export component LiveScene inherits SceneBase {
 export component GlobeScene inherits SceneBase {
     property <float> radius: 190;
     // Degrees of turn: still at rest, turning while the camera travels.
-    property <float> spin: 30 + (root.d + 3) * 70;
+    // `turn` is the camera's, but where its frames are drawn beforehand
+    // (src/hit/gl/globe.rs).
+    in property <float> turn: root.d;
+    // The sphere alone, for the same.
+    in property <bool> bare;
+    property <float> spin: 30 + (root.turn + 3) * 70;
 
     pure function lon(k: int) -> float {
         return mod(k * 30 + spin, 180);
@@ -442,7 +447,7 @@ export component GlobeScene inherits SceneBase {
         return clamp(cos(lat * 1deg) * cos((at + spin) * 1deg) * 3, 0, 1);
     }
 
-    far := Plane {
+    if !bare: Plane {
         width: 100%;
         height: 100%;
         d: root.d-far;
@@ -460,7 +465,7 @@ export component GlobeScene inherits SceneBase {
         }
     }
 
-    main := Plane {
+    if !QuietOffload.globe: Plane {
         width: 100%;
         height: 100%;
         d: root.d;
@@ -545,7 +550,7 @@ export component GlobeScene inherits SceneBase {
         }
     }
 
-    near := Plane {
+    if !bare: Plane {
         width: 100%;
         height: 100%;
         d: root.d-near;

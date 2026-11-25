@@ -47,7 +47,7 @@ use slint::platform::{EventLoopProxy, Platform, PlatformError, WindowAdapter, Wi
 const DESIGN: (f32, f32) = (1920.0, 1080.0);
 
 #[derive(Clone)]
-struct SharedKms(Arc<OwnedFd>);
+pub(crate) struct SharedKms(Arc<OwnedFd>);
 
 impl AsFd for SharedKms {
     fn as_fd(&self) -> BorrowedFd<'_> {
@@ -205,6 +205,11 @@ struct StageState {
     /// with the film frame due then, or alone -- so the interface never
     /// commits and never waits on a CRTC the film keeps busy.
     ui_next: Option<(control::plane::Handle, control::framebuffer::Handle, u64)>,
+    /// What `ui_next` goes up with, on the film's plane (src/globe.rs); what
+    /// is on that plane now, and what the last flip is still to take off it.
+    globe_next: Option<crate::globe::Overlay>,
+    globe_on: Option<(usize, crate::globe::Overlay)>,
+    globe_gone: Option<(usize, crate::globe::Overlay)>,
     /// The number of the interface's last frame handed over, and of the last
     /// one whose flip has been read.
     ui_seq: u64,
@@ -552,6 +557,9 @@ fn commit_on_stage(
     // The film's part: its waiting frame, or the veil the player's film
     // goes up under (`video::Sink::stage_next`).
     let staged = s.sink.stage_next(kms, crtc, &s.video, s.panel, &mut request);
+    // The globe's, where no film has the plane.
+    let film_has_it = staged.is_some() || s.sink.showing() || s.sink.has_pending();
+    let globe = if ui.is_some() && !film_has_it { stage_globe(kms, crtc, s, &mut request) } else { None };
     if ui.is_none() && staged.is_none() {
         return Ok(false);
     }
@@ -572,6 +580,17 @@ fn commit_on_stage(
             alone.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
             kms.atomic_commit(flags, alone).map(|()| None)
         }
+        (Err(error), None, Some((plane, framebuffer, _))) if globe.is_some() => {
+            crate::globe::give_up(&error.to_string());
+            s.globe_next = None;
+            let fb = find_property(kms, plane, "FB_ID").ok_or_else(|| CommitError::Refused("no FB_ID".into()))?;
+            let mut alone = control::atomic::AtomicModeReq::new();
+            alone.add_property(plane, fb, Value::Framebuffer(Some(framebuffer)));
+            if let Some((index, _)) = s.globe_on.as_ref() {
+                s.video[*index].stage_off(&mut alone);
+            }
+            kms.atomic_commit(flags, alone).map(|()| None)
+        }
         (Err(error), _, _) => Err(error),
     };
     committed.map_err(|e| {
@@ -581,6 +600,13 @@ fn commit_on_stage(
             CommitError::Refused(format!("atomic commit: {e}"))
         }
     })?;
+    if film_has_it || globe.is_some() || s.globe_on.is_some() {
+        // Scanned out until this commit's flip.
+        s.globe_gone = s.globe_on.take();
+        if let Some(Some(index)) = globe {
+            s.globe_on = s.globe_next.take().map(|overlay| (index, overlay));
+        }
+    }
     crate::video::trace::event('C', u64::from(ui.is_some()), u64::from(film.is_some()));
     if film.is_some() {
         VIDEO.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -604,6 +630,32 @@ fn commit_on_stage(
     Ok(true)
 }
 
+/// The globe's part of a commit: the overlay the interface's frame goes up
+/// with, or the plane off again. `Some(None)` where it is taken off; which
+/// plane the video port takes it on is asked once, with `TEST_ONLY`.
+fn stage_globe(
+    kms: &SharedKms,
+    crtc: control::crtc::Handle,
+    s: &StageState,
+    request: &mut control::atomic::AtomicModeReq,
+) -> Option<Option<usize>> {
+    let Some(overlay) = s.globe_next.as_ref() else {
+        s.video[s.globe_on.as_ref()?.0].stage_off(request);
+        return Some(None);
+    };
+    static PLANE: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let index = (*PLANE.get_or_init(|| {
+        let found = s.video.iter().position(|plane| {
+            let mut test = control::atomic::AtomicModeReq::new();
+            plane.stage_overlay(&mut test, crtc, overlay)
+                && kms.atomic_commit(control::AtomicCommitFlags::TEST_ONLY, test).is_ok()
+        });
+        eprintln!("mediabox-tv.globe plane={:?}", found.map(|index| s.video[index].name.clone()));
+        found
+    }))?;
+    s.video[index].stage_overlay(request, crtc, overlay).then_some(Some(index))
+}
+
 /// The commit in flight has reached the panel at `at` (CLOCK_MONOTONIC ns):
 /// read from its page-flip event, or, the event lost, from the planes
 /// (`recover_flip`).
@@ -613,6 +665,7 @@ fn flip_completed(s: &mut StageState, at: u64) {
     s.waiting_for_flip = false;
     s.inflight = None;
     s.stuck_since = None;
+    s.globe_gone = None;
     s.last_flip = Some(std::time::Instant::now());
     if let Some(seq) = s.flip_ui_seq.take() {
         s.ui_done_seq = seq;
@@ -1506,6 +1559,9 @@ impl SplitDisplay {
                 waiting_for_flip: false,
                 flip_ui_seq: None,
                 ui_next: None,
+                globe_next: None,
+                globe_on: None,
+                globe_gone: None,
                 ui_seq: 0,
                 ui_done_seq: 0,
                 ui_error: None,
@@ -1546,6 +1602,7 @@ impl SplitDisplay {
                 .spawn(move || presenter(stage, kms, crtc))
                 .map_err(|e| PlatformError::from(format!("the presentation thread: {e}")))?;
         }
+        crate::globe::start(&kms);
         let display = Rc::new(Self {
             kms,
             connector,
@@ -1686,6 +1743,11 @@ impl SplitDisplay {
         // the mode's before it.
         let state = &mut *s;
         state.sink.drop_veil(&self.kms, self.crtc, &state.video);
+        // Nor under the globe, which the next frame puts up again.
+        state.globe_next = None;
+        if let Some((index, _)) = state.globe_on.take() {
+            state.video[index].hide(&self.kms, self.crtc);
+        }
         Held { stage: &self.stage, guard: Some(s) }
     }
 
@@ -1910,6 +1972,7 @@ impl SplitDisplay {
                 s.ui_seq += 1;
                 let seq = s.ui_seq;
                 s.ui_next = Some((plane, frame.framebuffer, seq));
+                s.globe_next = crate::globe::take();
                 seq
             };
             // The presenter puts it up, with the film's frame of its vblank.
@@ -2908,6 +2971,38 @@ fn gl_string(display: &glutin::display::Display, name: u32) -> Option<String> {
 }
 
 impl GlContext {
+    /// The frame's alpha cleared over `rect`, its colour kept: what is on
+    /// the plane under it is added to what was drawn (src/globe.rs).
+    fn punch(&self, rect: crate::video::Rect) {
+        const SCISSOR_TEST: u32 = 0x0c11;
+        const COLOR_BUFFER_BIT: u32 = 0x4000;
+        let gl = |name: &CStr| self.context.display().get_proc_address(name);
+        let (enable, disable) = (gl(c"glEnable"), gl(c"glDisable"));
+        let (scissor, mask, colour, clear) = (gl(c"glScissor"), gl(c"glColorMask"), gl(c"glClearColor"), gl(c"glClear"));
+        if [enable, disable, scissor, mask, colour, clear].iter().any(|f| f.is_null()) {
+            return;
+        }
+        let panel = self.display.size();
+        // SAFETY: GLES 2's own functions, by their names, on the current
+        // context; the state femtovg does not set for itself is put back.
+        unsafe {
+            let enable: unsafe extern "C" fn(u32) = std::mem::transmute(enable);
+            let disable: unsafe extern "C" fn(u32) = std::mem::transmute(disable);
+            let scissor: unsafe extern "C" fn(i32, i32, i32, i32) = std::mem::transmute(scissor);
+            let mask: unsafe extern "C" fn(u8, u8, u8, u8) = std::mem::transmute(mask);
+            let colour: unsafe extern "C" fn(f32, f32, f32, f32) = std::mem::transmute(colour);
+            let clear: unsafe extern "C" fn(u32) = std::mem::transmute(clear);
+            enable(SCISSOR_TEST);
+            let (w, h) = (rect.width as i32, rect.height as i32);
+            scissor(rect.x, panel.height as i32 - rect.y - h, w, h);
+            mask(0, 0, 0, 1);
+            colour(0.0, 0.0, 0.0, 0.0);
+            clear(COLOR_BUFFER_BIT);
+            mask(1, 1, 1, 1);
+            disable(SCISSOR_TEST);
+        }
+    }
+
     /// Reads the frame back off the GPU and writes it as a PNG.
     ///
     /// Slow and deliberately so — a 4K readback is tens of megabytes — which is
@@ -2991,6 +3086,10 @@ unsafe impl OpenGLInterface for GlContext {
             self.display.wait_for_page_flip()?;
         }
         let waited = at.elapsed();
+
+        if let Some(hole) = crate::globe::hole() {
+            self.punch(hole);
+        }
 
         // Before the swap, while the finished frame is still the one the
         // context will read from.
@@ -3142,6 +3241,8 @@ impl SplitWindow {
 
     fn render_if_needed(&self) -> Result<(), PlatformError> {
         if self.redraw.replace(false) {
+            let panel = self.size();
+            crate::globe::begin_frame((panel.width, panel.height));
             let at = std::time::Instant::now();
             self.renderer.render()?;
             let total = at.elapsed();

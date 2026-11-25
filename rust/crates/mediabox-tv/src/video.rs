@@ -499,6 +499,71 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// A frame's dma-buf planes, imported and given a framebuffer.
+pub fn import_frame<D: ControlDevice + Clone>(
+    device: &D,
+    frame: &Frame,
+    dma_bufs: &[BorrowedFd<'_>],
+) -> Result<Imported<D>, String> {
+    if dma_bufs.is_empty() || frame.planes == 0 || frame.planes > 4 {
+        return Err(format!(
+            "a frame arrived with {} planes and {} file descriptors",
+            frame.planes,
+            dma_bufs.len()
+        ));
+    }
+
+    // One buffer object per plane, or — much more usually — one buffer with
+    // the luma and the chroma at different offsets inside it, which is what
+    // MPP produces. Importing the same descriptor twice gives the same GEM
+    // handle back, so the handle is what is counted: the framebuffer needs
+    // one per plane, and this must close each object exactly once.
+    let mut handles: Vec<BufferHandle> = Vec::new();
+    let mut slots: [Option<BufferHandle>; 4] = [None; 4];
+    for plane in 0..frame.planes {
+        let fd = dma_bufs.get(plane).copied().unwrap_or(dma_bufs[0]);
+        match device.prime_fd_to_buffer(fd) {
+            Ok(handle) => {
+                if !handles.contains(&handle) {
+                    handles.push(handle);
+                }
+                slots[plane] = Some(handle);
+            }
+            Err(e) => {
+                for handle in &handles {
+                    let _ = device.close_buffer(*handle);
+                }
+                return Err(format!(
+                    "DRM_IOCTL_PRIME_FD_TO_HANDLE(video plane {plane}): {e}"
+                ));
+            }
+        }
+    }
+
+    let planar = Planar {
+        fourcc: frame.fourcc,
+        size: (frame.width, frame.height),
+        pitches: frame.pitches,
+        handles: slots,
+        offsets: frame.offsets,
+        modifier: DrmModifier::from(frame.modifier),
+    };
+
+    match device.add_planar_framebuffer(&planar, control::FbCmd2Flags::MODIFIERS) {
+        Ok(framebuffer) => Ok(Imported {
+            device: device.clone(),
+            framebuffer,
+            handles,
+        }),
+        Err(e) => {
+            for handle in &handles {
+                let _ = device.close_buffer(*handle);
+            }
+            Err(format!("DRM_IOCTL_MODE_ADDFB2(video frame): {e}"))
+        }
+    }
+}
+
 /// The plane, once it has been found.
 pub struct VideoPlane {
     plane: control::plane::Handle,
@@ -670,63 +735,7 @@ impl VideoPlane {
         if !self.accepts(frame.fourcc) {
             return Err(format!("{} cannot show {:?}", self.name, frame.fourcc));
         }
-        if dma_bufs.is_empty() || frame.planes == 0 || frame.planes > 4 {
-            return Err(format!(
-                "a frame arrived with {} planes and {} file descriptors",
-                frame.planes,
-                dma_bufs.len()
-            ));
-        }
-
-        // One buffer object per plane, or — much more usually — one buffer with
-        // the luma and the chroma at different offsets inside it, which is what
-        // MPP produces. Importing the same descriptor twice gives the same GEM
-        // handle back, so the handle is what is counted: the framebuffer needs
-        // one per plane, and this must close each object exactly once.
-        let mut handles: Vec<BufferHandle> = Vec::new();
-        let mut slots: [Option<BufferHandle>; 4] = [None; 4];
-        for plane in 0..frame.planes {
-            let fd = dma_bufs.get(plane).copied().unwrap_or(dma_bufs[0]);
-            match device.prime_fd_to_buffer(fd) {
-                Ok(handle) => {
-                    if !handles.contains(&handle) {
-                        handles.push(handle);
-                    }
-                    slots[plane] = Some(handle);
-                }
-                Err(e) => {
-                    for handle in &handles {
-                        let _ = device.close_buffer(*handle);
-                    }
-                    return Err(format!(
-                        "DRM_IOCTL_PRIME_FD_TO_HANDLE(video plane {plane}): {e}"
-                    ));
-                }
-            }
-        }
-
-        let planar = Planar {
-            fourcc: frame.fourcc,
-            size: (frame.width, frame.height),
-            pitches: frame.pitches,
-            handles: slots,
-            offsets: frame.offsets,
-            modifier: DrmModifier::from(frame.modifier),
-        };
-
-        match device.add_planar_framebuffer(&planar, control::FbCmd2Flags::MODIFIERS) {
-            Ok(framebuffer) => Ok(Imported {
-                device: device.clone(),
-                framebuffer,
-                handles,
-            }),
-            Err(e) => {
-                for handle in &handles {
-                    let _ = device.close_buffer(*handle);
-                }
-                Err(format!("DRM_IOCTL_MODE_ADDFB2(video frame): {e}"))
-            }
-        }
+        import_frame(device, frame, dma_bufs)
     }
 
     /// Puts an imported frame into an atomic request: the framebuffer, the
@@ -789,6 +798,45 @@ impl VideoPlane {
         true
     }
 
+    /// Puts a frame of the interface's own on the plane, under it, as bright
+    /// as `alpha` says (src/globe.rs). What a film left of the plane's state
+    /// is written over, and what is written here is the next film's to set.
+    pub fn stage_overlay(
+        &self,
+        request: &mut control::atomic::AtomicModeReq,
+        crtc: control::crtc::Handle,
+        overlay: &crate::globe::Overlay,
+    ) -> bool {
+        use control::property::Value;
+        let Some(props) = self.props else { return false };
+        let Some(alpha) = props.alpha else { return false };
+        let (shown, pose) = (&overlay.shown, &overlay.pose);
+        self.applied.set(None);
+        self.sunk.set(false);
+        request.add_property(self.plane, props.fb, Value::Framebuffer(Some(shown.framebuffer)));
+        request.add_property(self.plane, props.crtc, Value::CRTC(Some(crtc)));
+        let side = u64::from(shown.size) << 16;
+        for (handle, value) in props.src.iter().zip([0, 0, side, side]) {
+            request.add_property(self.plane, *handle, Value::UnsignedRange(value));
+        }
+        request.add_property(self.plane, props.dst[0], Value::SignedRange(pose.dst.x.into()));
+        request.add_property(self.plane, props.dst[1], Value::SignedRange(pose.dst.y.into()));
+        request.add_property(self.plane, props.dst[2], Value::UnsignedRange(pose.dst.width.into()));
+        request.add_property(self.plane, props.dst[3], Value::UnsignedRange(pose.dst.height.into()));
+        request.add_property(self.plane, alpha, Value::UnsignedRange(pose.alpha.into()));
+        for (property, value) in [
+            (self.encoding, shown.colour.encoding),
+            (self.range, shown.colour.range),
+            (self.eotf, shown.colour.eotf),
+            (self.depth, 0),
+        ] {
+            if let Some(property) = property {
+                request.add_property(self.plane, property, Value::UnsignedRange(value));
+            }
+        }
+        true
+    }
+
     /// Puts the veil into an atomic request: the plane on, under the
     /// interface, carrying a 4K video frame no one sees -- its alpha 0, and
     /// the frame black besides -- read as SDR, so that no curve the last
@@ -834,7 +882,7 @@ impl VideoPlane {
     /// on another plane than the veil's, in the same commit. Opaque again
     /// as it goes: whoever uses the plane next -- another binary, Kodi --
     /// may not write alpha, and gets the kernel's own default back.
-    fn stage_off(&self, request: &mut control::atomic::AtomicModeReq) {
+    pub fn stage_off(&self, request: &mut control::atomic::AtomicModeReq) {
         use control::property::Value;
         let Some(props) = self.props else { return };
         request.add_property(self.plane, props.fb, Value::Framebuffer(None));

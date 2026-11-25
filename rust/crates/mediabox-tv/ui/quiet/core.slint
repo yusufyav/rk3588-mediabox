@@ -7,6 +7,13 @@ import { Metrics } from "../theme.slint";
 // Laid out on a 1920 x 1080 design and scaled by one factor, so 1440p and 4K
 // are the same picture larger, and nothing is placed by measuring.
 
+// The hardware-animation experiment (src/globe.rs): set while the globe's
+// turning sphere is on the display controller's own plane, and Slint does
+// not draw it. Never set unless MEDIABOX_TV_GLOBE_OFFLOAD was.
+export global QuietOffload {
+    in property <bool> globe;
+}
+
 export global Quiet {
     // One design pixel, on this panel.
     out property <float> u: min(Metrics.vw / 1920px, Metrics.vh / 1080px);

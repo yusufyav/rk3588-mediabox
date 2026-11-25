@@ -22,6 +22,7 @@ mod keyboard;
 mod layout;
 mod metrics;
 mod model;
+mod globe;
 mod motion_lab;
 mod monitor;
 mod platform;
@@ -9013,6 +9014,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let app = Rc::new(RefCell::new(App::new(&window, started, trace_input, AppFiles::from_env())));
     APP.with(|slot| *slot.borrow_mut() = Some(app.clone()));
+    globe::on_ask({
+        let window = window.as_weak();
+        move |able| {
+            let window = window.upgrade()?;
+            let offload = window.global::<QuietOffload>();
+            if offload.get_globe() != able {
+                offload.set_globe(able);
+            }
+            if window.get_screen() != "home" || window.get_layout() != "quiet" {
+                return None;
+            }
+            let camera = window.get_quiet_camera();
+            let row = slint::Model::iter(&window.get_apps()).position(|app| app.id == "browser")? as i32;
+            // QuietReach.wanted: a leap draws only its two ends.
+            if row != camera.row && camera.leap && !(camera.lo..=camera.hi).contains(&row) {
+                return None;
+            }
+            Some(row as f32 - camera.cam + if row == camera.row { camera.arrive } else { 0.0 })
+        }
+    });
     // The earlier searches outlive the process, as they do in the reference.
     {
         let mut app = app.borrow_mut();

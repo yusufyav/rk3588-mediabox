@@ -16,6 +16,9 @@
 //! failure.
 
 use super::*;
+
+mod globe;
+
 use std::cell::Cell;
 use std::ffi::{CStr, CString, c_void};
 use std::num::NonZeroU32;
