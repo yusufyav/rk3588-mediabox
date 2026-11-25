@@ -1,5 +1,6 @@
 import { Quiet } from "core.slint";
 import { QuietMotion } from "motion.slint";
+import { Kept } from "materials.slint";
 
 // Cinematic Spatial Scenes: what stands behind the chosen application.
 //
@@ -23,9 +24,13 @@ import { QuietMotion } from "motion.slint";
 // function of `d`, and `d` stops when the camera does.
 //
 // Cost. Every element is a stroked or filled path, a gradient or a small
-// rectangle; fades are each leaf's own `opacity`, or, on one that turns, its
-// colours' alpha (no offscreen layer, see materials.slint). A scene is only instantiated while one of its planes is
-// within reach of the camera (home.slint), so at rest one scene exists.
+// rectangle, drawn for every frame a scene moves; fades are each leaf's own
+// `opacity`, or, on one that turns, its colours' alpha. A scene's planes as
+// textures were tried and measured (2026-11-25, 4K): a tenth to a quarter off
+// the CPU, and one to two and a half milliseconds more of the GPU's for the
+// transparent pixels of each, so a scene at this size is drawn. A scene is
+// only instantiated while one of its planes is within reach of the camera
+// (home.slint), so at rest one scene exists.
 
 // One plane of a scene, carried by the camera: further down the list it is
 // smaller and lower (ahead of the camera), further back it is larger and
@@ -560,6 +565,34 @@ export component GlobeScene inherits SceneBase {
     }
 }
 
+// A stroked path of the 650-unit box, kept (or drawn, `live`): the part of
+// the box it is in, `from` and `span` units, on whole device pixels. The path
+// is its child, at `at` and `side`, its commands a literal there -- one that
+// is a property is parsed again for every frame it is drawn.
+component Part inherits Rectangle {
+    in property <length> s;
+    in property <float> from: 0;
+    in property <float> span: 650;
+    in property <bool> live;
+    in property <float> fade;
+    in property <length> line;
+    // A unit, as `Path` fits a viewbox: its stroke is inside its size.
+    property <length> unit: (s - line) / 650;
+    out property <length> at: from * unit - kept.x;
+    out property <length> side: span * unit + line;
+    width: 100%;
+    height: 100%;
+    kept := Kept {
+        x: floor(from * unit / 1phx) * 1phx;
+        y: self.x;
+        width: ceil((from * unit + span * unit + line) / 1phx) * 1phx - self.x;
+        height: self.width;
+        live: root.live;
+        fade: root.fade;
+        @children
+    }
+}
+
 // ---------------------------------------------------------------- Ayarlar
 //
 // A mechanism in titanium: a graduated outer ring, a bezel with four notches,
@@ -567,22 +600,46 @@ export component GlobeScene inherits SceneBase {
 // Neighbouring parts turn in opposite directions and at different rates as
 // the camera travels, as meshed parts do, and lock into their rest pose.
 export component SettingsScene inherits SceneBase {
+    // As an emblem, standing in its place at the size `box`: each part is a
+    // texture that turns, faded as one. Drawn, the marks on its rings are a
+    // hundred strokes, each its own draw call, for every frame of a notch.
+    // Not where it is the home screen's scene: there the same textures are
+    // ten times the size, and cost the GPU more than the strokes do
+    // (measured, 2026-11-25).
+    in property <bool> kept;
+    in property <length> box: self.width;
+    property <length> s: kept ? box : self.width;
+    property <length> w1: max(1px, 1.3 * s / 650);
+    property <length> w0: max(1px, 0.9 * s / 650);
+    // What the colours carry of the fade: all of it, or the texture does.
+    property <float> c-main: kept ? 1 : root.f-main;
+    property <float> c-far: kept ? 1 : root.f-far;
+    property <float> c-near: kept ? 1 : root.f-near;
+
     far := Plane {
         width: 100%;
         height: 100%;
         d: root.d-far;
         layer: 0.5;
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 650;
-            viewbox-height: 650;
-            fill: transparent;
-            stroke: root.ink.with-alpha(0.32 * root.f-far);
-            stroke-width: root.fine;
-            stroke-line-cap: round;
+        part1 := Part {
+            s: root.s;
+            live: !kept;
+            fade: root.f-far;
             transform-rotation: root.d-far * -24deg;
-            commands: "M325 29L325 11M350.8 30.1L351.5 22.2M376.4 33.5L377.8 25.6M401.6 39.1L403.7 31.4M426.2 46.9L429 39.3M450.1 56.7L453.5 49.5M473 68.7L482 53.1M494.8 82.5L499.4 76M515.3 98.3L520.4 92.1M534.3 115.7L540 110M551.7 134.7L557.9 129.6M567.5 155.2L574 150.6M581.3 177L596.9 168M593.3 199.9L600.5 196.5M603.1 223.8L610.7 221M610.9 248.4L618.6 246.3M616.5 273.6L624.4 272.2M619.9 299.2L627.8 298.5M621 325L639 325M619.9 350.8L627.8 351.5M616.5 376.4L624.4 377.8M610.9 401.6L618.6 403.7M603.1 426.2L610.7 429M593.3 450.1L600.5 453.5M581.3 473L596.9 482M567.5 494.8L574 499.4M551.7 515.3L557.9 520.4M534.3 534.3L540 540M515.3 551.7L520.4 557.9M494.8 567.5L499.4 574M473 581.3L482 596.9M450.1 593.3L453.5 600.5M426.2 603.1L429 610.7M401.6 610.9L403.7 618.6M376.4 616.5L377.8 624.4M350.8 619.9L351.5 627.8M325 621L325 639M299.2 619.9L298.5 627.8M273.6 616.5L272.2 624.4M248.4 610.9L246.3 618.6M223.8 603.1L221 610.7M199.9 593.3L196.5 600.5M177 581.3L168 596.9M155.2 567.5L150.6 574M134.7 551.7L129.6 557.9M115.7 534.3L110 540M98.3 515.3L92.1 520.4M82.5 494.8L76 499.4M68.7 473L53.1 482M56.7 450.1L49.5 453.5M46.9 426.2L39.3 429M39.1 401.6L31.4 403.7M33.5 376.4L25.6 377.8M30.1 350.8L22.2 351.5M29 325L11 325M30.1 299.2L22.2 298.5M33.5 273.6L25.6 272.2M39.1 248.4L31.4 246.3M46.9 223.8L39.3 221M56.7 199.9L49.5 196.5M68.7 177L53.1 168M82.5 155.2L76 150.6M98.3 134.7L92.1 129.6M115.7 115.7L110 110M134.7 98.3L129.6 92.1M155.2 82.5L150.6 76M177 68.7L168 53.1M199.9 56.7L196.5 49.5M223.8 46.9L221 39.3M248.4 39.1L246.3 31.4M273.6 33.5L272.2 25.6M299.2 30.1L298.5 22.2";
+            line: w0;
+            Path {
+                x: part1.at;
+                y: part1.at;
+                width: part1.side;
+                height: part1.side;
+                viewbox-width: 650;
+                viewbox-height: 650;
+                fill: transparent;
+                stroke: root.ink.with-alpha(0.32 * c-far);
+                stroke-width: w0;
+                stroke-line-cap: round;
+                commands: "M325 29L325 11M350.8 30.1L351.5 22.2M376.4 33.5L377.8 25.6M401.6 39.1L403.7 31.4M426.2 46.9L429 39.3M450.1 56.7L453.5 49.5M473 68.7L482 53.1M494.8 82.5L499.4 76M515.3 98.3L520.4 92.1M534.3 115.7L540 110M551.7 134.7L557.9 129.6M567.5 155.2L574 150.6M581.3 177L596.9 168M593.3 199.9L600.5 196.5M603.1 223.8L610.7 221M610.9 248.4L618.6 246.3M616.5 273.6L624.4 272.2M619.9 299.2L627.8 298.5M621 325L639 325M619.9 350.8L627.8 351.5M616.5 376.4L624.4 377.8M610.9 401.6L618.6 403.7M603.1 426.2L610.7 429M593.3 450.1L600.5 453.5M581.3 473L596.9 482M567.5 494.8L574 499.4M551.7 515.3L557.9 520.4M534.3 534.3L540 540M515.3 551.7L520.4 557.9M494.8 567.5L499.4 574M473 581.3L482 596.9M450.1 593.3L453.5 600.5M426.2 603.1L429 610.7M401.6 610.9L403.7 618.6M376.4 616.5L377.8 624.4M350.8 619.9L351.5 627.8M325 621L325 639M299.2 619.9L298.5 627.8M273.6 616.5L272.2 624.4M248.4 610.9L246.3 618.6M223.8 603.1L221 610.7M199.9 593.3L196.5 600.5M177 581.3L168 596.9M155.2 567.5L150.6 574M134.7 551.7L129.6 557.9M115.7 534.3L110 540M98.3 515.3L92.1 520.4M82.5 494.8L76 499.4M68.7 473L53.1 482M56.7 450.1L49.5 453.5M46.9 426.2L39.3 429M39.1 401.6L31.4 403.7M33.5 376.4L25.6 377.8M30.1 350.8L22.2 351.5M29 325L11 325M30.1 299.2L22.2 298.5M33.5 273.6L25.6 272.2M39.1 248.4L31.4 246.3M46.9 223.8L39.3 221M56.7 199.9L49.5 196.5M68.7 177L53.1 168M82.5 155.2L76 150.6M98.3 134.7L92.1 129.6M115.7 115.7L110 110M134.7 98.3L129.6 92.1M155.2 82.5L150.6 76M177 68.7L168 53.1M199.9 56.7L196.5 49.5M223.8 46.9L221 39.3M248.4 39.1L246.3 31.4M273.6 33.5L272.2 25.6M299.2 30.1L298.5 22.2";
+            }
         }
     }
 
@@ -591,56 +648,103 @@ export component SettingsScene inherits SceneBase {
         height: 100%;
         d: root.d;
         // The bezel and its notches.
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 650;
-            viewbox-height: 650;
-            fill: transparent;
-            stroke: root.ink.with-alpha(0.36);
-            stroke-width: root.fine;
-            opacity: root.f-main;
-            commands: "M557 325A232 232 0 1 1 93 325A232 232 0 1 1 557 325ZM547 325A222 222 0 1 1 103 325A222 222 0 1 1 547 325Z";
+        part2 := Part {
+            s: root.s;
+            from: 90;
+            span: 470;
+            live: !kept;
+            fade: root.f-main;
+            line: w0;
+            Path {
+                x: part2.at;
+                y: part2.at;
+                width: part2.side;
+                height: part2.side;
+                viewbox-x: 90;
+                viewbox-y: 90;
+                viewbox-width: 470;
+                viewbox-height: 470;
+                fill: transparent;
+                stroke: root.ink.with-alpha(0.36 * c-main);
+                stroke-width: w0;
+                commands: "M557 325A232 232 0 1 1 93 325A232 232 0 1 1 557 325ZM547 325A222 222 0 1 1 103 325A222 222 0 1 1 547 325Z";
+            }
         }
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 650;
-            viewbox-height: 650;
-            fill: transparent;
-            stroke: root.glow.with-alpha(0.6 * root.f-main);
-            stroke-width: root.line * 2;
-            stroke-line-cap: round;
+        part3 := Part {
+            s: root.s;
+            from: 105;
+            span: 440;
+            live: !kept;
+            fade: root.f-main;
             transform-rotation: root.d * 34deg;
-            commands: "M273.7 119.3A212 212 0 0 1 376.3 119.3M530.7 273.7A212 212 0 0 1 530.7 376.3M376.3 530.7A212 212 0 0 1 273.7 530.7M119.3 376.3A212 212 0 0 1 119.3 273.7";
+            line: w1 * 2;
+            Path {
+                x: part3.at;
+                y: part3.at;
+                width: part3.side;
+                height: part3.side;
+                viewbox-x: 105;
+                viewbox-y: 105;
+                viewbox-width: 440;
+                viewbox-height: 440;
+                fill: transparent;
+                stroke: root.glow.with-alpha(0.6 * c-main);
+                stroke-width: w1 * 2;
+                stroke-line-cap: round;
+                commands: "M273.7 119.3A212 212 0 0 1 376.3 119.3M530.7 273.7A212 212 0 0 1 530.7 376.3M376.3 530.7A212 212 0 0 1 273.7 530.7M119.3 376.3A212 212 0 0 1 119.3 273.7";
+            }
         }
         // The gear, turning against the bezel.
-        Path {
-            x: root.width * 165 / 650;
-            y: root.height * 165 / 650;
-            width: root.width * 320 / 650;
-            height: self.width;
-            viewbox-width: 24;
-            viewbox-height: 24;
-            commands: Quiet.gear;
-            fill: root.tint.with-alpha(0.05 * root.f-main);
-            stroke: root.glow.with-alpha(0.66 * root.f-main);
-            stroke-width: root.line;
-            stroke-line-join: round;
-            transform-rotation: root.d * -45deg;
-        }
-        // The inner dial and its index.
-        Path {
+        Rectangle {
             width: 100%;
             height: 100%;
-            viewbox-width: 650;
-            viewbox-height: 650;
-            fill: transparent;
-            stroke: root.ink.with-alpha(0.4 * root.f-main);
-            stroke-width: root.fine;
-            stroke-line-cap: round;
+            transform-rotation: root.d * -45deg;
+            Kept {
+                x: floor(root.s * 160 / 650 / 1phx) * 1phx;
+                y: self.x;
+                width: ceil(root.s * 330 / 650 / 1phx) * 1phx;
+                height: self.width;
+                live: !kept;
+                fade: root.f-main;
+                Path {
+                    x: root.s * 165 / 650 - parent.x;
+                    y: root.s * 165 / 650 - parent.y;
+                    width: root.s * 320 / 650;
+                    height: self.width;
+                    viewbox-width: 24;
+                    viewbox-height: 24;
+                    commands: Quiet.gear;
+                    fill: root.tint.with-alpha(0.05 * c-main);
+                    stroke: root.glow.with-alpha(0.66 * c-main);
+                    stroke-width: w1;
+                    stroke-line-join: round;
+                }
+            }
+        }
+        // The inner dial and its index.
+        part4 := Part {
+            s: root.s;
+            from: 200;
+            span: 250;
+            live: !kept;
+            fade: root.f-main;
             transform-rotation: root.d * 90deg;
-            commands: "M429 325A104 104 0 1 1 221 325A104 104 0 1 1 429 325ZM325 214L325 236M325 213L325 205M354 216.8L356.1 209.1M381 228L385 221.1M404.2 245.8L409.9 240.1M422 269L428.9 265M433.2 296L440.9 293.9M437 325L445 325M433.2 354L440.9 356.1M422 381L428.9 385M404.2 404.2L409.9 409.9M381 422L385 428.9M354 433.2L356.1 440.9M325 437L325 445M296 433.2L293.9 440.9M269 422L265 428.9M245.8 404.2L240.1 409.9M228 381L221.1 385M216.8 354L209.1 356.1M213 325L205 325M216.8 296L209.1 293.9M228 269L221.1 265M245.8 245.8L240.1 240.1M269 228L265 221.1M296 216.8L293.9 209.1";
+            line: w0;
+            Path {
+                x: part4.at;
+                y: part4.at;
+                width: part4.side;
+                height: part4.side;
+                viewbox-x: 200;
+                viewbox-y: 200;
+                viewbox-width: 250;
+                viewbox-height: 250;
+                fill: transparent;
+                stroke: root.ink.with-alpha(0.4 * c-main);
+                stroke-width: w0;
+                stroke-line-cap: round;
+                commands: "M429 325A104 104 0 1 1 221 325A104 104 0 1 1 429 325ZM325 214L325 236M325 213L325 205M354 216.8L356.1 209.1M381 228L385 221.1M404.2 245.8L409.9 240.1M422 269L428.9 265M433.2 296L440.9 293.9M437 325L445 325M433.2 354L440.9 356.1M422 381L428.9 385M404.2 404.2L409.9 409.9M381 422L385 428.9M354 433.2L356.1 440.9M325 437L325 445M296 433.2L293.9 440.9M269 422L265 428.9M245.8 404.2L240.1 409.9M228 381L221.1 385M216.8 354L209.1 356.1M213 325L205 325M216.8 296L209.1 293.9M228 269L221.1 265M245.8 245.8L240.1 240.1M269 228L265 221.1M296 216.8L293.9 209.1";
+            }
         }
     }
 
@@ -649,17 +753,29 @@ export component SettingsScene inherits SceneBase {
         height: 100%;
         d: root.d-near;
         layer: 1.6;
-        Path {
-            width: 100%;
-            height: 100%;
-            viewbox-width: 650;
-            viewbox-height: 650;
-            fill: transparent;
-            stroke: root.glow.with-alpha(0.3 * root.f-near);
-            stroke-width: root.fine;
-            stroke-line-cap: round;
+        part5 := Part {
+            s: root.s;
+            from: 40;
+            span: 570;
+            live: !kept;
+            fade: root.f-near;
             transform-rotation: root.d-near * 22deg;
-            commands: "M233.3 576.8A268 268 0 0 1 59.6 362.3M416.7 73.2A268 268 0 0 1 565.9 207.5M414.6 78.8L418.7 67.5M456 98.1L462 87.7M493.4 124.3L501.1 115.1M525.7 156.6L534.9 148.9M551.9 194L562.3 188M235.4 571.2L231.3 582.5M194 551.9L188 562.3M156.6 525.7L148.9 534.9M124.3 493.4L115.1 501.1M98.1 456L87.7 462M78.8 414.6L67.5 418.7M67 370.5L55.2 372.6";
+            line: w0;
+            Path {
+                x: part5.at;
+                y: part5.at;
+                width: part5.side;
+                height: part5.side;
+                viewbox-x: 40;
+                viewbox-y: 40;
+                viewbox-width: 570;
+                viewbox-height: 570;
+                fill: transparent;
+                stroke: root.glow.with-alpha(0.3 * c-near);
+                stroke-width: w0;
+                stroke-line-cap: round;
+                commands: "M233.3 576.8A268 268 0 0 1 59.6 362.3M416.7 73.2A268 268 0 0 1 565.9 207.5M414.6 78.8L418.7 67.5M456 98.1L462 87.7M493.4 124.3L501.1 115.1M525.7 156.6L534.9 148.9M551.9 194L562.3 188M235.4 571.2L231.3 582.5M194 551.9L188 562.3M156.6 525.7L148.9 534.9M124.3 493.4L115.1 501.1M98.1 456L87.7 462M78.8 414.6L67.5 418.7M67 370.5L55.2 372.6";
+            }
         }
     }
 }

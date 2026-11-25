@@ -10,6 +10,7 @@ import { VolumeOsd } from "volume.slint";
 import { Player, MenuRow, CaptionLine, CaptionRun, CaptionStyle } from "player.slint";
 import { MediaSettings, MsCategory, MsRow, MsNode, MsRate, MsRoute } from "media_settings.slint";
 import { Settings } from "settings.slint";
+import { Quiet } from "quiet/core.slint";
 import { QuietHome } from "quiet/home.slint";
 import { QuietSettings } from "quiet/settings.slint";
 import { QuietBar } from "quiet/controls.slint";
@@ -105,6 +106,8 @@ export component MediaBoxWindow inherits Window {
     property <bool> quiet-family: layout == "quiet" && (screen == "settings" || screen == "wifi"
         || screen == "bluetooth" || screen == "account" || screen == "diagnostics");
     changed quiet-family => { Theme.quiet = quiet-family; }
+    property <float> device-scale: 1px / 1phx;
+    changed device-scale => { Quiet.scale = device-scale; }
     // The screen the panel showed before this one, told by Rust with the
     // screen itself (src/main.rs, `show`): Quiet OS carries an element from
     // one screen into the next when it knows where the eye was.

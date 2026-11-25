@@ -2,7 +2,7 @@ import { AppTile, VitalsModel } from "../components.slint";
 import { PointerTarget, PointerPanArea, PanState } from "../pointer.slint";
 import { Quiet } from "core.slint";
 import { QuietMotion, QuietCurves, QuietCam, QuietReach } from "motion.slint";
-import { QuietGround, LivingFocus } from "materials.slint";
+import { QuietGround, LivingFocus, Kept, Still } from "materials.slint";
 import { Scene } from "scenes.slint";
 import { Overline, KeyCap, QuietBar } from "controls.slint";
 
@@ -13,9 +13,9 @@ export global QuietPlaces {
     out property <length> stage-y: 150px * Quiet.u;
     out property <length> stage-size: 650px * Quiet.u;
     // Smaller, beside an editor's heading (`QuietCam.shrink`).
-    public pure function emblem-x(shrink: float) -> length { return (1592px + 132px * shrink) * Quiet.u; }
-    public pure function emblem-y(shrink: float) -> length { return (196px - 80px * shrink) * Quiet.u; }
-    public pure function emblem-size(shrink: float) -> length { return (228px - 132px * shrink) * Quiet.u; }
+    public pure function emblem-x(shrink: float) -> length { return Quiet.px((1592px + 132px * shrink) * Quiet.u); }
+    public pure function emblem-y(shrink: float) -> length { return Quiet.px((196px - 80px * shrink) * Quiet.u); }
+    public pure function emblem-size(shrink: float) -> length { return Quiet.px((228px - 132px * shrink) * Quiet.u); }
 }
 
 // The chosen application's name, set as large as the reference sets it, and
@@ -65,23 +65,41 @@ component NameBlock inherits Rectangle {
         name: tile.name;
     }
 
-    Text {
+    if f > 0: Rectangle {
         x: 0;
         // Toward where it is going: up when the list moves down, and back.
-        y: d * 64px * u * QuietMotion.travel;
+        // Whole device pixels, as the renderer sets type.
+        y: Quiet.px(d * 64px * u * QuietMotion.travel);
         width: parent.width;
         // Two of the font's own lines (its line height is about 1.4 of its
         // size), from the top.
         height: size.name-h;
-        text: tile.name;
-        color: Quiet.ink;
-        opacity: f;
-        font-size: Quiet.t-display * size.fit;
-        font-weight: 560;
-        letter-spacing: -108px * u * size.fit * 0.06;
-        vertical-alignment: size.two-lines ? top : center;
-        wrap: word-wrap;
-        overflow: elide;
+        // Kept: over 92 device pixels the renderer has no atlas of glyphs
+        // and flattens every outline again for every frame (femtovg,
+        // `draw_glyph_run`).
+        // With room around the column: a glyph's outline may stand past it.
+        property <length> room: Quiet.px(16px * u);
+        Kept {
+            x: -room;
+            y: -room;
+            width: parent.width + 2 * room;
+            height: parent.height + 2 * room;
+            fade: f;
+            Text {
+                x: room;
+                y: room;
+                width: parent.width - 2 * room;
+                height: parent.height - 2 * room;
+                text: tile.name;
+                color: Quiet.ink;
+                font-size: Quiet.t-display * size.fit;
+                font-weight: 560;
+                letter-spacing: -108px * u * size.fit * 0.06;
+                vertical-alignment: size.two-lines ? top : center;
+                wrap: word-wrap;
+                overflow: elide;
+            }
+        }
     }
 }
 
@@ -101,35 +119,45 @@ component AboutBlock inherits Rectangle {
     changed here => { lead = here ? 1 : 0; }
     property <float> f: QuietMotion.word(d, lead);
 
-    VerticalLayout {
-        y: d * 34px * u * QuietMotion.travel;
+    if f > 0: Rectangle {
+        x: 0;
+        y: Quiet.px(d * 34px * u * QuietMotion.travel);
         width: parent.width;
-        alignment: start;
-        if tile.about != "": HorizontalLayout {
-            padding-left: 4px * u;
-            alignment: start;
-            Text {
-                width: 400px * u;
-                max-height: 4 * 21px * u * 1.35;
-                text: tile.about;
-                color: #a5b1ba;
-                opacity: f;
-                font-size: 21px * u;
-                letter-spacing: -21px * u * 0.012;
-                wrap: word-wrap;
-                overflow: elide;
-            }
-        }
-        if tile.about != "" && tile.note != "": Rectangle { height: 22px * u; }
-        if tile.note != "": HorizontalLayout {
-            padding-left: 4px * u;
-            Text {
-                text: tile.note;
-                color: Quiet.warm-dim;
-                opacity: f;
-                font-size: 15px * u;
-                font-weight: 600;
-                overflow: elide;
+        height: Quiet.px(words.preferred-height + 4px * u);
+        Kept {
+            width: 100%;
+            height: 100%;
+            fade: f;
+            words := VerticalLayout {
+                y: 0;
+                width: parent.width;
+                height: self.preferred-height;
+                alignment: start;
+                if tile.about != "": HorizontalLayout {
+                    padding-left: 4px * u;
+                    alignment: start;
+                    Text {
+                        width: 400px * u;
+                        max-height: 4 * 21px * u * 1.35;
+                        text: tile.about;
+                        color: #a5b1ba;
+                        font-size: 21px * u;
+                        letter-spacing: -21px * u * 0.012;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+                if tile.about != "" && tile.note != "": Rectangle { height: 22px * u; }
+                if tile.note != "": HorizontalLayout {
+                    padding-left: 4px * u;
+                    Text {
+                        text: tile.note;
+                        color: Quiet.warm-dim;
+                        font-size: 15px * u;
+                        font-weight: 600;
+                        overflow: elide;
+                    }
+                }
             }
         }
     }
@@ -293,8 +321,8 @@ export component QuietHome inherits Rectangle {
 
     // The column: a window onto the rows, as tall as the reference's.
     Rectangle {
-        x: list-x;
-        y: list-y;
+        x: Quiet.px(list-x);
+        y: Quiet.px(list-y);
         width: list-w;
         height: view-h;
         clip: true;
@@ -310,7 +338,7 @@ export component QuietHome inherits Rectangle {
 
         Rectangle {
             x: 0;
-            y: -pan.value;
+            y: -Quiet.px(pan.value);
             width: parent.width;
             height: max(content-h, parent.height);
             animate y { duration: pan.duration; easing: QuietCurves.ease; }
@@ -329,62 +357,68 @@ export component QuietHome inherits Rectangle {
                 tint: Quiet.warm.mix(root.aura, 0.65);
             }
 
-            for tile[i] in apps: Rectangle {
-                property <bool> here: i == focus-col;
-                x: 0;
-                y: i * pitch;
-                width: parent.width;
-                height: row-h;
-                border-radius: self.height / 2;
-                background: target.lit && !here ? Quiet.hover : transparent;
-                animate background { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+            // Kept: drawn when the focus moves, not while the scene does.
+            Still {
+                y: 0;
+                width: 100%;
+                height: Quiet.px(content-h);
+                for tile[i] in apps: Rectangle {
+                    property <bool> here: i == focus-col;
+                    x: 0;
+                    y: i * pitch;
+                    width: parent.width;
+                    height: row-h;
+                    border-radius: self.height / 2;
+                    background: target.lit && !here ? Quiet.hover : transparent;
+                    animate background { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
 
-                Path {
-                    x: 19px * u;
-                    y: (parent.height - self.height) / 2;
-                    width: 26px * u;
-                    height: 26px * u;
-                    viewbox-width: 24;
-                    viewbox-height: 24;
-                    commands: Quiet.mark(tile.id, tile.mark);
-                    fill: transparent;
-                    stroke: here ? Quiet.warm-hi : Quiet.app;
-                    stroke-width: 1.45px * u;
-                    stroke-line-cap: round;
-                    stroke-line-join: round;
-                    opacity: tile.ready ? 1.0 : 0.5;
-                }
-                Text {
-                    x: 66px * u;
-                    width: parent.width - self.x - 60px * u;
-                    height: parent.height;
-                    text: tile.name;
-                    color: here ? Quiet.warm-hi : Quiet.app;
-                    opacity: tile.ready ? 1.0 : 0.5;
-                    font-size: 22px * u;
-                    font-weight: 520;
-                    letter-spacing: -22px * u * 0.025;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    wrap: no-wrap;
-                    animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
-                }
-                Text {
-                    x: parent.width - 19px * u - self.width;
-                    width: self.preferred-width;
-                    height: parent.height;
-                    text: Quiet.two(i + 1);
-                    color: here ? Quiet.warm-dim : Quiet.faint;
-                    opacity: tile.ready ? 1.0 : 0.5;
-                    font-size: 11px * u;
-                    letter-spacing: 11px * u * 0.08;
-                    vertical-alignment: center;
-                }
+                    Path {
+                        x: 19px * u;
+                        y: (parent.height - self.height) / 2;
+                        width: 26px * u;
+                        height: 26px * u;
+                        viewbox-width: 24;
+                        viewbox-height: 24;
+                        commands: Quiet.mark(tile.id, tile.mark);
+                        fill: transparent;
+                        stroke: here ? Quiet.warm-hi : Quiet.app;
+                        stroke-width: 1.45px * u;
+                        stroke-line-cap: round;
+                        stroke-line-join: round;
+                        opacity: tile.ready ? 1.0 : 0.5;
+                    }
+                    Text {
+                        x: 66px * u;
+                        width: parent.width - self.x - 60px * u;
+                        height: parent.height;
+                        text: tile.name;
+                        color: here ? Quiet.warm-hi : Quiet.app;
+                        opacity: tile.ready ? 1.0 : 0.5;
+                        font-size: 22px * u;
+                        font-weight: 520;
+                        letter-spacing: -22px * u * 0.025;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        wrap: no-wrap;
+                        animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+                    }
+                    Text {
+                        x: parent.width - 19px * u - self.width;
+                        width: self.preferred-width;
+                        height: parent.height;
+                        text: Quiet.two(i + 1);
+                        color: here ? Quiet.warm-dim : Quiet.faint;
+                        opacity: tile.ready ? 1.0 : 0.5;
+                        font-size: 11px * u;
+                        letter-spacing: 11px * u * 0.08;
+                        vertical-alignment: center;
+                    }
 
-                target := PointerTarget {
-                    zone: "quiet-home";
-                    index: i;
-                    veil: false;
+                    target := PointerTarget {
+                        zone: "quiet-home";
+                        index: i;
+                        veil: false;
+                    }
                 }
             }
         }
@@ -471,8 +505,8 @@ export component QuietHome inherits Rectangle {
     }
 
     names := Rectangle {
-        x: spot-x - 4px * u;
-        y: 330px * u;
+        x: Quiet.px(spot-x - 4px * u);
+        y: Quiet.px(330px * u);
         width: spot-w;
         height: 860px * u - self.y;
         for tile[i] in apps: Rectangle {
@@ -498,8 +532,8 @@ export component QuietHome inherits Rectangle {
     property <bool> about-snap: true;
     changed about-at => { about-y = about-at; }
     Rectangle {
-        x: spot-x - 4px * u;
-        y: about-y;
+        x: Quiet.px(spot-x - 4px * u);
+        y: Quiet.px(about-y);
         width: spot-w;
         height: 860px * u - self.y;
         for tile[i] in apps: Rectangle {
@@ -515,31 +549,37 @@ export component QuietHome inherits Rectangle {
     }
 
     // ---- what the keys do here
-    HorizontalLayout {
-        x: spot-x;
-        y: 886px * u;
-        height: 27px * u;
-        spacing: 13px * u;
-        alignment: start;
+    Still {
+        x: Quiet.px(spot-x - 8px * u);
+        y: Quiet.px(882px * u);
+        width: Quiet.px(480px * u);
+        height: Quiet.px(36px * u);
         HorizontalLayout {
-            spacing: 5px * u;
-            KeyCap { mark: "M12 19V5 M6 11l6-6 6 6"; }
-            KeyCap { mark: "M12 5v14 M6 13l6 6 6-6"; }
-        }
-        Text {
-            text: "Uygulama seç";
-            color: #aeb9bf;
-            font-size: 13px * u;
-            font-weight: 550;
-            vertical-alignment: center;
-        }
-        Rectangle { width: 6px * u; }
-        KeyCap { mark: "M19 5v7a3 3 0 0 1-3 3H6 M10 11l-4 4 4 4"; }
-        Text {
-            text: chosen.id == "settings" ? "Ayarlar'a gir" : "Uygulamayı aç";
-            color: #82929d;
-            font-size: 13px * u;
-            vertical-alignment: center;
+            x: spot-x - parent.x;
+            y: 886px * u - parent.y;
+            height: 27px * u;
+            spacing: 13px * u;
+            alignment: start;
+            HorizontalLayout {
+                spacing: 5px * u;
+                KeyCap { mark: "M12 19V5 M6 11l6-6 6 6"; }
+                KeyCap { mark: "M12 5v14 M6 13l6 6 6-6"; }
+            }
+            Text {
+                text: "Uygulama seç";
+                color: #aeb9bf;
+                font-size: 13px * u;
+                font-weight: 550;
+                vertical-alignment: center;
+            }
+            Rectangle { width: 6px * u; }
+            KeyCap { mark: "M19 5v7a3 3 0 0 1-3 3H6 M10 11l-4 4 4 4"; }
+            Text {
+                text: chosen.id == "settings" ? "Ayarlar'a gir" : "Uygulamayı aç";
+                color: #82929d;
+                font-size: 13px * u;
+                vertical-alignment: center;
+            }
         }
     }
 }

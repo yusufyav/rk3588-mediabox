@@ -13,6 +13,12 @@ export global Quiet {
     // A hairline that stays one device pixel wide or more at every scale.
     out property <length> hairline: 1px * max(1, u);
 
+    // A length on whole device pixels: where a kept drawing stands, so it is
+    // sampled texel for pixel (materials.slint, `Kept`).
+    // (A global does not know the window's scale: app.slint says it.)
+    in-out property <float> scale: 1;
+    public pure function px(at: length) -> length { return round(at / 1px * scale) / scale * 1px; }
+
     out property <color> ink: #f1f0ee;
     out property <color> muted: #a5afba;
     out property <color> dim: #6e7c89;

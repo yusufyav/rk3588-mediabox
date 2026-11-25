@@ -7,7 +7,7 @@ import { EthernetPane, EthernetView } from "../ethernet.slint";
 import { AudioPane, AudioView } from "../audio.slint";
 import { Quiet } from "core.slint";
 import { QuietMotion, QuietCurves, QuietCam } from "motion.slint";
-import { QuietGround, LivingFocus } from "materials.slint";
+import { QuietGround, LivingFocus, Kept, Still } from "materials.slint";
 import { SettingsScene } from "scenes.slint";
 import { Overline, HomeCrumb, QuietBar, QuietToggle, QuietChoice } from "controls.slint";
 import { QuietPlaces } from "home.slint";
@@ -42,10 +42,22 @@ component SettingsEmblem inherits Rectangle {
     animate notch { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
     init => {
         notch = turn;
+        resting = QuietPlaces.emblem-size(camera.shrink);
+        standing = settled;
         snap = false;
         root.shrink-to(small ? 1 : 0);
     }
     changed turn => { notch = turn; }
+    // In its place, at one of its sizes: assigned when that changes, not
+    // bound -- the camera is one value, and all that reads it is told of
+    // every part of it that moves.
+    property <bool> settled: camera.flight == 1 && (camera.shrink == 0 || camera.shrink == 1);
+    property <bool> standing;
+    property <length> resting: QuietPlaces.emblem-size(0);
+    changed settled => {
+        resting = QuietPlaces.emblem-size(camera.shrink);
+        standing = settled;
+    }
     changed small => { root.shrink-to(small ? 1 : 0); }
 
     x: QuietPlaces.emblem-x(camera.shrink) + (QuietPlaces.stage-x - QuietPlaces.emblem-x(camera.shrink)) * fly;
@@ -64,6 +76,8 @@ component SettingsEmblem inherits Rectangle {
         d-far: root.d * 0.7 + root.owed;
         d-near: root.d * 1.3 + root.owed;
         presence: 0.55 + 0.35 * fly;
+        kept: standing;
+        box: resting;
     }
 }
 
@@ -154,33 +168,63 @@ component SwapText inherits Rectangle {
         on-a = !on-a;
     }
 
-    Text {
-        y: (1 - a) * a-side * travel;
+    if a > 0: Rectangle {
+        x: 0;
+        y: Quiet.px((1 - a) * a-side * travel);
         width: parent.width;
         height: parent.height;
-        text: a-text;
-        color: root.ink;
-        opacity: a;
-        font-size: root.font-size;
-        font-weight: root.font-weight;
-        letter-spacing: root.letter-spacing;
-        vertical-alignment: center;
-        overflow: elide;
-        wrap: no-wrap;
+        // Kept, as the home screen's name is (home.slint, `NameBlock`).
+        property <length> room: Quiet.px(12px * Quiet.u);
+        Kept {
+            x: -room;
+            y: -room;
+            width: parent.width + 2 * room;
+            height: parent.height + 2 * room;
+            fade: a;
+            Text {
+                x: room;
+                y: room;
+                width: parent.width - 2 * room;
+                height: parent.height - 2 * room;
+                text: a-text;
+                color: root.ink;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                letter-spacing: root.letter-spacing;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
     }
-    Text {
-        y: (1 - b) * b-side * travel;
+    if b > 0: Rectangle {
+        x: 0;
+        y: Quiet.px((1 - b) * b-side * travel);
         width: parent.width;
         height: parent.height;
-        text: b-text;
-        color: root.ink;
-        opacity: b;
-        font-size: root.font-size;
-        font-weight: root.font-weight;
-        letter-spacing: root.letter-spacing;
-        vertical-alignment: center;
-        overflow: elide;
-        wrap: no-wrap;
+        // Kept, as the home screen's name is (home.slint, `NameBlock`).
+        property <length> room: Quiet.px(12px * Quiet.u);
+        Kept {
+            x: -room;
+            y: -room;
+            width: parent.width + 2 * room;
+            height: parent.height + 2 * room;
+            fade: b;
+            Text {
+                x: room;
+                y: room;
+                width: parent.width - 2 * room;
+                height: parent.height - 2 * room;
+                text: b-text;
+                color: root.ink;
+                font-size: root.font-size;
+                font-weight: root.font-weight;
+                letter-spacing: root.letter-spacing;
+                vertical-alignment: center;
+                overflow: elide;
+                wrap: no-wrap;
+            }
+        }
     }
 }
 
@@ -207,56 +251,62 @@ component CategoryColumn inherits Rectangle {
         to-w: cat-w;
         strength: active ? 1 : 0.62;
     }
-    for item[i] in items: Rectangle {
-        property <bool> here: i == current;
-        property <bool> lit: here && active;
-        x: 0;
-        y: i * pitch;
-        width: root.width;
-        height: row-h;
-        init => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
-        changed here => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
-
-        // The arrow over another name: the wash fits the name, as the
-        // reference draws it; the target is the whole width, so the hand
-        // does not have to find the word.
-        Rectangle {
+    // Kept: drawn when the remote moves here, not while the page settles.
+    Still {
+        y: 0;
+        width: 100%;
+        height: Quiet.px(max(1, items.length) * pitch);
+        for item[i] in items: Rectangle {
+            property <bool> here: i == current;
+            property <bool> lit: here && active;
             x: 0;
-            y: 0;
-            height: parent.height;
-            width: min(parent.width, line.preferred-width + 30px * u);
-            border-radius: self.height / 2;
-            background: !here && cat.lit ? Quiet.hover : transparent;
-        }
-        line := HorizontalLayout {
-            x: 15px * u;
-            y: 0;
-            height: parent.height;
-            width: self.preferred-width;
-            spacing: 15px * u;
-            VerticalLayout {
-                alignment: center;
-                Icon {
-                    name: item.icon;
-                    size: 21px * u;
-                    ink: lit ? Quiet.warm-hi : here ? #dccfb9 : #8f9ba5;
+            y: i * pitch;
+            width: root.width;
+            height: row-h;
+            init => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
+            changed here => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
+
+            // The arrow over another name: the wash fits the name, as the
+            // reference draws it; the target is the whole width, so the hand
+            // does not have to find the word.
+            Rectangle {
+                x: 0;
+                y: 0;
+                height: parent.height;
+                width: min(parent.width, line.preferred-width + 30px * u);
+                border-radius: self.height / 2;
+                background: !here && cat.lit ? Quiet.hover : transparent;
+            }
+            line := HorizontalLayout {
+                x: 15px * u;
+                y: 0;
+                height: parent.height;
+                width: self.preferred-width;
+                spacing: 15px * u;
+                VerticalLayout {
+                    alignment: center;
+                    Icon {
+                        name: item.icon;
+                        size: 21px * u;
+                        ink: lit ? Quiet.warm-hi : here ? #dccfb9 : #8f9ba5;
+                    }
+                }
+                Text {
+                    text: item.label;
+                    color: lit ? Quiet.warm-hi : here ? #e6dccb : (cat.lit ? #e3e6e6 : #8f9ba5);
+                    font-size: 19px * u;
+                    font-weight: lit ? 560 : 480;
+                    vertical-alignment: center;
+                    wrap: no-wrap;
+                    animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
                 }
             }
-            Text {
-                text: item.label;
-                color: lit ? Quiet.warm-hi : here ? #e6dccb : (cat.lit ? #e3e6e6 : #8f9ba5);
-                font-size: 19px * u;
-                font-weight: lit ? 560 : 480;
-                vertical-alignment: center;
-                wrap: no-wrap;
-                animate color { duration: QuietMotion.t-wash; easing: QuietCurves.ease; }
+            cat := PointerTarget {
+                enabled: root.pointer-zone != "";
+                zone: root.pointer-zone;
+                index: i;
+                veil: false;
             }
-        }
-        cat := PointerTarget {
-            enabled: root.pointer-zone != "";
-            zone: root.pointer-zone;
-            index: i;
-            veil: false;
         }
     }
 }
@@ -324,8 +374,8 @@ export component QuietFrame inherits Rectangle {
     }
 
     CategoryColumn {
-        x: left;
-        y: 286px * u;
+        x: Quiet.px(left);
+        y: Quiet.px(286px * u);
         width: 413px * u;
         height: 691px * u;
         items: root.items;
@@ -371,8 +421,8 @@ export component QuietFrame inherits Rectangle {
         color: Quiet.warm;
     }
     SwapText {
-        x: Quiet.content-x - 2px * u;
-        y: 286px * u;
+        x: Quiet.px(Quiet.content-x - 2px * u);
+        y: Quiet.px(286px * u);
         width: Quiet.content-w;
         height: Quiet.t-title * 1.15;
         text: root.title;
@@ -535,8 +585,8 @@ export component QuietSettings inherits Rectangle {
     // Under a page too: a click on a category leaves the page for it
     // (src/main.rs, `pointer_point`).
     CategoryColumn {
-        x: left;
-        y: 286px * u;
+        x: Quiet.px(left);
+        y: Quiet.px(286px * u);
         width: nav-w;
         height: 691px * u;
         items: root.sections;
@@ -555,8 +605,8 @@ export component QuietSettings inherits Rectangle {
         animate x, y { duration: QuietMotion.t-shared; easing: QuietCurves.camera; }
     }
     SwapText {
-        x: content-x - 2px * u;
-        y: title-y;
+        x: Quiet.px(content-x - 2px * u);
+        y: Quiet.px(title-y);
         width: content-w;
         height: title-size * 1.15;
         text: root.title;
@@ -566,8 +616,8 @@ export component QuietSettings inherits Rectangle {
         letter-spacing: -title-size * 0.05;
     }
     SwapText {
-        x: content-x;
-        y: title-y + title-size * 1.15 + 8px * u;
+        x: Quiet.px(content-x);
+        y: Quiet.px(title-y + title-size * 1.15 + 8px * u);
         width: content-w;
         height: Quiet.t-body * 1.4;
         text: root.blurb;
@@ -650,13 +700,12 @@ export component QuietSettings inherits Rectangle {
             width: parent.width;
             animate y { duration: pan.duration; easing: QuietCurves.ease; }
 
-            Rectangle {
+            if rows.length > 0 && rows[0].kind != "header": Rectangle {
                 x: 0;
                 y: 0;
                 width: parent.width;
                 height: 1px;
                 background: Quiet.hair;
-                visible: rows.length > 0 && rows[0].kind != "header";
             }
 
             // The focus: the Living Focus, travelling from row to row.

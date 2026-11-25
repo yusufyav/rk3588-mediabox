@@ -4,7 +4,7 @@ import { PointerTarget, PointerPanArea, PanState, PointerShield, PointerSwallow,
 import { Icon, ChoiceItem, NetGlyph } from "../kit.slint";
 import { Quiet } from "core.slint";
 import { QuietMotion, QuietCurves } from "motion.slint";
-import { QuietSurface, LivingFocus } from "materials.slint";
+import { QuietSurface, LivingFocus, Still } from "materials.slint";
 
 // Quiet OS's controls: the small parts every one of its screens is made of.
 
@@ -129,117 +129,129 @@ export component QuietBar inherits Rectangle {
     property <float> u: Quiet.u;
     property <bool> online: vitals.eth-up || vitals.wifi-up;
 
-    HorizontalLayout {
-        x: 100px * u;
-        y: 34px * u;
-        height: 44px * u;
-        spacing: 17px * u;
-        alignment: start;
+    // Two groups, each kept: they change when the device says something new.
+    Still {
+        x: Quiet.px(92px * u);
+        y: Quiet.px(26px * u);
+        width: Quiet.px(700px * u);
+        height: Quiet.px(60px * u);
+        HorizontalLayout {
+            x: 100px * u - parent.x;
+            y: 34px * u - parent.y;
+            height: 44px * u;
+            spacing: 17px * u;
+            alignment: start;
 
-        VerticalLayout {
-            alignment: center;
-            padding-top: 8px * u;
-            Rectangle {
-                width: 24px * u;
-                height: 24px * u;
-                Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 28;
-                    viewbox-height: 28;
-                    commands: "M4 3.8 L23.5 14 L4 24.2 Z";
-                    fill: transparent;
-                    stroke: #dedad1;
-                    stroke-width: 2.1px * u;
-                    stroke-line-join: round;
-                }
-                Path {
-                    width: 100%;
-                    height: 100%;
-                    viewbox-width: 28;
-                    viewbox-height: 28;
-                    commands: "M4 24.2 L13.2 14 L4 3.8";
-                    fill: transparent;
-                    stroke: #d5b992;
-                    stroke-width: 2.1px * u;
-                    stroke-line-join: round;
+            VerticalLayout {
+                alignment: center;
+                padding-top: 8px * u;
+                Rectangle {
+                    width: 24px * u;
+                    height: 24px * u;
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: 28;
+                        viewbox-height: 28;
+                        commands: "M4 3.8 L23.5 14 L4 24.2 Z";
+                        fill: transparent;
+                        stroke: #dedad1;
+                        stroke-width: 2.1px * u;
+                        stroke-line-join: round;
+                    }
+                    Path {
+                        width: 100%;
+                        height: 100%;
+                        viewbox-width: 28;
+                        viewbox-height: 28;
+                        commands: "M4 24.2 L13.2 14 L4 3.8";
+                        fill: transparent;
+                        stroke: #d5b992;
+                        stroke-width: 2.1px * u;
+                        stroke-line-join: round;
+                    }
                 }
             }
-        }
-        Text {
-            text: "MediaBox";
-            color: Quiet.ink;
-            font-size: 31px * u;
-            font-weight: 700;
-            letter-spacing: -31px * u * 0.05;
-            vertical-alignment: center;
-        }
-        if crumb != "": VerticalLayout {
-            alignment: center;
-            Rectangle {
-                width: 1px;
-                height: 17px * u;
-                background: Quiet.hair;
+            Text {
+                text: "MediaBox";
+                color: Quiet.ink;
+                font-size: 31px * u;
+                font-weight: 700;
+                letter-spacing: -31px * u * 0.05;
+                vertical-alignment: center;
             }
-        }
-        if crumb != "": Text {
-            text: crumb;
-            color: Quiet.muted;
-            font-size: 15px * u;
-            font-weight: 500;
-            vertical-alignment: center;
+            if crumb != "": VerticalLayout {
+                alignment: center;
+                Rectangle {
+                    width: 1px;
+                    height: 17px * u;
+                    background: Quiet.hair;
+                }
+            }
+            if crumb != "": Text {
+                text: crumb;
+                color: Quiet.muted;
+                font-size: 15px * u;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
         }
     }
+    Still {
+        x: Quiet.px(root.width - 1092px * u);
+        y: Quiet.px(26px * u);
+        width: Quiet.px(1000px * u);
+        height: Quiet.px(78px * u);
+        HorizontalLayout {
+            x: root.width - 100px * u - self.width - parent.x;
+            y: 30px * u - parent.y;
+            width: self.preferred-width;
+            height: 44px * u;
+            spacing: 14px * u;
 
-    HorizontalLayout {
-        x: root.width - 100px * u - self.width;
-        y: 30px * u;
-        width: self.preferred-width;
-        height: 44px * u;
-        spacing: 14px * u;
-
-        VerticalLayout {
-            alignment: center;
-            NetGlyph {
-                size: 22px * u;
-                eth-up: vitals.eth-up;
-                wifi-up: vitals.wifi-up;
-                bars: vitals.wifi-bars;
+            VerticalLayout {
+                alignment: center;
+                NetGlyph {
+                    size: 22px * u;
+                    eth-up: vitals.eth-up;
+                    wifi-up: vitals.wifi-up;
+                    bars: vitals.wifi-bars;
+                }
+            }
+            Text {
+                text: vitals.time;
+                color: Quiet.ink;
+                font-size: 27px * u;
+                font-weight: 600;
+                letter-spacing: -27px * u * 0.03;
+                vertical-alignment: center;
             }
         }
-        Text {
-            text: vitals.time;
-            color: Quiet.ink;
-            font-size: 27px * u;
-            font-weight: 600;
-            letter-spacing: -27px * u * 0.03;
-            vertical-alignment: center;
-        }
-    }
 
-    if details: HorizontalLayout {
-        x: root.width - 100px * u - self.width;
-        y: 78px * u;
-        width: self.preferred-width;
-        height: 20px * u;
-        spacing: 18px * u;
-        Presence {
-            mark: vitals.eth-up ? "M9 3.5h6v5H9z M3.5 15.5h6v5h-6z M14.5 15.5h6v5h-6z M12 8.5v3.5 M6.5 15.5V12h11v3.5"
-                : "M2.8 9.2a13.5 13.5 0 0 1 18.4 0 M5.9 12.6a9 9 0 0 1 12.2 0 M9 16a4.6 4.6 0 0 1 6 0 M11.2 19.4a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0";
-            text: vitals.eth-up ? "Ethernet" : vitals.wifi-up ? (vitals.wifi-ssid != "" ? vitals.wifi-ssid : "Wi-Fi") : "Ağ yok";
-            warn: !online;
-        }
-        Presence {
-            mark: "M4 6.5h16v11H4z M4 13.5h16 M16.5 15.6h.01";
-            text: vitals.storage-free == "" || vitals.storage-free == "—" ? "—"
-                : vitals.storage-low ? "Disk dolmak üzere · " + vitals.storage-free + " boş"
-                : vitals.storage-free + " boş";
-            warn: vitals.storage-low;
-        }
-        Presence {
-            mark: "M10 4.5a2 2 0 0 1 4 0v9.3a4 4 0 1 1-4 0z M12 10v6.5";
-            text: vitals.temperature == "" ? "—" : vitals.temperature-warm ? "Sıcak · " + vitals.temperature : vitals.temperature;
-            warn: vitals.temperature-warm;
+        if details: HorizontalLayout {
+            x: root.width - 100px * u - self.width - parent.x;
+            y: 78px * u - parent.y;
+            width: self.preferred-width;
+            height: 20px * u;
+            spacing: 18px * u;
+            Presence {
+                mark: vitals.eth-up ? "M9 3.5h6v5H9z M3.5 15.5h6v5h-6z M14.5 15.5h6v5h-6z M12 8.5v3.5 M6.5 15.5V12h11v3.5"
+                    : "M2.8 9.2a13.5 13.5 0 0 1 18.4 0 M5.9 12.6a9 9 0 0 1 12.2 0 M9 16a4.6 4.6 0 0 1 6 0 M11.2 19.4a.8.8 0 1 0 1.6 0a.8.8 0 1 0-1.6 0";
+                text: vitals.eth-up ? "Ethernet" : vitals.wifi-up ? (vitals.wifi-ssid != "" ? vitals.wifi-ssid : "Wi-Fi") : "Ağ yok";
+                warn: !online;
+            }
+            Presence {
+                mark: "M4 6.5h16v11H4z M4 13.5h16 M16.5 15.6h.01";
+                text: vitals.storage-free == "" || vitals.storage-free == "—" ? "—"
+                    : vitals.storage-low ? "Disk dolmak üzere · " + vitals.storage-free + " boş"
+                    : vitals.storage-free + " boş";
+                warn: vitals.storage-low;
+            }
+            Presence {
+                mark: "M10 4.5a2 2 0 0 1 4 0v9.3a4 4 0 1 1-4 0z M12 10v6.5";
+                text: vitals.temperature == "" ? "—" : vitals.temperature-warm ? "Sıcak · " + vitals.temperature : vitals.temperature;
+                warn: vitals.temperature-warm;
+            }
         }
     }
 }
