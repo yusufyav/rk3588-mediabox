@@ -321,7 +321,8 @@ export component QuietChoice inherits Rectangle {
         height: min(head-h + viewport + note-h + pad, root.height - 120px * u);
         x: (root.width - self.width) / 2;
         y: (root.height - self.height) / 2 + (1 - rise) * 28px * u;
-        // A layer for the opening only: at 1 there is no offscreen pass.
+        // A layer of its own for the opening only. (The rounded clip is one
+        // for as long as it is open, drawn again when something in it is.)
         opacity: rise;
         clip: true;
 

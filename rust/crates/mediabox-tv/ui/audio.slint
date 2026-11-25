@@ -106,12 +106,18 @@ export component AudioPane inherits Rectangle {
             property <bool> here: card.focused;
             function lift() {
                 if here {
-                    root.lit-h = one.height;
-                    root.lit-y = slot.y + one.y;
+                    root.lit-h = at-h;
+                    root.lit-y = at-y;
                 }
             }
+            // Where it is, too: the panel's mode changes under an open page
+            // (a trial of one, from the display's), and the card with it.
+            property <length> at-y: slot.y + one.y;
+            property <length> at-h: one.height;
             init => { lift(); }
             changed here => { lift(); }
+            changed at-y => { lift(); }
+            changed at-h => { lift(); }
             // The volume stands apart from the choices above it.
             if i == 4: Rectangle { height: gap * 0.6; }
             one := SettingCard {

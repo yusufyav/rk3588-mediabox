@@ -47,9 +47,12 @@ export component Kept inherits Rectangle {
 // (`Quiet.px`) and is as large as what it holds -- what of it stands outside
 // is not drawn.
 export component Still inherits Rectangle {
+    // Off, what it holds is drawn every frame: for what may grow past what a
+    // texture should be, as the texture is of all of it, not of what shows.
+    in property <bool> keep: true;
     x: 0;
     background: transparent;
-    cache-rendering-hint: true;
+    cache-rendering-hint: keep;
 }
 
 // The ground with its light, whole, over however small a rectangle.

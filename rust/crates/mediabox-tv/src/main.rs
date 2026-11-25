@@ -6092,7 +6092,6 @@ impl App {
         window.set_wifi_powered(wifi.powered);
         window.set_wifi_busy(wifi.busy);
         window.set_wifi_notice(wifi.notice.clone().into());
-        window.set_wifi_scanning(wifi.scanning);
         window.set_wifi_face(
             match wifi.face {
                 Face::List => "list",

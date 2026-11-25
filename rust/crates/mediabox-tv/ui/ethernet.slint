@@ -186,12 +186,18 @@ export component EthernetPane inherits Rectangle {
             function lift() {
                 if here {
                     root.on-cards = true;
-                    root.lit-h = one.height;
-                    root.lit-y = slot.y + one.y;
+                    root.lit-h = at-h;
+                    root.lit-y = at-y;
                 }
             }
+            // Where it is, too: the panel's mode changes under an open page
+            // (a trial of one, from the display's), and the card with it.
+            property <length> at-y: slot.y + one.y;
+            property <length> at-h: one.height;
             init => { lift(); }
             changed here => { lift(); }
+            changed at-y => { lift(); }
+            changed at-h => { lift(); }
             // The written address stands apart from the choice above it.
             if i == 1: Rectangle { height: gap * 0.6; }
             one := SettingCard {

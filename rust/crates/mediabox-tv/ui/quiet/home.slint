@@ -358,7 +358,11 @@ export component QuietHome inherits Rectangle {
             }
 
             // Kept: drawn when the focus moves, not while the scene does.
+            // Up to two windows of it: past that the rows out of the window,
+            // which the renderer leaves out, are most of them, and their
+            // texture would grow with the launcher to more than GL has.
             Still {
+                keep: content-h <= view-h * 2;
                 y: 0;
                 width: 100%;
                 height: Quiet.px(content-h);

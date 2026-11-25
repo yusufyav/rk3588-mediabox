@@ -42,22 +42,30 @@ component SettingsEmblem inherits Rectangle {
     animate notch { duration: snap ? 0ms : QuietMotion.t-camera; easing: QuietCurves.camera; }
     init => {
         notch = turn;
-        resting = QuietPlaces.emblem-size(camera.shrink);
-        standing = settled;
         snap = false;
+        // First: without motion it is there by the next line, and nothing
+        // has changed to be told of.
         root.shrink-to(small ? 1 : 0);
+        stand();
     }
     changed turn => { notch = turn; }
-    // In its place, at one of its sizes: assigned when that changes, not
-    // bound -- the camera is one value, and all that reads it is told of
-    // every part of it that moves.
-    property <bool> settled: camera.flight == 1 && (camera.shrink == 0 || camera.shrink == 1);
+    // In its place, and which of its two (-1 on its way): assigned when that
+    // changes, not bound -- the camera is one value, and all that reads it is
+    // told of every part of it that moves. The place is what is told apart,
+    // not only that it is in one: without motion it goes from one to the
+    // other with nothing between. How large that place is stays bound, for
+    // the panel's mode may change under it.
+    property <float> place: camera.flight == 1 && (camera.shrink == 0 || camera.shrink == 1) ? camera.shrink : -1;
     property <bool> standing;
-    property <length> resting: QuietPlaces.emblem-size(0);
-    changed settled => {
-        resting = QuietPlaces.emblem-size(camera.shrink);
-        standing = settled;
+    property <float> stands-at;
+    property <length> resting: QuietPlaces.emblem-size(stands-at);
+    function stand() {
+        standing = place >= 0;
+        if standing {
+            stands-at = place;
+        }
     }
+    changed place => { stand(); }
     changed small => { root.shrink-to(small ? 1 : 0); }
 
     x: QuietPlaces.emblem-x(camera.shrink) + (QuietPlaces.stage-x - QuietPlaces.emblem-x(camera.shrink)) * fly;
@@ -263,8 +271,15 @@ component CategoryColumn inherits Rectangle {
             y: i * pitch;
             width: root.width;
             height: row-h;
-            init => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
-            changed here => { if here { root.cat-w = min(root.width, line.preferred-width + 30px * u); } }
+            property <length> fit: min(root.width, line.preferred-width + 30px * u);
+            function lift() {
+                if here {
+                    root.cat-w = fit;
+                }
+            }
+            init => { lift(); }
+            changed here => { lift(); }
+            changed fit => { lift(); }
 
             // The arrow over another name: the wash fits the name, as the
             // reference draws it; the target is the whole width, so the hand
@@ -273,7 +288,7 @@ component CategoryColumn inherits Rectangle {
                 x: 0;
                 y: 0;
                 height: parent.height;
-                width: min(parent.width, line.preferred-width + 30px * u);
+                width: fit;
                 border-radius: self.height / 2;
                 background: !here && cat.lit ? Quiet.hover : transparent;
             }
