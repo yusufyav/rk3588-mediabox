@@ -466,6 +466,64 @@ Açılış sonrası renk durumu **[ölçüldü]**: `bus_format RGB888_1X24`,
   144 Hz'e geçti. Renk RGB, 8 bit. Bu iki modeset, iki ayrı mod seçiminin
   sonucu ve değişiklikten önce de vardı.
 
+### `color_depth` ile ilgili değişikliğin savunması
+
+**Ne değişti, ne değişmedi.**
+
+- `color_depth` için yeni bir karar kuralı **eklenmedi**. Değer eskiden de,
+  şimdi de aynı yerden geliyor: açılışta seçilen `ColorMode`
+  (`offer.colour(&setting, chosen)`) ve onun bit sayısının kaynak profildeki
+  vendor ABI karşılığı (`source.color_depth_value(colour.bits)`). İlk kare yolu
+  (`atomic_modeset`, `platform.rs`) ile eski yol (`signal_output_colour`) aynı
+  fonksiyonu çağırıyor.
+- Değişen yalnız **yazıldığı an ve yazılış biçimi**:
+  - Eski davranış: ilk kare `SETCRTC` ile property'siz kuruluyordu. Hemen
+    ardından `signal_output_colour`, `HDR_OUTPUT_METADATA`, `Colorspace`,
+    `color_depth` ve `color_format`'ı **ayrı ayrı** `set_property` ile, yani
+    her biri ayrı bir legacy commit olarak yazıyordu.
+  - Yeni davranış: dördü de UI'ın modunu kuran **tek atomic commit'in**
+    içinde, `TEST_ONLY` ile denendikten sonra yazılıyor. Ardından
+    `applied = colour` atanıyor; bu yüzden `signal_output_colour`'ın
+    `applied == format` erken dönüşü aynı değerleri bir daha yazmıyor.
+- `hdmi-prepare`'in sıfırlama bloğu `color_depth`'e hiçbir zaman dokunmadı;
+  bu değişiklikten sonra da dokunmuyor. Bu yüzden Kodi'nin bıraktığı
+  `color_depth`'i eskiden de UI düzeltiyordu, şimdi de UI düzeltiyor; fark
+  yalnız düzeltmenin artık modeset'le aynı commit'te olması.
+
+**Neden gerekliydi.** Script'teki ölçüm notuna göre bu sürücüde açılıştan
+sonraki ilk property yazımı, değer aynı olsa bile link'i yeniden eğitiyor. İlk
+karedeki property'ler moddan ayrı yazıldığında, ya seed (bugüne kadar) ya da
+UI'ın sonraki `set_property` çağrıları ayrı bir link olayı üretir. Hepsi modun
+commit'ine katıldığında açılışta tek olay kalıyor. Bu ölçüldü: B3, B5, B6, B8 ve
+B9'da fbdev'den sonra yalnız bir `final tmdsclk` satırı var.
+
+**Kanıt [ölçüldü].**
+
+| Durum | `color_depth` | Not |
+|---|---|---|
+| Soğuk açılış sonrası (B3) | 8 | `RGB888_1X24`, `color_format=0`, `Colorspace=0`; fbdev'den sonra tek link olayı |
+| Kodi açık, film yok | **10** | Kodi'nin kendi yazdığı değer |
+| Kodi'den UI'a dönüş | **8** | `first frame: mode and colour in one commit`; o test penceresinde dmesg'de modeset veya `final tmdsclk` **yok** |
+| Kodi HDR10 örneği → dönüş | 8 | HDR blob'u boş, SDR; dönüşteki tek modeset kristal saat düzeltmesinden (yukarıda) |
+| UI restart / tarayıcıdan dönüş | 8 | UI restart'ta modeset yok; tarayıcı 120 Hz kurduğu için dönüşte 144 Hz modeset (önceden de vardı) |
+
+**Bilinen sınırlar ve geri dönüş.**
+
+- `colour` değeri `None` ise (EDID yok ya da o modda SDR renk yok) atomic yol
+  hiç denenmiyor; eski `SETCRTC` yolu aynen çalışıyor. `hdmi-prepare` de EDID
+  yoksa `owner` modunda eskisi gibi sıfırlıyor.
+- Sürücü atomic commit'i reddederse UI bunu loglayıp
+  (`one commit refused (...); SETCRTC`) eski yola dönüyor. Bu dal cihazda
+  tetiklenmedi, yani çalıştığı ölçülmedi.
+- Değişiklikten sonra ilk karede `output colour` / `output format` log satırları
+  artık basılmıyor, çünkü değerler zaten uygulanmış durumda ve tekrar
+  yazılmıyor. Tel üzerindeki durum debugfs (`dri/0/summary`) ve
+  `modetest -c` ile doğrulandı.
+- 10 bit SDR seçilmiş bir ayarla (`colours` içinde 10 bit) açılış
+  denenmedi. Kod yolu aynı fonksiyonu kullanıyor, ama bu ölçülmedi.
+- Geri dönüş: `rollback.sh` (mediabox-tv binary'si). Unit tarafında
+  `MEDIABOX_HDMI_CONNECTOR_RESET=owner` kaldırılırsa eski sıfırlama geri gelir.
+
 ### Açık kalanlar
 
 - Ağsız durumda Medya sayfası boş kalıyor ve bir açıklama göstermiyor. Yerel
