@@ -1883,18 +1883,45 @@ impl SplitDisplay {
             {
                 // Nothing may be committed while the CRTC is set.
                 let mut s = self.hold();
-                let set = self.kms.set_crtc(
-                    self.crtc,
-                    Some(frame.framebuffer),
-                    (0, 0),
-                    &[self.connector.handle()],
-                    Some(self.wire_mode()),
-                );
-                if set.is_ok() {
+                // The mode and the connector's colour in one atomic commit:
+                // one link training. The kernel boots this connector at
+                // `color_format` ycbcr444 (measured on the Plus), so a first
+                // frame set without it was followed by a second training when
+                // the colour was written -- which is why the preparation used
+                // to write it at boot, and why the television resynchronised
+                // twice before the menu (docs/mediabox-boot-experience.md).
+                // Properties already as wanted are not changed by it; a driver
+                // that refuses it gets the plain SETCRTC below, as before.
+                let colour = self.colour.get();
+                let atomic = colour.is_some()
+                    && match self.atomic_modeset(frame.framebuffer, self.mode.get(), colour) {
+                        Ok(()) => {
+                            self.applied.set(colour);
+                            eprintln!("mediabox-tv.platform first frame: mode and colour in one commit");
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("mediabox-tv.platform first frame: one commit refused ({e}); SETCRTC");
+                            false
+                        }
+                    };
+                if atomic {
                     s.ui_on_panel = true;
+                    drop(s);
+                } else {
+                    let set = self.kms.set_crtc(
+                        self.crtc,
+                        Some(frame.framebuffer),
+                        (0, 0),
+                        &[self.connector.handle()],
+                        Some(self.wire_mode()),
+                    );
+                    if set.is_ok() {
+                        s.ui_on_panel = true;
+                    }
+                    drop(s);
+                    set.map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
                 }
-                drop(s);
-                set.map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             }
             self.presentation.borrow_mut().current = Some(frame);
         } else {
@@ -2305,20 +2332,22 @@ impl SplitDisplay {
             .as_ref()
             .map(|frame| frame.framebuffer);
         // The plane the interface is on: the one on this CRTC showing the
-        // frame on the panel now.
-        let plane = self
-            .kms
-            .plane_handles()
-            .map_err(|e| format!("planes: {e}"))?
-            .into_iter()
-            .find(|handle| {
-                self.kms.get_plane(*handle).is_ok_and(|plane| {
-                    plane.crtc() == Some(self.crtc)
-                        && current.is_some()
-                        && plane.framebuffer() == current
-                })
-            })
-            .ok_or("the interface's plane is not on the panel")?;
+        // frame on the panel now -- or, for the first frame, when nothing of
+        // the interface's is on the panel yet, this CRTC's primary.
+        let plane = match current {
+            Some(_) => self
+                .kms
+                .plane_handles()
+                .map_err(|e| format!("planes: {e}"))?
+                .into_iter()
+                .find(|handle| {
+                    self.kms.get_plane(*handle).is_ok_and(|plane| {
+                        plane.crtc() == Some(self.crtc) && plane.framebuffer() == current
+                    })
+                }),
+            None => crate::video::primary_plane(&self.kms, self.crtc),
+        }
+        .ok_or("the interface's plane is not on the panel")?;
         fn need<H: control::ResourceHandle>(
             kms: &SharedKms,
             object: H,

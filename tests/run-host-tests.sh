@@ -954,6 +954,7 @@ case "$1" in
   sway-output) if [ -s "$HP/swaymode" ]; then cat "$HP/swaymode"; else echo "# no current display plan"; fi ;;
   alsa-card) [ -s "$HP/card" ] && cat "$HP/card" ;;
   alsa-driver) [ -s "$HP/card" ] && echo rockchip-hdmi ;;
+  connector-path) [ -s "$HP/connpath" ] && cat "$HP/connpath" ;;
   *) ;;
 esac
 EOF
@@ -965,6 +966,7 @@ EOF
 cat >"$hp/bin/prepare" <<'EOF'
 #!/bin/sh
 echo "prepare boot-video=${MEDIABOX_HDMI_BOOT_VIDEO:-0} reset=${MEDIABOX_HDMI_CONNECTOR_RESET:-1}" >>"$HP/log"
+echo "${MEDIABOX_PLAN_WAIT:-unset}" >"$HP/planwait"
 exit 0
 EOF
 printf '#!/bin/sh\necho "swaymsg $* sock=${SWAYSOCK##*/}" >>"$HP/log"\n' >"$hp/bin/swaymsg"
@@ -1005,6 +1007,14 @@ check "seeding a headless boot records the disconnected state" "$(cat "$hp/run/s
 printf 'mediabox-tv-ui.service\n' >"$hp/active"; : >"$hp/log"
 printf '%s' "$on" >"$hp/outputs"; run_helper
 check "the first plug after a headless boot recovers the owner" "$(tr '\n' ';' <"$hp/log")" "$recover_ui"
+# 1b. Booted with a display: prepared without the connector reset and
+#     without waiting for a plan nobody can have written yet.
+: >"$hp/log"; printf '%s' "$on" >"$hp/outputs"; rm -f "$hp/run/stamp" "$hp/planwait"; : >"$hp/active"
+run_helper seed
+check "seeding a boot with a display does not reset the connector" "$(tr '\n' ';' <"$hp/log")" \
+  "prepare boot-video=1 reset=0;exit=0;"
+check "and does not wait for a plan" "$(cat "$hp/planwait")" "0"
+printf '%s' "$on_state" >"$hp/run/stamp"; printf 'mediabox-tv-ui.service\n' >"$hp/active"
 # 2. Nothing changed: no restart.
 check "an unchanged display restarts nothing" "$(changed "$on_state" "$on" mediabox-tv-ui.service)" "exit=0;"
 # 3-5. Whichever owner is active is the one recovered.
@@ -1196,6 +1206,29 @@ check "the YUV wire and HDR metadata Kodi left are cleared" "$(colour)" \
   "modetest -w 236:HDR_OUTPUT_METADATA:0;modetest -w 236:color_format:0;"
 check "nothing is committed to a connector an owner still holds" \
   "$(MEDIABOX_HDMI_CONNECTOR_RESET=0 colour)" ""
+# The interface commits the colour with its first frame, from the EDID; with
+# one, its preparation leaves the connector to it -- without one, it resets.
+printf '%s' "$hp/sys/card0-HDMI-A-2" >"$hp/connpath"; : >"$hp/sys/card0-HDMI-A-2/edid"
+check "an interface on a sink with no EDID still gets the reset" \
+  "$(MEDIABOX_HDMI_CONNECTOR_RESET=owner colour)" \
+  "modetest -w 236:HDR_OUTPUT_METADATA:0;modetest -w 236:color_format:0;"
+printf 'edid' >"$hp/sys/card0-HDMI-A-2/edid"
+check "an interface on a sink with an EDID commits the colour itself" \
+  "$(MEDIABOX_HDMI_CONNECTOR_RESET=owner colour)" ""
+: >"$hp/connpath"; rm -f "$hp/sys/card0-HDMI-A-2/edid"
+contains "the interface's preparation leaves the colour to it" \
+  "$(cat "$here/packaging/systemd/mediabox-tv-ui.service")" 'MEDIABOX_HDMI_CONNECTOR_RESET=owner'
+contains "and does not wait for a plan it is about to make possible" \
+  "$(cat "$here/packaging/systemd/mediabox-tv-ui.service")" 'MEDIABOX_PLAN_WAIT=0'
+
+# The television and the control plane do not wait for the network; the
+# streaming server, which is an online service, still does.
+unit_line() { grep -E "^$2=" "$here/packaging/systemd/$1.service" | tr '\n' ' '; }
+lacks "the interface is not ordered after the network" "$(unit_line mediabox-tv-ui After) $(unit_line mediabox-tv-ui Wants)" 'network-online'
+lacks "the media worker is not ordered after the streaming server" "$(unit_line mediabox-media-worker After)" 'stremio-server'
+contains "but still pulls it in" "$(unit_line mediabox-media-worker Wants)" 'stremio-server.service'
+lacks "the streaming server does not hold the control plane" "$(unit_line stremio-server Before)" 'mediaboxd-rs'
+contains "the streaming server still waits for the network" "$(unit_line stremio-server After)" 'network-online.target'
 
 # -- The fan's boot configuration ------------------------------------------
 # /boot/armbianEnv.txt decides whether the board boots, and its user_overlays

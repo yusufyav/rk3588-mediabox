@@ -370,6 +370,120 @@ kumandada herhangi bir tuş tanıtımı keser.
 
 ---
 
+## 4b. Uygulama (aynı PR) ve ölçülen sonuç
+
+### Ürün kararı (güncellendi)
+
+Kullanıcı, özgün bir sinematik açılış için Ana Menü'nün **birkaç saniye bilinçli
+olarak bekletilmesini kabul ediyor**. Teknik beklemeler (ağ, plan, gereksiz
+retrain) kaldırıldı. Gelecekteki marka videosu veya animasyonu, artık kısalmış
+sistem bekleme süresine sığdırılmak zorunda değil: tanıtım süresi bir ürün
+kararıdır ve ölçülen sistem hazırlığından bağımsız seçilir. Teknik taban
+(aşağıda ölçülen ≈ 13,4–14,2 s), tanıtımın en erken başlayabileceği noktadır;
+tanıtımın kendisi menüyü bundan sonra kasıtlı olarak geciktirebilir. Nihai logo,
+video veya animasyon bu aşamada üretilmedi.
+
+### Değişiklikler
+
+| Dosya | Değişiklik |
+|---|---|
+| `packaging/systemd/mediabox-tv-ui.service` | `network-online.target` `After=`/`Wants=`'ten çıktı. ExecStartPre: `MEDIABOX_PLAN_WAIT=0 MEDIABOX_HDMI_CONNECTOR_RESET=owner` |
+| `packaging/systemd/mediabox-media-worker.service` | `After=stremio-server.service` kaldırıldı (`Wants=` duruyor) |
+| `packaging/systemd/stremio-server.service` | `Before=mediaboxd-rs.service` kaldırıldı; kendisi `network-online` beklemeye devam ediyor |
+| `packaging/mediabox-display-changed` | `seed`: plan beklemesi 0, connector reset yok (`prepare 0`) |
+| `packaging/mediabox-hdmi-prepare` | `owner` modu: EDID varsa connector reset UI'a bırakılır, yoksa eskisi gibi çalışır. Yazılan property'ler loglanır (`connector-reset=…`) |
+| `rust/crates/mediabox-tv/src/platform.rs`, `video.rs` | UI'ın ilk karesi: mod + renk property'leri **tek atomic commit** (`atomic_modeset`); reddedilirse eski `SETCRTC` |
+| `tests/run-host-tests.sh` | 11 yeni kontrol: seed'in plan ve reset'i, `owner` modu (EDID var/yok), birim sıralaması |
+
+Sistem genelindeki wait-online mekanizmasına dokunulmadı; Stremio hâlâ onu
+bekliyor. Kodi'nin ExecStartPre'si (plan 3 s, reset=1) ve hotplug kurtarma yolu
+değişmedi.
+
+Retrain'in nedeni ölçüldü: kernel connector'ı açılışta `color_format=1`
+(ycbcr444) bırakıyor; seed bunu rgb'ye yazınca link yeniden eğitiliyordu
+(`connector-reset=color_format(1)`). UI'ın ilk karesi eskiden `SETCRTC` ile
+property'siz kuruluyordu, bu yüzden sıfırlama önceden yapılmak zorundaydı. Artık
+property'ler UI'ın modeset'iyle aynı commit'te.
+
+Dolaylı beklemeler incelendi:
+
+- mediaboxd-rs açılışta ağ beklemiyor. `--lan-http 0.0.0.0` adresi ağ olmadan
+  da bağlanıyor.
+- media-worker başlangıçta upstream'e gitmiyor; Stremio'ya her istek ayrı
+  soruluyor.
+- UI katalog yükleyicisi 1, 2, 4, 8 s, ardından 15 s aralıkla yeniden deniyor
+  ve yalnız bir katalog satırı geldiğinde duruyor.
+
+Bu üçünde kod değişikliği gerekmedi.
+
+### Önce / sonra (`T_k`, kernel saati, §1 ile aynı eksen)
+
+| Açılış | Ağ | UI başlangıcı | İlk kare | **144 Hz modeset (Ana Menü)** | Kablo olayları (fbdev sonrası) |
+|---|---|---:|---:|---:|---|
+| A0 (önce) | yok | 27,98 | 33,34 | **33,39** | 60 Hz (8,2) + retrain (13,9) + 144 Hz |
+| A1 (önce) | var | 16,79 | 21,96 | **22,04** | retrain (14,5) + 144 Hz |
+| B2 (yalnız birimler + plan) | var | 11,56 | 13,62 | **13,70** | retrain (11,1) + 144 Hz |
+| B3 (tam) | var | 11,32 | 13,37 | **13,45** | yalnız 144 Hz |
+| B5 (tam) | yok | 11,83 | 13,81 | **13,89** | yalnız 144 Hz |
+| B6 (tam) | yok | 11,91 | 13,85 | **13,94** | yalnız 144 Hz |
+| B8 / B9 (tam) | yok | 11,99 / 12,09 | — | **14,04 / 14,22** | yalnız 144 Hz |
+
+**[ölçüldü]** Ana Menü, ağlı açılışta 22,0 s'den 13,45 s'ye, ağsız açılışta
+33,4 s'den 13,9–14,2 s'ye indi. Kernel'in fbdev modeset'inden sonra kabloya
+giden tek olay UI'ın 144 Hz modeset'i. Raporun önceki sürümündeki 12–13 s
+tahmini gerçekleşmedi; ölçülen değer 13,4–14,2 s. Kalan yol: systemd 6,1 s →
+seed ≈ 1,0–1,1 s → daemon → UI süreci → ilk kare ≈ 1,1 s.
+
+Açılış sonrası renk durumu **[ölçüldü]**: `bus_format RGB888_1X24`,
+`color_format=0`, `Colorspace=0`, `color_depth=8`. UI logunda
+`first frame: mode and colour in one commit` satırı görülüyor.
+
+### Ağsız açılış, sonradan gelen ağ ve regresyonlar [ölçüldü]
+
+- **Yöntem:** Wi-Fi tek yönetim yolu olduğu için ağ kapatılmadı. Bunun yerine
+  geçici bir drop-in ile `wpa_supplicant` 60 s geç başlatıldı. Birim
+  `Type=simple` olduğu için hemen active oluyor ve `network.target` bekletilmiyor.
+  SSH yaklaşık 75 s sonra kendiliğinden geri geldi. İlk denemede `ExecStartPre`
+  içinde `sleep` kullanılmıştı; bu, `network.target`'ı da beklettiği için ölçüm
+  geçersiz sayıldı (B4, tabloda yok). Test birimleri sonra kaldırıldı.
+- **Ağ yokken (B7, cihazdaki sürücüyle ekran görüntülü):** Ana Menü, Medya
+  ekranı ve Ayarlar açıldı. Daemon `up` 10,5 s'den itibaren yanıt verdi.
+- **Ağ geldikten sonra:** DHCP 73,4 s'de geldi. UI yükleyicisi 8. denemesinde
+  (76,2 s) kataloğu aldı: 15 satır, kitaplık dışında 204 öğe. Hiçbir servis
+  restart edilmedi; dört servisin hepsinde `NRestarts=0`.
+- **UI restart:** Modeset ve retrain yok. fdstore devri korundu
+  (`took back` … `kept display device is closed`). İlk kare 740 ms'de geldi.
+- **Kodi'ye geçiş ve dönüş (film yok):** Modeset yok. Kodi'nin bıraktığı
+  `color_depth=10`, UI'ın ilk commit'inde 8'e döndü.
+- **Kodi'de HDR10 örneği (yerel dosya) ve dönüş:**
+  - Dönüşte renk RGB, 8 bit, SDR; HDR blob'u boş.
+  - Dönüşte bir 144 Hz modeset oldu (`tmdsclk 583593`). Nedeni UI'ın kristal
+    hatası düzeltmesi: UI, Kodi'nin bıraktığı 583600 kHz yerine 583593 kHz
+    istiyor. Eski `SETCRTC` yolu da aynı `wire_mode()` saatini kullandığı için
+    bu davranış değişiklikle gelmedi (kod okumasıyla; eski binary ile karşılaştırma
+    yapılmadı).
+- **Tarayıcı ve dönüş:** Tarayıcı kendi planıyla 120 Hz kurdu; dönüşte UI
+  144 Hz'e geçti. Renk RGB, 8 bit. Bu iki modeset, iki ayrı mod seçiminin
+  sonucu ve değişiklikten önce de vardı.
+
+### Açık kalanlar
+
+- Ağsız durumda Medya sayfası boş kalıyor ve bir açıklama göstermiyor. Yerel
+  kitaplık ayrı uç noktadan ve ayrı sekmeden çalışıyor; ağsız açılışlarda
+  `library failed` görülmedi. Ana sayfa raflarına bilerek konmadığı için bu
+  davranış değişiklikten önce de vardı. Bir worker düzeltmesi denendi; TV'ye
+  etkisi olmadığı için geri alındı.
+- `hdmi-prepare` satır 113'teki `[ ! -s edid ]` kontrolü sysfs'te her zaman
+  doğru dönüyor; bu yüzden her çağrıda bir `detect` yazılıyor. Bu da değişiklikten
+  önce vardı ve gözlenen bir etkisi yok; kapsam dışı bırakıldı.
+- `mediabox-tv` host testlerinde `hit::gl::a_kept_drawing_is_not_drawn_for_every_frame`
+  tam paralel koşuda bir kez zaman aşımına düştü; tek başına iki kez geçti.
+  `platform.rs` sunum yolunu kullanmıyor.
+- **Rollback:** Asıl rollback kopyaları cihazda
+  `/root/mediabox-verify/boot-experience/rollback-20261126-*/` ve
+  `/opt/rk3588-mediabox/rollback/only-20261126T080958Z/rollback.sh`
+  (mediabox-tv) altında.
+
 ## 5. Doğrulanamayan hususlar
 
 - Güç → ilk fiziksel görüntü süresi, monitörün sinyale kilitlenme süresi ve

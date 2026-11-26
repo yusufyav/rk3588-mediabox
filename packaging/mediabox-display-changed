@@ -124,8 +124,21 @@ prepare() {
 if [ "${1:-}" = seed ]; then
   now="$(outputs)"
   printf '%s' "$now" >"$STAMP"
+  # No waiting for the display plan here. The control plane writes it and is
+  # ordered after this unit, and it can only write one from an observer that
+  # has read the display under someone's DRM master -- nobody's yet, at boot.
+  # The preparation's default three seconds were spent on every cold boot
+  # measured, before the interface could start (plan=stale).
+  export MEDIABOX_PLAN_WAIT=0
   if connected "$now"; then
-    prepare
+    # And no connector reset. Nobody has drawn on the display since the kernel
+    # set it up, so there is nothing an owner left behind to clear, and the
+    # write was a link training of its own, three seconds before the
+    # interface's mode (measured on the Plus: `final tmdsclk` with no modeset,
+    # connector-reset=color_format(1)). Whoever starts first puts the
+    # connector right: the interface in its first commit, Kodi and the browser
+    # in their own preparation.
+    prepare 0
     say "açılışta bağlı ekran kaydedildi"
   else
     # Nothing to prepare for, but a boot argument an older version left must

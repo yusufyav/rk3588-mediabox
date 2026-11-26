@@ -391,8 +391,29 @@ echo "mediabox-hdmi-prepare: output=$connector card=${alsa_card:-unrouted}" \
 # under whoever has it. mediabox-display-changed runs the rest of this script
 # for a browser that stays up across a replug and asks for this part to be
 # left out with MEDIABOX_HDMI_CONNECTOR_RESET=0.
+#
+# `MEDIABOX_HDMI_CONNECTOR_RESET=owner` is the interface's: it commits these
+# properties itself, with its mode, in the one atomic commit of its first
+# frame -- from the colour it works out of the sink's EDID. Written here as
+# well, they were a second link training: the kernel boots the connector at
+# color_format ycbcr444, so this block wrote it on every cold boot, and the
+# television resynchronised once for that and again for the interface's mode
+# (measured on the Plus, docs/mediabox-boot-experience.md). So with an EDID it
+# is left to the interface; without one the interface has no colour to commit,
+# and this block runs as before.
 MODETEST="${MEDIABOX_MODETEST:-/usr/bin/modetest}"
-if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ] && [ "${MEDIABOX_HDMI_CONNECTOR_RESET:-1}" = 1 ]; then
+connector_reset="${MEDIABOX_HDMI_CONNECTOR_RESET:-1}"
+if [ "$connector_reset" = owner ]; then
+  # Read, not `-s`: sysfs reports the EDID attribute's size as 0 whatever it
+  # holds (measured on the Plus).
+  if [ -n "$connector_path" ] && [ "$(head -c 128 "$connector_path/edid" 2>/dev/null | wc -c)" -gt 0 ]; then
+    connector_reset=0
+    echo "mediabox-hdmi-prepare: connector-reset=owner" >&2
+  else
+    connector_reset=1
+  fi
+fi
+if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ] && [ "$connector_reset" = 1 ]; then
   listing="$("$MODETEST" -M rockchip -c 2>/dev/null || true)"
   conn=$(printf '%s\n' "$listing" \
     | awk -v want="$connector" '$3 == "connected" && $4 == want { print $1; exit }')
@@ -407,10 +428,18 @@ if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ] && [ "${MEDIABOX_HDMI_CONNECTOR_RESET
       /^\t\tvalue:/ { if (blob) { val[name] = 0; bytes = 1 } else val[name] = $2; next }
       bytes && /^\t\t\t[0-9a-f]+$/ { val[name] = 1; next }
       END { for (n in val) print n "=" val[n] }')"
+    # Which ones were written is said, with what they were: every write
+    # re-trains the link, and a re-train nobody can account for is a black
+    # television nobody can account for.
+    written=""
     reset() {
       case "$props" in
         *"$1=0"*) ;;
-        *) "$MODETEST" -M rockchip -w "$conn:$1:0" >/dev/null 2>&1 || true ;;
+        *)
+          "$MODETEST" -M rockchip -w "$conn:$1:0" >/dev/null 2>&1 || true
+          was="$(printf '%s\n' "$props" | sed -n "s/^$1=//p" | head -1)"
+          written="${written:+$written,}$1(${was:-absent})"
+          ;;
       esac
     }
     reset Colorspace
@@ -418,6 +447,7 @@ if [ "${MEDIABOX_HDMI_KEEP_HDR:-0}" != 1 ] && [ "${MEDIABOX_HDMI_CONNECTOR_RESET
     # rgb=0 in this driver's enum. Set last, so a refusal of either of the two
     # above does not stop the wire going back to RGB.
     reset color_format
+    echo "mediabox-hdmi-prepare: connector-reset=${written:-none}" >&2
   fi
 fi
 exit 0

@@ -251,6 +251,19 @@ fn stack_interface<D: ControlDevice>(
     None
 }
 
+/// The CRTC's primary plane: the one the interface's frames go on.
+pub fn primary_plane<D: ControlDevice>(
+    device: &D,
+    crtc: control::crtc::Handle,
+) -> Option<control::plane::Handle> {
+    let resources = device.resource_handles().ok()?;
+    device.plane_handles().ok()?.into_iter().find(|handle| {
+        device.get_plane(*handle).is_ok_and(|info| {
+            resources.filter_crtcs(info.possible_crtcs()).contains(&crtc) && is_primary(device, *handle)
+        })
+    })
+}
+
 fn is_primary<D: ControlDevice>(device: &D, plane: control::plane::Handle) -> bool {
     let Ok(properties) = device.get_properties(plane) else {
         return false;
