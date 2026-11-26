@@ -150,8 +150,7 @@ fn app_mark(id: &str) -> (&'static str, f32) {
     }
 }
 
-/// One line on what this interface's own tiles are for, under the name
-/// where a face of the home screen has room for it (Quiet OS). Every other
+/// One line on what this interface's own tiles are for. Every other
 /// application says it itself, in the control plane's `summary`.
 fn about_of(id: &str) -> &'static str {
     match id {

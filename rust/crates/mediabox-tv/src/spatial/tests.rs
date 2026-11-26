@@ -28,6 +28,11 @@ pub fn start_with(ui: &MediaBoxWindow, text: &str) {
     start(ui, lab::parse(text).expect("a scene"));
 }
 
+/// The product's own.
+pub fn start_product(ui: &MediaBoxWindow) {
+    start(ui, Shown::product());
+}
+
 pub fn fault(fault: Option<Fault>) {
     FAULT.set(fault);
 }
@@ -42,6 +47,8 @@ pub struct State {
     pub slots: usize,
     pub bytes: u64,
     pub objects: u32,
+    /// Scenes whose shaders and geometry are there.
+    pub made: usize,
     pub failed: usize,
     pub refused: usize,
 }
@@ -56,6 +63,7 @@ pub fn state() -> State {
             slots: on.map_or(0, |on| on.slots.len()),
             bytes: on.map_or(0, |on| on.gpu.held()),
             objects: on.map_or(0, |on| on.gpu.objects()),
+            made: on.map_or(0, |on| on.scenes.len()),
             failed: stage.failed.len(),
             refused: stage.refused.len(),
         }
@@ -68,6 +76,67 @@ pub fn budget(change: impl FnOnce(&mut Budget)) {
     stage(|stage| change(&mut stage.shown.budget)).expect("started");
 }
 
+/// Every emblem all along its way, each plane at its own offset: the most that
+/// is drawn at the edge of its place, and how much of it there is inside, in
+/// levels. In the context that is current.
+pub fn emblem_edges(mut told: impl FnMut(&str, f32, u8, usize)) {
+    use glow::HasContext;
+    let gpu = Gpu::new(1 << 30).expect("GLES 3");
+    let gl = &gpu.gl;
+    let mut tools = None;
+    let scratch = Scratch::default();
+    for model in emblem::Model::ALL {
+        let scene = Kind::Emblem(model).make(&gpu, &mut tools).expect("a model").expect("a scene");
+        for step in -8..=8 {
+            let d = step as f32 / 10.0;
+            for (far, near) in [(d, d), (d * 1.2, d * 0.6), (d * 0.7, d * 1.2)] {
+                let fade = |d: f32, reach: f32| (1.0 - d.abs() / reach).max(0.0);
+                let cam = Cam {
+                    d,
+                    d_far: far,
+                    d_near: near,
+                    f_main: fade(d, 0.9),
+                    f_far: fade(far, 1.0),
+                    f_near: fade(near, 0.65),
+                    tint: [0.66, 0.71, 0.75, 1.0],
+                    ink: [0.8, 0.8, 0.8, 1.0],
+                    glow: [0.9, 0.9, 0.9, 1.0],
+                    x: 800.0,
+                    y: 800.0,
+                    size: 400.0,
+                    line: 2.0,
+                    fine: 2.0,
+                    depth: 1.0,
+                    parallax: 1.0,
+                    travel: 1.0,
+                    panel: (2000.0, 2000.0),
+                    scale: 2.0,
+                };
+                let place = Kind::Emblem(model).place(&cam);
+                let size = (place.w, place.h);
+                scratch
+                    .with(&gpu, size, (1, true), |target| {
+                        target.begin(gl, size);
+                        scene.draw(&gpu, &cam, &place, &mut Drawn::default());
+                        let mut pixels = vec![0u8; (size.0 * size.1 * 4) as usize];
+                        // SAFETY: the context is current, the buffer as large as what is read.
+                        unsafe {
+                            gl.read_pixels(0, 0, size.0, size.1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+                        }
+                        let at = |x: i32, y: i32| pixels[((y * size.0 + x) * 4 + 3) as usize];
+                        let across = (0..size.0).map(|x| at(x, 0).max(at(x, size.1 - 1)));
+                        let down = (0..size.1).map(|y| at(0, y).max(at(size.0 - 1, y)));
+                        let inside = pixels.as_chunks::<4>().0.iter().filter(|p| p[3] > 8).count();
+                        told(model.id(), d, across.chain(down).max().unwrap_or(0), inside);
+                        Ok(())
+                    })
+                    .expect("drawn");
+            }
+        }
+    }
+    gpu.well().expect("no error on the way");
+}
+
 #[test]
 fn a_scene_is_asked_for_in_words_and_bounded() {
     let config = lab::Config::parse("stress,particles=20000 objects=64,msaa=1 full run on=a+b\n").unwrap();
@@ -77,6 +146,11 @@ fn a_scene_is_asked_for_in_words_and_bounded() {
     // The product knows its own scenes and nothing of the laboratory's.
     assert_eq!(Shown::parse("globe").unwrap().kind("browser"), Some(Kind::Globe));
     assert_eq!(Shown::parse("globe").unwrap().kind("kodi"), None);
+    let cooling = Some(Kind::Emblem(emblem::Model::Cooling));
+    assert_eq!((Shown::product().kind("emblem/cooling"), Shown::product().kind("browser")), (cooling, None));
+    assert_eq!((Shown::product().kind("cooling"), Shown::parse("off").unwrap().kind("emblem/cooling")), (None, None));
+    // Another's name for all of them is the launcher's.
+    assert_eq!(lab::parse("globe on=*").unwrap().kind("emblem/cooling"), None);
     assert!(Shown::parse("stress").is_none());
 }
 
@@ -114,8 +188,8 @@ fn the_budget_takes_a_scene_for_what_it_was_measured_to_be() {
 
 #[test]
 fn a_kind_is_its_number() {
-    for kind in [Kind::Globe, Kind::Nothing, Kind::Advanced] {
+    for kind in [Kind::Globe, Kind::Nothing, Kind::Advanced].into_iter().chain(emblem::Model::ALL.map(Kind::Emblem)) {
         assert_eq!(Kind::of(kind.number()), Some(kind));
     }
-    assert_eq!(Kind::of(0), None);
+    assert_eq!((Kind::of(0), Kind::of(Kind::EMBLEMS + emblem::Model::ALL.len() as i32)), (None, None));
 }

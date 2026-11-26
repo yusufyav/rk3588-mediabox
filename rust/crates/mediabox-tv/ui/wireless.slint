@@ -304,6 +304,8 @@ component Frame inherits Rectangle {
     in property <int> section;
     // The screen draws its own instrument where the emblem stands.
     in property <bool> instrument;
+    // The emblem, by its own id, where it does not.
+    in property <string> scene;
 
     // Quiet OS: the settings' own frame (quiet/settings.slint), the list in its
     // content column.
@@ -318,6 +320,7 @@ component Frame inherits Rectangle {
         active: false;
         pointer-zone: "settings-sections";
         emblem: !root.instrument;
+        scene: root.scene;
         page-label: root.page;
         page-icon: root.page-icon;
         overline: "AYARLAR  /  BAĞLANTILAR";
@@ -691,6 +694,7 @@ export component WifiScreen inherits Rectangle {
         page-icon: "wifi";
         title: root.target;
         blurb: notice != "" ? notice : details-status;
+        scene: "wifi";
         vitals: root.vitals;
         sections: root.sections;
         section: root.section;

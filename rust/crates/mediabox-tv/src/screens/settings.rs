@@ -182,6 +182,20 @@ impl Page {
         }
     }
 
+    /// Its own name for the interface's machinery, never shown: the emblem
+    /// drawn beside it goes by it (ui/quiet/emblems.slint).
+    pub fn id(self) -> &'static str {
+        match self {
+            Page::Playback => "playback",
+            Page::Account => "account",
+            Page::Cec => "cec",
+            Page::Output => "output",
+            Page::Cooling => "cooling",
+            Page::Audio => "audio",
+            Page::Ethernet => "ethernet",
+        }
+    }
+
     fn index(self) -> usize {
         self as usize
     }
@@ -346,6 +360,8 @@ impl Row {
 }
 
 pub struct Group {
+    /// As `Page::id`: what it is, whatever it is called and wherever it stands.
+    pub id: &'static str,
     pub title: String,
     pub blurb: &'static str,
     pub icon: &'static str,
@@ -544,6 +560,14 @@ impl Settings {
             Some(Page::Ethernet) => self.ethernet.title().to_string(),
             Some(page) => page.title().to_string(),
             None => String::new(),
+        }
+    }
+
+    /// What is on screen, by its own id: the page, or the category.
+    pub fn scene(&self) -> &'static str {
+        match self.page() {
+            Some(page) => page.id(),
+            None => self.groups.get(self.section).map_or("", |group| group.id),
         }
     }
 
@@ -1764,6 +1788,7 @@ fn compose(
 
     vec![
         Group {
+            id: "media",
             title: "Medya".into(),
             blurb: "Oynatma ve hesap ile ilgili ayarlar",
             icon: "play",
@@ -1777,6 +1802,7 @@ fn compose(
             ],
         },
         Group {
+            id: "picture",
             title: "Görüntü ve Ses".into(),
             blurb: "Ekran çözünürlüğü, renk ve ses çıkışı",
             icon: "monitor",
@@ -1787,6 +1813,7 @@ fn compose(
             ],
         },
         Group {
+            id: "links",
             title: "Bağlantılar".into(),
             blurb: "Ağ ve kablosuz bağlantılar",
             icon: "wifi",
@@ -1800,24 +1827,28 @@ fn compose(
             .collect(),
         },
         Group {
+            id: "remote",
             title: "TV ve Kumanda".into(),
             blurb: "Televizyonu HDMI-CEC ile yönetin",
             icon: "remote",
             rows: tv_and_remote(status),
         },
         Group {
+            id: "live",
             title: "Canlı TV".into(),
             blurb: "Uydu alıcısının açılışı ve sinyal kaybı",
             icon: "tv",
             rows: live_tv(status),
         },
         Group {
+            id: "device",
             title: "Cihaz".into(),
             blurb: "Led ve soğutma",
             icon: "chip",
             rows: device,
         },
         Group {
+            id: "system",
             title: "Sistem".into(),
             blurb: "Arayüz düzeni, sürüm, yeniden başlatma ve kapatma",
             icon: "info",
@@ -1840,6 +1871,7 @@ fn compose(
             ],
         },
         Group {
+            id: "diagnostics",
             title: "Tanılama".into(),
             blurb: "İşlemci, bellek, sıcaklık, ekran ve servisler",
             icon: "bars",

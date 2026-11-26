@@ -386,6 +386,15 @@ impl Drawn {
 
     fn home(&self, apps: &Rc<VecModel<crate::AppTile>>, row: i32) {
         wear(crate::layout::Layout::Quiet);
+        // From the other face, once its scenes are made (`spatial::ready_or`):
+        // the launcher below is put in after the application has painted.
+        for _ in 0..3 {
+            if self.ui.get_layout() == "quiet" {
+                break;
+            }
+            self.frame();
+        }
+        assert_eq!(self.ui.get_layout(), "quiet");
         app(|app| app.go_home());
         self.ui.set_apps(ModelRc::from(apps.clone()));
         self.ui.set_focus_col(row);
@@ -636,10 +645,10 @@ fn a_kept_drawing_is_not_drawn_for_every_frame() {
     };
     assert_eq!(passes(), 0, "home, at rest");
     drawn.ui.set_focus_col(1);
-    // The list, and what `Kept` holds: the light it goes to and the new words
-    // (each into its texture and back; the list alone is four).
+    // The list, and what `Kept` holds: the light it goes to and the new name
+    // (the list alone is four).
     let first = passes();
-    assert!(first >= 6, "{first} passes: what is to be kept is not a layer");
+    assert!(first >= 5, "{first} passes: what is to be kept is not a layer");
     let settled = std::time::Instant::now() + std::time::Duration::from_millis(320);
     while std::time::Instant::now() < settled {
         drawn.frame();

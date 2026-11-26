@@ -16,10 +16,10 @@
 1. **Renderer FemtoVG kalır.** Skia GPU 3,3× CPU komutu, 3,7× GPU çevrimi ister
    ve karelerin ~%20'sini kaçırır. Kodu ve bağımlılıkları çıkarıldı (`f3a3810`'da
    durur); ölçümleri bölüm 1'dedir.
-2. **Karmaşık sahneler GPU-resident olur** (`src/spatial`). Ürün ikilisindedir ve
-   varsayılan olarak **hiçbir sahneyi çizmez**: görünüm ve bugünkü Slint sahneleri
-   değişmedi. `MEDIABOX_TV_SPATIAL=globe` Tarayıcı küresini GPU'dan çizer; kalıcı
-   açmak bir tasarım kararıdır.
+2. **Karmaşık sahneler GPU-resident olur** (`src/spatial`). Üründe ayarların
+   gövdeli amblemlerini çizer (bölüm 9); Ana Menü sahneleri Slint'indir.
+   `MEDIABOX_TV_SPATIAL=globe` Tarayıcı küresini de GPU'dan çizer, `off` hiçbirini;
+   ikisi de karşılaştırma içindir. Bölüm 1–8 amblemlerden öncedir.
 3. **AFBC taraması bu libmali ile mümkün değil.** RGA, NPU, VPU: kapsam dışı.
 
 Ürün dışı: `spatial-lab` (yük sahneleri, kontrol dosyası, hata enjeksiyonu) ve
@@ -416,6 +416,121 @@ bağlamda ad silme, GL durumu, karenin sırası, bütçe, azaltılmış hareket.
 **Merge.** Bilinen engel yok: varsayılan üründe görünüm ve maliyet A ile aynı, yeni yol kapalı.
 Karar kullanıcınındır; GPU sahnesini kalıcı açmak ayrı bir karardır. Merge edilmedi, Golden
 yayınlanmadı.
+
+## 9. Spatial Refinement: ikonlar ve ayar amblemleri
+
+Ana Menü'de seçili uygulamanın açıklaması kalktı; "kurulu değil" durumu başlığın altında
+kaldı. Başlık sahnenin ortasına hizalandı (72 tasarım pikseli aşağı).
+
+**İkonlar** (`ui/quiet/marks.slint`, Slint). Bir hareket 0→1 tek sayıdır ve iki ucunda da
+ikon tam olarak eski ikondur: dişli bir diş (45°), film bir kare, küre iki meridyen arası
+kadar döner; Canlı TV'de iki dalga çıkar; Kodi'nin dört parçası sırayla toplanır; tanınmayan
+uygulama hafifçe küçülüp geri gelir. Seçilen satırın ve bırakılanın ikonu önbellekli listenin
+(`Still`) **üstünde** çizilir: hareket ederken liste yeniden rasterize edilmez (testli).
+Dinlenmedeki beş ikon cihazda önceki kareyle piksel piksel aynıdır.
+
+**Amblemler** (`ui/quiet/emblems.slint`, `src/spatial/emblem.rs`). Sahne, `Group::id` ve
+`Page::id` ile seçilir; sıra numarası veya görünen başlıkla değil.
+
+| Yer | Kimlik | Sahne | Çizen |
+|---|---|---|---|
+| Medya | `media` | karşılıklı dönen iki makara, film şeridi | GPU |
+| Görüntü ve Ses | `picture` | katmanlı ekran, önünden çıkan halkalar | GPU |
+| Bağlantılar · Tanılama/Ağ | `links` | düğümler, aralarında akan veri | GPU |
+| TV ve Kumanda | `remote` | kumanda, televizyon, aralarındaki dalga | GPU |
+| Canlı TV | `live` | uydu, yörünge, çanak, demet | GPU |
+| Cihaz | `device` | kart, soğutucu, ledler | GPU |
+| Sistem · Tanılama/Makine | `system` | işlemci ve devresi | GPU |
+| Tanılama | `diagnostics` | örgünün üstünde büyüteç | GPU |
+| Görüntü ve Ses/Ekran · Tanılama/Ekran ve GPU | `output` | kafes, filtre, ön cam; geçen ışık | GPU |
+| Görüntü ve Ses/Ses | `audio` | koni halkaları, içinden geçen dalga | GPU |
+| Cihaz/Soğutma | `cooling` | çerçevesinde fan | GPU |
+| Tanılama/Depolama | `storage` | plakalar ve kol | GPU |
+| Medya/Oynatma · Tanılama/Oynatma | `playback` | kareler ve oynat işareti | Slint |
+| Medya/Hesap | `account` | kimlik, çevresinde eklentiler | Slint |
+| TV ve Kumanda/HDMI-CEC · Tanılama/CEC | `cec` | kabloyla bağlı iki cihaz, geçen işaret | Slint |
+| Bağlantılar/Ethernet | `ethernet` | soket, kontaklar, bükümlü çift | Slint |
+| Bağlantılar/Wi-Fi ağ sayfası | `wifi` | derinliğe ayrılan dalgalar | Slint |
+| Tanılama/Servisler | `services` | birbirine oturan modüller | Slint |
+
+Wi-Fi ve Bluetooth listeleri ile Tanılama/Makine kendi enstrümanını çizer (`emblem: false`
+değişmedi). Akan ışık ve dalga yalnız geçiş sırasında vardır, ölçüm değildir.
+
+- **Geçiş**: sahneler bir deste üstündedir (`QuietDeck`): eskisi geldiği yöne çıkar, yenisi
+  ters yönden katmanlarıyla toplanır. Kuyruk yok: yarı yolda dönülürse bırakılan sahneye
+  döner; sahne daha yeni giriyorsa yerini yenisi alır. Ayarlara uçuşta dişli mekanizma
+  durur, yerine varırken sahneye dönüşür; dönüşte tersi.
+- **GPU**: 12 model, iki ortak program (gövde, çizgi), instancing; geometri 0,84 MB.
+  Bütün dokular tek boydur (4K'da 880²). Her modelin Slint sahnesi geri dönüş olarak durur.
+- Kesilme testi: her model yolunun tamamında kendi yerinin içinde (testte üç model kesiliyordu, düzeltildi).
+
+### Ölçüm — Plus, 3840x2160p60
+
+A: kurulu main (`25b8bd8d`), R: bu dal. Ana Menü ve `category-repeat` 2'şer, diğerleri A 1 · R 2 tur.
+
+| Senaryo | Mkomut/kare A → R | GPU Mçevrim (hw) A → R | GPU ms/kare A → R | kaçan vblank A · R | GPU MB A → R |
+|---|---|---|---|---|---|
+| film-live | 3,84 → 3,89 | 2,11 → 2,11 | 3,98 → 3,87 | 9/1629 · 9/1641 | 50 → 50 |
+| repeat | 5,18 → 5,10 | 2,54 → 2,62 | 3,52 → 3,30 | 3/401 · 0/398 | 50 → 50 |
+| reverse | 5,62 → 5,52 | 2,50 → 2,48 | 3,67 → 3,40 | 2/485 · 1/489 | 50 → 50 |
+| home-settings | 3,56 → 3,26 | 1,73 → 1,84 | 4,14 → 4,02 | 0/363 · 0/727 | 54 → 68 |
+| category | 1,98 → 2,21 | 1,30 → 1,71 | 4,18 → 3,93 | 0/601 · 0/1215 | 60 → 85 |
+| category-repeat | 2,69 → 3,19 | 1,40 → 1,73 | 3,14 → 3,87 | 0/348 · 0/330 | 62 → 91 |
+| category-reverse | 2,27 → 2,62 | 1,36 → 1,70 | 3,82 → 3,63 | 0/240 · 0/480 | 60 → 75 |
+| page (Ekran editörü aç/kapa) | 6,90 → 5,38 | 1,76 → 1,95 | 4,18 → 4,07 | 4/484 · 1/966 | 61 → 77 |
+
+| Boşta (20 s) | arayüz karesi A · R | CPU % | Mkomut/s | GPU MB |
+|---|---|---|---|---|
+| Ana Menü | 2 · 2 2 | 0,6 · 0,6 0,5 | 5,3 · 5,2 | 61 · 84 79 |
+| Ayarlar | 2 · 2 2 | 0,6 · 0,55 0,6 | 5,3 · 5,3 | 61 · 77 77 |
+
+- Ana Menü: fark yok. Kategori değişimi: kare başına +%12–19 CPU komutu ve +0,3–0,4 Mçevrim
+  (1 GHz'te 60 Hz karesinin %2,5'i); kaçan yok. Kategori başına çizilen kare de arttı: uzak
+  katman 760 ms sürer (önceki amblem 560 ms).
+- Bellek: +16–31 MB, tek sahnenin dokusu ve ortak hedef (üçü ≤ 10 MB) ile sürücü havuzu. 12 tur
+  Ayarlar giriş-çıkışında ana ekranda 55–95 MB arasında salınır, artmaz; fd 46 sabit. İlk
+  derlemede (`r2`) doku uçuşla büyüyor ve havuz 120–138 MB'a çıkıyordu; sahne boyu sabitlendi.
+- Hazırlık: shader ve geometri 49–61 ms, bağlam 7–32 ms. Yalnız QuietOS için yapılır: Klasik
+  açılışta hiçbir şey hazırlanmaz (cihazda journal'da `tv.spatial` satırı yok, GPU 19,7 MB).
+  QuietOS'a geçişte Klasik'in son karesinde hazırlanır; yeni yüz ondan sonra konur, yani
+  hiçbir QuietOS animasyonu hazırlık sırasında başlamaz (testli; cihazda geçişte 35 flip'te 1
+  kaçan vblank). Sonraki geçişlerde hazırlık yok.
+- Bütçe aşımı veya Slint'e geri dönüş: 0 (journal, bütün koşular).
+
+Kategori geçişlerinde **tuş başına** toplam CPU komutu (süreç; A 1, R 2 tur, `r3`). Tuş başına
+kare de arttı: uzak katman 760 ms sürer.
+
+| Senaryo | Mkomut/tuş A → R | kare/tuş A → R | GPU Mçevrim/tuş A → R |
+|---|---|---|---|
+| category (800 ms arayla) | 71,5 → 105,9 (+%48) | 36,1 → 47,9 | 47,8 → 82,3 |
+| category-repeat (80 ms) | 14,4 → 16,4 (+%14) | 5,3 → 5,1 | 6,4 → 8,3 |
+| category-reverse (150 ms) | 21,9 → 25,1 (+%15) | 9,6 → 9,6 | 12,2 → 14,6 |
+| page (Ekran aç/kapa) | 248,1 → 253,3 (+%2) | 35,9 → 47,2 | 63,0 → 94,3 |
+| home-settings | 161,5 → 195,0 (+%21) | 45,4 → 59,8 | 78,5 → 111,8 |
+
+Tek tuşla kategori değişimi bir çekirdeğin 1,8 GHz'te yaklaşık 50 ms'sine eşittir; kare
+başına artış %12'dir, gerisi daha uzun süren harekettir.
+
+**Panel modu değişince** (`what_scenes_hold_is_given_back`'in kararsızlığı): bir elemanın eski
+moddan kalan dokusu, yeni modda da yetiyorsa yeniden kullanılıyordu; ortak hedef de hiç
+küçülmüyordu. Sonuç zamanlamaya bağlıydı: eleman 4K'dayken bir kez çizildiyse 1080p'de 4K
+dokuyla kalıyordu (37,3 MB), çizilmediyse kalmıyordu (28,1 MB; testteki iki değer bu ikisi).
+main'de de vardı. Artık panelin boyu değişince eski dokular gösterilmeye devam eder ama içine
+çizilmez, ilk çizimde yenisiyle değişir; ortak hedef bırakılır. Test, değeri doğrudan sınar
+(tek doku ve hedef, 880², bu modun boyunda); 17 koşu, 4'ü eşzamanlı, hepsi geçti.
+
+**Oynatma regresyonu** (Plus, kurulu `be70d2fa`, Ayarlar'da Soğutma'nın GPU amblemi
+açıkken):
+
+| | Beklenen | Gerçekleşen |
+|---|---|---|
+| SDR 4K | hevc_rkmpp, NV12, SDR; dönüşte RGB888, aynı süreç | geçti |
+| HDR10 4K | NV15, HDR10 tel; dönüşte RGB888, aynı süreç | geçti |
+| Dönüşte amblem ve gezinme | geri dönüş ve GL hatası yok | geçti; GPU 58–73 MB, fd 46 |
+| Kodi'ye geçiş ve dönüş | 2160p60 korunur, hata yok | geçti |
+
+Ham veri ve görseller `results/quietos-spatial-refinement/`. Görseller host'ta ürünün
+renderer'ından alındı; panel fotoğraflanmadı.
 
 ## Yeniden üretmek
 

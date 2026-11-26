@@ -67,6 +67,12 @@ S = {
     "globe-reverse": nav("globe-reverse", 1, [("down", 150), ("up", 150)] * 14),
     "home-settings": lambda: (m.settings(), m.home(3), wrap("home-settings", lambda: m.run("home-settings", [("ok", 1200), ("back", 1200)] * 6, 540))),
     "category": lambda: (m.column(), wrap("category", lambda: m.run("category", [("down", 800), ("up", 800)] * 10, 540))),
+    # Amblemler: basılı tuş, ters yön, bir sayfaya giriş ve çıkış (Görüntü ve Ses > Ekran).
+    "category-repeat": lambda: (m.column(), wrap("category-repeat", lambda: m.run("category-repeat", ([("down", 80)] * 4 + [("up", 80)] * 4) * 5, 540))),
+    "category-reverse": lambda: (m.column(), wrap("category-reverse", lambda: m.run("category-reverse", [("down", 150), ("up", 150)] * 14, 540))),
+    "page": lambda: (m.column(), m.key("down"), m.wait(800), m.key("right"), m.wait(800),
+                     wrap("page", lambda: m.run("page", [("ok", 900), ("back", 900)] * 8, 540))),
+    "idle-settings": lambda: (m.column(), time.sleep(3), wrap("idle-settings", lambda: m.idle("idle-settings", 20))),
     "idle-home": lambda: (m.home(0), time.sleep(3), wrap("idle-home", lambda: m.idle("idle-home", 20))),
     "idle-globe": lambda: (m.home(2), time.sleep(3), wrap("idle-globe", lambda: m.idle("idle-globe", 20))),
 }

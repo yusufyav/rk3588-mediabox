@@ -1,0 +1,1125 @@
+import { Quiet } from "core.slint";
+import { QuietMotion, QuietDeck, QuietDecks } from "motion.slint";
+import { Still } from "materials.slint";
+import { SceneBase, Plane, SettingsScene } from "scenes.slint";
+import { Spatial, SpatialScene } from "spatial.slint";
+
+// The settings' emblems: a scene for each category and each page, by its own
+// id (src/screens/settings.rs, `Group::id`, `Page::id`; never by its place in
+// the column or its name on the screen), and the deck they change on.
+//
+// The same language as the home screen's scenes (scenes.slint): three planes
+// in a 650-unit box, each told its own camera offset, every motion a function
+// of it, so a scene at rest asks for nothing. What moves along a line -- a
+// packet, a pulse, a wave -- is there only while the camera is: it stands for
+// the subject, and is never a reading of the machine.
+//
+// The solid ones are the GPU's (src/spatial/emblem.rs): media, links, remote,
+// live, diagnostics, picture, output, audio, cooling, device, system and
+// storage. Theirs here are what is drawn where the GPU cannot.
+
+component EmblemBase inherits SceneBase {
+    // The way a thing has gone along a line: none or all of it at rest.
+    out property <float> go: clamp(1 - abs(root.d) * 1.15, 0, 1);
+    public pure function swell(p: float) -> float { return 4 * p * (1 - p); }
+}
+
+// A stroke in the box.
+component Ink inherits Path {
+    width: 100%;
+    height: 100%;
+    viewbox-width: 650;
+    viewbox-height: 650;
+    fill: transparent;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// A stroke about its own middle, which it turns about.
+component Wheel inherits Path {
+    in property <length> vu;
+    in property <float> cx;
+    in property <float> cy;
+    in property <float> r;
+    x: (cx - r) * vu;
+    y: (cy - r) * vu;
+    width: 2 * r * vu;
+    height: 2 * r * vu;
+    viewbox-x: -100;
+    viewbox-y: -100;
+    viewbox-width: 200;
+    viewbox-height: 200;
+    fill: transparent;
+    stroke-line-cap: round;
+    stroke-line-join: round;
+}
+
+// A point of light on its way.
+component Pulse inherits Rectangle {
+    in property <length> vu;
+    in property <float> at-x;
+    in property <float> at-y;
+    in property <color> ink;
+    width: max(3px, 15 * vu);
+    height: self.width;
+    x: at-x * vu - self.width / 2;
+    y: at-y * vu - self.height / 2;
+    border-radius: self.width / 2;
+    background: ink;
+}
+
+// Medya: iki film makarası, karşılıklı döner; öndeki şerit aralarından akar.
+component MediaEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Wheel {
+            vu: root.vu;
+            cx: 468;
+            cy: 180;
+            r: 128;
+            transform-rotation: root.d-far * -80deg;
+            stroke: root.ink.with-alpha(0.36 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M97 0A97 97 0 1 1 -97 0A97 97 0 1 1 97 0ZM90 0A90 90 0 1 1 -90 0A90 90 0 1 1 90 0ZM14 0A14 14 0 1 1 -14 0A14 14 0 1 1 14 0ZM19 -56A19 19 0 1 1 -19 -56A19 19 0 1 1 19 -56ZM72.3 -17.3A19 19 0 1 1 34.3 -17.3A19 19 0 1 1 72.3 -17.3ZM51.9 45.3A19 19 0 1 1 13.9 45.3A19 19 0 1 1 51.9 45.3ZM-13.9 45.3A19 19 0 1 1 -51.9 45.3A19 19 0 1 1 -13.9 45.3ZM-34.3 -17.3A19 19 0 1 1 -72.3 -17.3A19 19 0 1 1 -34.3 -17.3Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Wheel {
+            vu: root.vu;
+            cx: 285;
+            cy: 350;
+            r: 205;
+            transform-rotation: root.d * 65deg;
+            fill: root.tint.with-alpha(0.04 * root.f-main);
+            stroke: root.glow.with-alpha(0.6 * root.f-main);
+            stroke-width: root.line;
+            commands: "M97 0A97 97 0 1 1 -97 0A97 97 0 1 1 97 0ZM90 0A90 90 0 1 1 -90 0A90 90 0 1 1 90 0ZM14 0A14 14 0 1 1 -14 0A14 14 0 1 1 14 0ZM21 -56A21 21 0 1 1 -21 -56A21 21 0 1 1 21 -56ZM74.3 -17.3A21 21 0 1 1 32.3 -17.3A21 21 0 1 1 74.3 -17.3ZM53.9 45.3A21 21 0 1 1 11.9 45.3A21 21 0 1 1 53.9 45.3ZM-11.9 45.3A21 21 0 1 1 -53.9 45.3A21 21 0 1 1 -11.9 45.3ZM-32.3 -17.3A21 21 0 1 1 -74.3 -17.3A21 21 0 1 1 -32.3 -17.3Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 46deg;
+            stroke: root.glow.with-alpha(0.4 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M499.2 428A228 228 0 0 1 261.2 576.8M531.2 439.6A262 262 0 0 1 257.6 610.6M502.4 446.8L515.2 452.5M486.8 476.1L498.7 483.5M467.3 503L478 512M444.3 526.9L453.6 537.3M418.1 547.3L425.9 558.9M389.3 563.9L395.5 576.5M358.5 576.4L362.9 589.7M326.3 584.4L328.8 598.2M293.3 587.9L293.8 601.8";
+        }
+    }
+}
+
+// Oynatma: kareler arkada kayar, oynat işareti halkasında durur.
+component PlaybackEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.3);
+            stroke-width: root.fine;
+            commands: "M268 120H552A18 18 0 0 1 570 138V312A18 18 0 0 1 552 330H268A18 18 0 0 1 250 312V138A18 18 0 0 1 268 120ZM308 90H572A18 18 0 0 1 590 108V262A18 18 0 0 1 572 280H308A18 18 0 0 1 290 262V108A18 18 0 0 1 308 90Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.04);
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M513 345A188 188 0 1 1 137 345A188 188 0 1 1 513 345Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.08);
+            stroke: root.glow.with-alpha(0.75);
+            stroke-width: root.line;
+            commands: "M276 250L276 440L436 345Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 60deg;
+            stroke: root.glow.with-alpha(0.34 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M124.1 229A232 232 0 0 1 441 144.1M525.9 461A232 232 0 0 1 209 545.9M521.1 509.6L530.3 517.3M489.6 541.1L497.3 550.3M453 566.7L459 577.1M412.6 585.6L416.7 596.8M369.5 597.1L371.5 608.9M325 601L325 613M280.5 597.1L278.5 608.9";
+        }
+    }
+}
+
+// Bağlantılar: düğümler ve aralarındaki yollar; veri yalnız kamera giderken akar.
+component LinksEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            transform-rotation: root.d-far * 22deg;
+            stroke: root.ink.with-alpha(0.22 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M589.9 207A290 118 -24 1 1 60.1 443A290 118 -24 1 1 589.9 207ZM536.2 490A268 150 38 1 1 113.8 160A268 150 38 1 1 536.2 490Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.45);
+            stroke-width: root.fine;
+            commands: "M325 325L150 205M325 325L490 160M325 325L560 395M325 325L300 545M325 325L110 430M150 205L490 160M560 395L300 545";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.1);
+            stroke: root.glow.with-alpha(0.65);
+            stroke-width: root.line;
+            commands: "M170 205A20 20 0 1 1 130 205A20 20 0 1 1 170 205ZM510 160A20 20 0 1 1 470 160A20 20 0 1 1 510 160ZM580 395A20 20 0 1 1 540 395A20 20 0 1 1 580 395ZM320 545A20 20 0 1 1 280 545A20 20 0 1 1 320 545ZM130 430A20 20 0 1 1 90 430A20 20 0 1 1 130 430Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.08);
+            stroke: root.glow.with-alpha(0.7);
+            stroke-width: root.line;
+            commands: "M369 325A44 44 0 1 1 281 325A44 44 0 1 1 369 325ZM351 325A26 26 0 1 1 299 325A26 26 0 1 1 351 325Z";
+        }
+        Pulse { vu: root.vu; at-x: 325 + -175 * root.go; at-y: 325 + -120 * root.go; ink: root.glow.with-alpha(root.swell(root.go) * root.f-main); }
+        Pulse { vu: root.vu; at-x: 325 + 165 * root.go; at-y: 325 + -165 * root.go; ink: root.glow.with-alpha(root.swell(root.go) * root.f-main); }
+        Pulse { vu: root.vu; at-x: 325 + 235 * root.go; at-y: 325 + 70 * root.go; ink: root.glow.with-alpha(root.swell(root.go) * root.f-main); }
+        Pulse { vu: root.vu; at-x: 325 + -25 * root.go; at-y: 325 + 220 * root.go; ink: root.glow.with-alpha(root.swell(root.go) * root.f-main); }
+        Pulse { vu: root.vu; at-x: 325 + -215 * root.go; at-y: 325 + 105 * root.go; ink: root.glow.with-alpha(root.swell(root.go) * root.f-main); }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 34deg;
+            stroke: root.glow.with-alpha(0.24 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M530.3 152.7A268 268 0 0 1 576.8 416.7M119.7 497.3A268 268 0 0 1 73.2 233.3";
+        }
+    }
+}
+
+// TV ve Kumanda: kumandadan televizyona giden dalga.
+component RemoteEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.4);
+            stroke-width: root.fine;
+            commands: "M342 110H578A12 12 0 0 1 590 122V262A12 12 0 0 1 578 274H342A12 12 0 0 1 330 262V122A12 12 0 0 1 342 110ZM410 306H510M460 274V306";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M150.9 209.8L184.3 196.4A44 44 0 0 1 241.5 220.7L343.4 472.9A44 44 0 0 1 319.1 530.2L285.7 543.6A44 44 0 0 1 228.5 519.3L126.6 267.1A44 44 0 0 1 150.9 209.8Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.fine;
+            commands: "M242.8 290.3A40 40 0 1 1 162.8 290.3A40 40 0 1 1 242.8 290.3ZM217.8 290.3A15 15 0 1 1 187.8 290.3A15 15 0 1 1 217.8 290.3Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.5);
+            stroke-width: root.fine;
+            commands: "M218.5 384.2A8 8 0 1 1 202.5 384.2A8 8 0 1 1 218.5 384.2ZM270.5 363.2A8 8 0 1 1 254.5 363.2A8 8 0 1 1 270.5 363.2ZM234.3 423.1A8 8 0 1 1 218.3 423.1A8 8 0 1 1 234.3 423.1ZM286.2 402.2A8 8 0 1 1 270.2 402.2A8 8 0 1 1 286.2 402.2ZM250 462.1A8 8 0 1 1 234 462.1A8 8 0 1 1 250 462.1ZM301.9 441.1A8 8 0 1 1 285.9 441.1A8 8 0 1 1 301.9 441.1ZM265.7 501A8 8 0 1 1 249.7 501A8 8 0 1 1 265.7 501ZM317.7 480A8 8 0 1 1 301.7 480A8 8 0 1 1 317.7 480Z";
+        }
+        for j in 3: Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke-line-cap: round;
+            property <float> p: mod(j / 3 + root.go, 1);
+            property <float> r: 40 + p * 150;
+            opacity: root.f-main * (1 - p) * min(1, p * 5);
+            stroke: root.glow.with-alpha(0.55);
+            stroke-width: root.line;
+            MoveTo { x: 305 + r * cos(-78deg); y: 190 + r * sin(-78deg); }
+            ArcTo { x: 305 + r * cos(-2deg); y: 190 + r * sin(-2deg); radius-x: r; radius-y: r; sweep: true; }
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 28deg;
+            stroke: root.glow.with-alpha(0.2 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M300.2 608.9A285 285 0 0 1 78.2 467.5M349.8 41.1A285 285 0 0 1 571.8 182.5";
+        }
+    }
+}
+
+// Canlı TV: uydu, yörüngesi ve yere inen demet.
+component LiveEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            transform-rotation: root.d-far * 14deg;
+            stroke: root.ink.with-alpha(0.24 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M599.1 178A300 96 -24 1 1 50.9 422A300 96 -24 1 1 599.1 178ZM564.3 193.4A262 70 -24 1 1 85.7 406.6A262 70 -24 1 1 564.3 193.4Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.07);
+            stroke: root.glow.with-alpha(0.66);
+            stroke-width: root.line;
+            commands: "M372.7 172.3L434.8 144.6L467.3 217.7L405.2 245.4ZM367.4 190L292.5 223.3L313.6 270.8L388.6 237.5ZM451.4 152.5L526.4 119.2L547.5 166.7L472.6 200ZM342.7 200.9L363.9 248.4M318.1 211.9L339.2 259.4M476.1 141.6L497.3 189.1M500.8 130.6L521.9 178.1M388.9 208.8L378 213.7M451.1 181.2L462 176.3";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.34);
+            stroke-width: root.fine;
+            commands: "M419.6 243.3L150 500M456.2 227.1L255 535";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M295.1 534.8A96 96 0 0 1 154.9 463.4M258 430L196 508M205 545L205 590M160 590L250 590";
+        }
+        for j in 3: Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 650;
+            viewbox-height: 650;
+            fill: transparent;
+            stroke-line-cap: round;
+            property <float> p: mod(j / 3 + root.go, 1);
+            property <float> cx: 398 - 178 * p;
+            property <float> cy: 252 + 230 * p;
+            property <float> r: 16 + 44 * p;
+            opacity: root.f-main * (1 - p) * min(1, p * 5);
+            stroke: root.glow.with-alpha(0.55);
+            stroke-width: root.line;
+            MoveTo { x: cx + r * cos(80deg); y: cy + r * sin(80deg); }
+            ArcTo { x: cx + r * cos(176deg); y: cy + r * sin(176deg); radius-x: r; radius-y: r; sweep: true; }
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 10deg;
+            stroke: root.glow.with-alpha(0.3 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M160.2 602A440 440 0 0 1 489.8 602";
+        }
+    }
+}
+
+// Tanılama: örgünün üstünde gezen bir büyüteç; bir ölçüm değildir.
+component DiagnosticsEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.3);
+            stroke-width: root.fine;
+            commands: "M120 115L120 125M115 120L125 120M120 235L120 245M115 240L125 240M120 355L120 365M115 360L125 360M120 475L120 485M115 480L125 480M180 175L180 185M175 180L185 180M180 295L180 305M175 300L185 300M180 415L180 425M175 420L185 420M180 535L180 545M175 540L185 540M240 115L240 125M235 120L245 120M240 235L240 245M235 240L245 240M240 355L240 365M235 360L245 360M240 475L240 485M235 480L245 480M300 175L300 185M295 180L305 180M300 295L300 305M295 300L305 300M300 415L300 425M295 420L305 420M300 535L300 545M295 540L305 540M360 115L360 125M355 120L365 120M360 235L360 245M355 240L365 240M360 355L360 365M355 360L365 360M360 475L360 485M355 480L365 480M420 175L420 185M415 180L425 180M420 295L420 305M415 300L425 300M420 415L420 425M415 420L425 420M420 535L420 545M415 540L425 540M480 115L480 125M475 120L485 120M480 235L480 245M475 240L485 240M480 355L480 365M475 360L485 360M480 475L480 485M475 480L485 480M540 175L540 185M535 180L545 180M540 295L540 305M535 300L545 300M540 415L540 425M535 420L545 420M540 535L540 545M535 540L545 540";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M458 300A158 158 0 1 1 142 300A158 158 0 1 1 458 300ZM440 300A140 140 0 1 1 160 300A140 140 0 1 1 440 300Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M412 412L440 440M430 450L450 430L545 525A14 14 0 0 1 525 545Z";
+        }
+        Wheel {
+            vu: root.vu;
+            cx: 300;
+            cy: 300;
+            r: 118;
+            transform-rotation: root.d * 150deg;
+            stroke: root.glow.with-alpha(0.5 * root.f-main);
+            stroke-width: root.fine;
+            commands: "M69.3 -40A80 80 0 0 1 40 69.3M-69.3 40A80 80 0 0 1 -40 -69.3M24 41.6A48 48 0 0 1 -41.6 24M-24 -41.6A48 48 0 0 1 41.6 -24M-14 0H14M0 -14V14";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.32);
+            stroke-width: root.line;
+            commands: "M75 135L75 75L135 75M75 515L75 575L135 575M575 135L575 75L515 75M575 515L575 575L515 575";
+        }
+    }
+}
+
+// Hesap: bir kimlik ve çevresindeki eklentiler.
+component AccountEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            transform-rotation: root.d-far * -40deg;
+            stroke: root.ink.with-alpha(0.24 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M597 325A272 272 0 1 1 53 325A272 272 0 1 1 597 325ZM605 325L615 325M602.6 361.5L612.5 362.9M595.5 397.5L605.1 400.1M583.7 432.2L592.9 436M567.5 465L576.1 470M547.1 495.5L555.1 501.5M523 523L530.1 530.1M495.5 547.1L501.5 555.1M465 567.5L470 576.1M432.2 583.7L436 592.9M397.5 595.5L400.1 605.1M361.5 602.6L362.9 612.5M325 605L325 615M288.5 602.6L287.1 612.5M252.5 595.5L249.9 605.1M217.8 583.7L214 592.9M185 567.5L180 576.1M154.5 547.1L148.5 555.1M127 523L119.9 530.1M102.9 495.5L94.9 501.5M82.5 465L73.9 470M66.3 432.2L57.1 436M54.5 397.5L44.9 400.1M47.4 361.5L37.5 362.9M45 325L35 325M47.4 288.5L37.5 287.1M54.5 252.5L44.9 249.9M66.3 217.8L57.1 214M82.5 185L73.9 180M102.9 154.5L94.9 148.5M127 127L119.9 119.9M154.5 102.9L148.5 94.9M185 82.5L180 73.9M217.8 66.3L214 57.1M252.5 54.5L249.9 44.9M288.5 47.4L287.1 37.5M325 45L325 35M361.5 47.4L362.9 37.5M397.5 54.5L400.1 44.9M432.2 66.3L436 57.1M465 82.5L470 73.9M495.5 102.9L501.5 94.9M523 127L530.1 119.9M547.1 154.5L555.1 148.5M567.5 185L576.1 180M583.7 217.8L592.9 214M595.5 252.5L605.1 249.9M602.6 288.5L612.5 287.1";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.07);
+            stroke: root.glow.with-alpha(0.68);
+            stroke-width: root.line;
+            commands: "M387 268A62 62 0 1 1 263 268A62 62 0 1 1 387 268Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.68);
+            stroke-width: root.line;
+            commands: "M205 452A120 108 0 0 1 445 452";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.34);
+            stroke-width: root.fine;
+            commands: "M503 325A178 178 0 1 1 147 325A178 178 0 1 1 503 325Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 75deg;
+            fill: root.tint.with-alpha(0.06 * root.f-near);
+            stroke: root.glow.with-alpha(0.46 * root.f-near);
+            stroke-width: root.line;
+            commands: "M325 76L354.4 93L354.4 127L325 144L295.6 127L295.6 93ZM511.2 398.5L540.6 415.5L540.6 449.5L511.2 466.5L481.8 449.5L481.8 415.5ZM138.8 398.5L168.2 415.5L168.2 449.5L138.8 466.5L109.4 449.5L109.4 415.5Z";
+        }
+    }
+}
+
+// HDMI-CEC: kabloyla bağlı iki cihaz ve aralarından geçen işaret.
+component CecEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            transform-rotation: root.d-far * 24deg;
+            stroke: root.ink.with-alpha(0.2 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M615 325A290 290 0 1 1 35 325A290 290 0 1 1 615 325ZM601 325L615 325M596.8 372.9L610.6 375.4M584.4 419.4L597.5 424.2M564 463L576.1 470M536.4 502.4L547.2 511.4M502.4 536.4L511.4 547.2M463 564L470 576.1M419.4 584.4L424.2 597.5M372.9 596.8L375.4 610.6M325 601L325 615M277.1 596.8L274.6 610.6M230.6 584.4L225.8 597.5M187 564L180 576.1M147.6 536.4L138.6 547.2M113.6 502.4L102.8 511.4M86 463L73.9 470M65.6 419.4L52.5 424.2M53.2 372.9L39.4 375.4M49 325L35 325M53.2 277.1L39.4 274.6M65.6 230.6L52.5 225.8M86 187L73.9 180M113.6 147.6L102.8 138.6M147.6 113.6L138.6 102.8M187 86L180 73.9M230.6 65.6L225.8 52.5M277.1 53.2L274.6 39.4M325 49L325 35M372.9 53.2L375.4 39.4M419.4 65.6L424.2 52.5M463 86L470 73.9M502.4 113.6L511.4 102.8M536.4 147.6L547.2 138.6M564 187L576.1 180M584.4 230.6L597.5 225.8M596.8 277.1L610.6 274.6";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.64);
+            stroke-width: root.line;
+            commands: "M204 110H526A14 14 0 0 1 540 124V304A14 14 0 0 1 526 318H204A14 14 0 0 1 190 304V124A14 14 0 0 1 204 110ZM320 352H410M365 318V352";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M110 440H312A14 14 0 0 1 326 454V518A14 14 0 0 1 312 532H110A14 14 0 0 1 96 518V454A14 14 0 0 1 110 440ZM126 486H196M262 486H296";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.5);
+            stroke-width: root.line;
+            commands: "M326 486C470 486 480 400 480 318";
+        }
+        for j in 3: Pulse {
+            property <float> p: clamp(root.go * 1.4 - j * 0.2, 0, 1);
+            vu: root.vu;
+            at-x: (1 - p) * (1 - p) * (1 - p) * 326 + 3 * (1 - p) * (1 - p) * p * 470 + 3 * (1 - p) * p * p * 480 + p * p * p * 480;
+            at-y: (1 - p) * (1 - p) * (1 - p) * 486 + 3 * (1 - p) * (1 - p) * p * 486 + 3 * (1 - p) * p * p * 400 + p * p * p * 318;
+            ink: root.glow.with-alpha(root.swell(p) * root.f-main);
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 36deg;
+            stroke: root.glow.with-alpha(0.26 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M564.6 412.2A255 255 0 0 1 412.2 564.6M85.4 237.8A255 255 0 0 1 237.8 85.4";
+        }
+    }
+}
+
+// Ethernet: soketin sekiz kontağı ve bükümlü çiftler.
+component EthernetEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.28);
+            stroke-width: root.fine;
+            commands: "M119 95H531A24 24 0 0 1 555 119V471A24 24 0 0 1 531 495H119A24 24 0 0 1 95 471V119A24 24 0 0 1 119 95Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.64);
+            stroke-width: root.line;
+            commands: "M165 160H485V400H415V440H375V470H275V440H235V400H165Z";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 0 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M200 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 1 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M236 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 2 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M271 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 3 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M307 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 4 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M343 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 5 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M378 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 6 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M414 172V250";
+        }
+        Ink {
+            opacity: root.f-main * (0.55 + 0.45 * root.swell(clamp(root.go * 2 - 7 / 8, 0, 1)));
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M450 172V250";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.4);
+            stroke-width: root.fine;
+            commands: "M60 556L68.8 566.6L77.6 575.4L86.4 580.8L95.2 581.8L104 578.4L112.8 571.1L121.6 561.2L130.4 550.4L139.2 540.5L148 533.3L156.8 530.1L165.6 531.4L174.4 536.9L183.2 545.8L192 556.4L200.8 567L209.6 575.6L218.4 580.9L227.2 581.8L236 578.2L244.8 570.8L253.6 560.8L262.4 549.9L271.2 540.2L280 533.1L288.8 530.1L297.6 531.5L306.4 537.2L315.2 546.2L324 556.9L332.8 567.4L341.6 575.9L350.4 581L359.2 581.7L368 578L376.8 570.4L385.6 560.3L394.4 549.5L403.2 539.8L412 532.9L420.8 530L429.6 531.7L438.4 537.5L447.2 546.6L456 557.3L464.8 567.8L473.6 576.2L482.4 581.1L491.2 581.7L500 577.8L508.8 570.1L517.6 559.9L526.4 549.1L535.2 539.5L544 532.7L552.8 530L561.6 531.8L570.4 537.8L579.2 547L588 557.7M60 556L68.8 545.4L77.6 536.6L86.4 531.2L95.2 530.2L104 533.6L112.8 540.9L121.6 550.8L130.4 561.6L139.2 571.5L148 578.7L156.8 581.9L165.6 580.6L174.4 575.1L183.2 566.2L192 555.6L200.8 545L209.6 536.4L218.4 531.1L227.2 530.2L236 533.8L244.8 541.2L253.6 551.2L262.4 562.1L271.2 571.8L280 578.9L288.8 581.9L297.6 580.5L306.4 574.8L315.2 565.8L324 555.1L332.8 544.6L341.6 536.1L350.4 531L359.2 530.3L368 534L376.8 541.6L385.6 551.7L394.4 562.5L403.2 572.2L412 579.1L420.8 582L429.6 580.3L438.4 574.5L447.2 565.4L456 554.7L464.8 544.2L473.6 535.8L482.4 530.9L491.2 530.3L500 534.2L508.8 541.9L517.6 552.1L526.4 562.9L535.2 572.5L544 579.3L552.8 582L561.6 580.2L570.4 574.2L579.2 565L588 554.3";
+        }
+    }
+}
+
+// Wi-Fi: bir ağın sayfası; dalgalar derinliğe ayrılır.
+component WifiEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.glow.with-alpha(0.4);
+            stroke-width: root.line;
+            commands: "M105.8 280.8A310 310 0 0 1 544.2 280.8";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M176.5 351.5A210 210 0 0 1 473.5 351.5";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.2);
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M347 500A22 22 0 1 1 303 500A22 22 0 1 1 347 500Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.7);
+            stroke-width: root.line;
+            commands: "M247.2 422.2A110 110 0 0 1 402.8 422.2";
+        }
+    }
+}
+
+// Servisler: birbirine oturan modüller.
+component ServicesEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            transform-rotation: root.d-far * 30deg;
+            fill: root.tint.with-alpha(0.03 * root.f-far);
+            stroke: root.ink.with-alpha(0.4 * root.f-far);
+            stroke-width: root.fine;
+            commands: "M454.9 172L522.5 211L522.5 289L454.9 328L387.4 289L387.4 211ZM325 397L392.5 436L392.5 514L325 553L257.5 514L257.5 436ZM195.1 172L262.6 211L262.6 289L195.1 328L127.5 289L127.5 211Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            transform-rotation: root.d * -60deg;
+            fill: root.tint.with-alpha(0.07 * root.f-main);
+            stroke: root.glow.with-alpha(0.7 * root.f-main);
+            stroke-width: root.line;
+            commands: "M325 247L392.5 286L392.5 364L325 403L257.5 364L257.5 286ZM325 281L363.1 303L363.1 347L325 369L286.9 347L286.9 303Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * 46deg;
+            fill: root.tint.with-alpha(0.05 * root.f-near);
+            stroke: root.glow.with-alpha(0.5 * root.f-near);
+            stroke-width: root.line;
+            commands: "M325 97L392.5 136L392.5 214L325 253L257.5 214L257.5 136ZM454.9 322L522.5 361L522.5 439L454.9 478L387.4 439L387.4 361ZM195.1 322L262.6 361L262.6 439L195.1 478L127.5 439L127.5 361Z";
+        }
+    }
+}
+
+// Görüntü ve Ses: katmanlı ekran, önünden çıkan ses.
+component PictureEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.3);
+            stroke-width: root.fine;
+            commands: "M85 172.5L415 145L415 395L85 367.5ZM167.5 165.6L167.5 374.4M250 158.8L250 381.2M332.5 151.9L332.5 388.1";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.06);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M135 227L485 198L485 462L135 433Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.5);
+            stroke-width: root.line;
+            commands: "M445 326.4A70 70 0 0 1 445 433.6M480.3 290.8A120 120 0 0 1 480.3 469.2M518.1 257.7A170 170 0 0 1 518.1 502.3";
+        }
+    }
+}
+
+// Ekran: optik katmanlar.
+component OutputEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.34);
+            stroke-width: root.fine;
+            commands: "M70 166.4L390 140L390 380L70 353.6ZM150 159.8L150 360.2M230 153.2L230 366.8M310 146.6L310 373.4";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.06);
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M150 225.2L490 197L490 453L150 424.8Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.4);
+            stroke-width: root.fine;
+            commands: "M60 420L320 340M320 340L600 270M320 340L600 310M320 340L600 350";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            fill: root.tint.with-alpha(0.03);
+            stroke: root.glow.with-alpha(0.5);
+            stroke-width: root.line;
+            commands: "M240 284.7L600 255L600 525L240 495.3Z";
+        }
+    }
+}
+
+// Ses: bir koni ve ondan ayrılan halkalar.
+component AudioEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.34);
+            stroke-width: root.fine;
+            commands: "M445 325A120 270 0 1 1 205 325A120 270 0 1 1 445 325Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.64);
+            stroke-width: root.line;
+            commands: "M382 325A92 208 0 1 1 198 325A92 208 0 1 1 382 325ZM328 325A60 138 0 1 1 208 325A60 138 0 1 1 328 325ZM278 325A28 64 0 1 1 222 325A28 64 0 1 1 278 325Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.46);
+            stroke-width: root.line;
+            commands: "M392.3 206.8A150 150 0 0 1 392.3 443.2M438.2 160.3A215 215 0 0 1 438.2 489.7M487.4 116.9A280 280 0 0 1 487.4 533.1";
+        }
+    }
+}
+
+// Soğutma: fan.
+component CoolingEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.32);
+            stroke-width: root.fine;
+            commands: "M131 85H519A46 46 0 0 1 565 131V519A46 46 0 0 1 519 565H131A46 46 0 0 1 85 519V131A46 46 0 0 1 131 85ZM142 125A17 17 0 1 1 108 125A17 17 0 1 1 142 125ZM142 525A17 17 0 1 1 108 525A17 17 0 1 1 142 525ZM542 125A17 17 0 1 1 508 125A17 17 0 1 1 542 125ZM542 525A17 17 0 1 1 508 525A17 17 0 1 1 542 525Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Wheel {
+            vu: root.vu;
+            cx: 325;
+            cy: 325;
+            r: 214;
+            transform-rotation: root.d * 200deg;
+            fill: root.tint.with-alpha(0.06 * root.f-main);
+            stroke: root.glow.with-alpha(0.58 * root.f-main);
+            stroke-width: root.line;
+            commands: "M27 0Q61.4 -8.6 87.5 28.4A92 92 0 0 1 66.2 63.9Q53.8 21.7 23.4 13.5ZM16.8 21.1Q45 42.6 32.3 86.1A92 92 0 0 1 -8.7 91.6Q16.5 55.6 4 26.7ZM-6 26.3Q-5.2 61.8 -47.2 79A92 92 0 0 1 -77 50.3Q-33.1 47.6 -18.4 19.8ZM-24.3 11.7Q-51.6 34.4 -91.2 12.3A92 92 0 0 1 -87.4 -28.9Q-57.9 3.8 -26.9 -2ZM-24.3 -11.7Q-59.1 -18.9 -66.5 -63.6A92 92 0 0 1 -31.9 -86.3Q-39 -42.9 -15.2 -22.3ZM-6 -26.3Q-22.1 -57.9 8.2 -91.6A92 92 0 0 1 47.6 -78.7Q9.2 -57.3 8 -25.8ZM16.8 -21.1Q31.5 -53.4 76.8 -50.7A92 92 0 0 1 91.2 -11.9Q50.5 -28.5 25.1 -9.9Z";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M381 325A56 56 0 1 1 269 325A56 56 0 1 1 381 325ZM551 325A226 226 0 1 1 99 325A226 226 0 1 1 551 325Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            transform-rotation: root.d-near * -60deg;
+            stroke: root.glow.with-alpha(0.34 * root.f-near);
+            stroke-width: root.fine;
+            commands: "M573.2 368.8A252 252 0 0 1 443.3 547.5M163 518A252 252 0 0 1 73.2 316.2M238.8 88.2A252 252 0 0 1 458.5 111.3";
+        }
+    }
+}
+
+// Cihaz: kart, soğutucusu ve ışıkları.
+component DeviceEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            fill: root.tint.with-alpha(0.04);
+            stroke: root.ink.with-alpha(0.42);
+            stroke-width: root.fine;
+            commands: "M325 160L654.1 350L325 540L-4.1 350ZM-4.1 350L-4.1 364L325 554L654.1 364L654.1 350M325 540L325 554";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.6);
+            stroke-width: root.line;
+            commands: "M402.9 231L529.4 304L416.8 369L290.4 296ZM290.4 296L290.4 340L416.8 413L529.4 348L529.4 304M416.8 369L416.8 413M299 199L368.3 239L299 279L229.7 239ZM229.7 239L229.7 255L299 295L368.3 255L368.3 239M299 279L299 295M177.8 271L229.7 301L177.8 331L125.8 301ZM125.8 301L125.8 315L177.8 345L229.7 315L229.7 301M177.8 331L177.8 345";
+        }
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.16);
+            stroke: root.glow.with-alpha(0.8);
+            stroke-width: root.line;
+            commands: "M110.8 356A11 11 0 1 1 88.8 356A11 11 0 1 1 110.8 356ZM154.1 381A11 11 0 1 1 132.1 381A11 11 0 1 1 154.1 381ZM197.4 406A11 11 0 1 1 175.4 406A11 11 0 1 1 197.4 406Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            stroke: root.glow.with-alpha(0.5);
+            stroke-width: root.fine;
+            commands: "M402.9 229L307.7 284M307.7 284L307.7 244M402.9 189L307.7 244M418.5 238L323.3 293M323.3 293L323.3 253M418.5 198L323.3 253M434.1 247L338.9 302M338.9 302L338.9 262M434.1 207L338.9 262M449.7 256L354.4 311M354.4 311L354.4 271M449.7 216L354.4 271M465.3 265L370 320M370 320L370 280M465.3 225L370 280M480.9 274L385.6 329M385.6 329L385.6 289M480.9 234L385.6 289M496.5 283L401.2 338M401.2 338L401.2 298M496.5 243L401.2 298M512.1 292L416.8 347M416.8 347L416.8 307M512.1 252L416.8 307";
+        }
+    }
+}
+
+// Sistem: işlemci ve devresi.
+component SystemEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.4);
+            stroke-width: root.fine;
+            commands: "M399.5 197L428.9 180L429.8 140.5M250.5 197L221.1 180L220.2 140.5M60 393L30.6 410L-37.9 410.5M590 393L619.4 410L687.9 410.5M462.7 233.5L492.1 216.5L515.5 190M187.3 233.5L157.9 216.5L134.5 190M123.2 429.5L93.8 446.5L47.9 460M526.8 429.5L556.2 446.5L602.1 460M525.9 270L555.4 253L601.3 239.5M124.1 270L94.6 253L48.7 239.5M186.4 466L157 483L133.6 509.5M463.6 466L493 483L516.4 509.5M589.1 306.5L618.6 289.5L687 289M60.9 306.5L31.4 289.5L-37 289M249.7 502.5L220.2 519.5L219.3 559M400.3 502.5L429.8 519.5L430.7 559";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M325 178L584.8 328L325 478L65.2 328ZM65.2 328L65.2 350L325 500L584.8 350L584.8 328M325 478L325 500";
+        }
+        Ink {
+            opacity: root.f-main;
+            stroke: root.ink.with-alpha(0.5);
+            stroke-width: root.fine;
+            commands: "M359.6 220L399.5 197M290.4 220L250.5 197M99.8 370L60 393M550.2 370L590 393M391.4 238.4L431.3 215.4M258.6 238.4L218.7 215.4M131.6 388.4L91.8 411.4M518.4 388.4L558.2 411.4M423.2 256.7L463 233.7M226.8 256.7L187 233.7M163.4 406.7L123.6 429.7M486.6 406.7L526.4 429.7M455 275.1L494.8 252.1M195 275.1L155.2 252.1M195.2 425.1L155.3 448.1M454.8 425.1L494.7 448.1M486.8 293.4L526.6 270.4M163.2 293.4L123.4 270.4M227 443.4L187.1 466.4M423 443.4L462.9 466.4M518.6 311.8L558.4 288.8M131.4 311.8L91.6 288.8M258.7 461.8L218.9 484.8M391.3 461.8L431.1 484.8M550.3 330.1L590.2 307.1M99.7 330.1L59.8 307.1M290.5 480.1L250.7 503.1M359.5 480.1L399.3 503.1";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            fill: root.tint.with-alpha(0.06);
+            stroke: root.glow.with-alpha(0.56);
+            stroke-width: root.line;
+            commands: "M325 220L460.1 298L325 376L189.9 298ZM189.9 298L189.9 316L325 394L460.1 316L460.1 298M325 376L325 394M325 246L415.1 298L325 350L234.9 298Z";
+        }
+    }
+}
+
+// Depolama: üst üste katmanlar.
+component StorageEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            fill: root.tint.with-alpha(0.04);
+            stroke: root.ink.with-alpha(0.42);
+            stroke-width: root.line;
+            commands: "M545 440A220 82 0 1 1 105 440A220 82 0 1 1 545 440ZM105 440V466A220 82 0 0 0 545 466V440";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.56);
+            stroke-width: root.line;
+            commands: "M545 325A220 82 0 1 1 105 325A220 82 0 1 1 545 325ZM105 325V351A220 82 0 0 0 545 351V325";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            fill: root.tint.with-alpha(0.05);
+            stroke: root.glow.with-alpha(0.64);
+            stroke-width: root.line;
+            commands: "M545 210A220 82 0 1 1 105 210A220 82 0 1 1 545 210ZM105 210V236A220 82 0 0 0 545 236V210M385 210A60 22 0 1 1 265 210A60 22 0 1 1 385 210ZM325.1 210A0.1 0.1 0 0 1 325.1 210";
+        }
+    }
+}
+
+// The scene of this id as Slint draws it; the mechanism's, for one there is
+// none for.
+component DrawnEmblem inherits Rectangle {
+    in property <string> id;
+    in property <float> d;
+    in property <float> d-far;
+    in property <float> d-near;
+    in property <color> tint;
+    in property <float> presence;
+    if id == "media": MediaEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "playback": PlaybackEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "account": AccountEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "picture": PictureEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "output": OutputEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "audio": AudioEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "links": LinksEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "wifi": WifiEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "ethernet": EthernetEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "remote": RemoteEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "cec": CecEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "live": LiveEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "device": DeviceEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "cooling": CoolingEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "system": SystemEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "diagnostics": DiagnosticsEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "storage": StorageEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "services": ServicesEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+}
+
+// The deck: the scenes near the camera, the one it stands at and the one it
+// left. At rest that is one.
+export component EmblemDeck inherits Rectangle {
+    in property <QuietDeck> deck;
+    in property <color> tint;
+    in property <float> presence: 1;
+    // It stands in its place, at this size: what Slint draws is kept.
+    in property <bool> standing;
+    in property <length> box: self.width;
+    // How large the scenes are, in the middle of this: the mechanism alone
+    // grows with its flight, and they do not (nor do their textures).
+    in property <length> side: self.width;
+    // The mechanism is one of them; not where the home screen has its own.
+    in property <bool> mechanism: true;
+    in property <float> owed;
+    in property <length> panel-w;
+    in property <length> panel-h;
+
+    for n in 3: Rectangle {
+        width: 100%;
+        height: 100%;
+        property <string> id: QuietDecks.id(deck, n);
+        property <int> at: QuietDecks.at(deck, n);
+        property <bool> near: id != "" && QuietDecks.near(deck, n);
+        property <float> d: at - deck.cam;
+        property <float> d-far: at - deck.cam-far;
+        property <float> d-near: at - deck.cam-near;
+        // 0 unless the GPU draws this one (src/spatial).
+        property <int> spatial: Spatial.on && id != "" && id != "settings" ? Spatial.kind("emblem/" + id, Spatial.epoch) : 0;
+        if near && id == "settings" && mechanism: SettingsScene {
+            width: 100%;
+            height: 100%;
+            tint: root.tint;
+            d: d + root.owed;
+            d-far: d-far + root.owed;
+            d-near: d-near + root.owed;
+            presence: root.presence;
+            kept: standing;
+            box: root.box;
+        }
+        if near && spatial != 0: SpatialScene {
+            name: "emblem/" + id;
+            kind: spatial;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: root.side;
+            height: root.side;
+            d: d;
+            d-far: d-far;
+            d-near: d-near;
+            tint: root.tint;
+            presence: root.presence;
+            panel-w: root.panel-w;
+            panel-h: root.panel-h;
+        }
+        // Kept at rest: a focus moving through the rows beside it draws it no
+        // more than the heading.
+        if near && id != "settings" && spatial == 0: Still {
+            keep: root.standing && !QuietDecks.moving(deck);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: root.side;
+            height: root.side;
+            DrawnEmblem {
+                width: 100%;
+                height: 100%;
+                id: id;
+                d: d;
+                d-far: d-far;
+                d-near: d-near;
+                tint: root.tint;
+                presence: root.presence;
+            }
+        }
+    }
+}
