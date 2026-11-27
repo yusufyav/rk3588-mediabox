@@ -249,8 +249,8 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-console-off $prefix/bin/mediabox-console-off
   install -m 0755 /var/tmp/mediabox-boot-logo $prefix/bin/mediabox-boot-logo
   install -d $prefix/share/boot-logo
-  install -m 0644 /var/tmp/boot-logo-*.xrgb.gz $prefix/share/boot-logo/
-  rm -f /var/tmp/boot-logo-*.xrgb.gz
+  install -m 0644 /var/tmp/boot-logo-*.xrgb.gz /var/tmp/wordmark-*.xrgb.gz $prefix/share/boot-logo/
+  rm -f /var/tmp/boot-logo-*.xrgb.gz /var/tmp/wordmark-*.xrgb.gz
   install -m 0755 /var/tmp/mediabox-tv-drive $prefix/bin/mediabox-tv-drive
   install -m 0755 /var/tmp/mediabox-wireless-up $prefix/bin/mediabox-wireless-up
   install -m 0755 /var/tmp/mediabox-bt-agent $prefix/bin/mediabox-bt-agent

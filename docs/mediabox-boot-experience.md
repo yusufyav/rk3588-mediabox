@@ -554,16 +554,23 @@ B9'da fbdev'den sonra yalnız bir `final tmdsclk` satırı var.
    logoyu **arayüzün kullanacağı modda** kurar: Ayarlar'da bu ekran için
    seçilmiş zamanlama (`/var/lib/mediabox/output.json`, EDID SHA-256 ile
    eşleşirse), yoksa tercih edilen boyutta TMDS içindeki en hızlı mod; renk
-   arayüzün ilk karesininkiyle aynı (RGB, 8 bit). Görüntü arayüzün kendi logo
-   karesi: `/var/lib/mediabox-ui/boot-logo-<w>x<h>.xrgb`, yoksa ürünle gelen
-   `/opt/rk3588-mediabox/share/boot-logo/boot-logo-<w>x<h>.xrgb.gz`
-   (`packaging/boot-logo/`, 21 KB).
+   arayüzün ilk karesininkiyle aynı (RGB, 8 bit). Görüntü, sırasıyla:
+   bu çözünürlükte önceki açılıştan tutulan arayüz karesi
+   (`/var/lib/mediabox-ui/boot-logo-<w>x<h>.xrgb`); ürünle gelen kare
+   (`share/boot-logo/boot-logo-<w>x<h>.xrgb.gz`); ikisi de yoksa ürünle gelen
+   yazı (`wordmark-2560x1440.xrgb.gz`, 6 KB) arayüzün kendi yerleşim
+   kurallarıyla (`title-hero`, tam sayı ölçek) boyutlanıp ortalanır, en-boy
+   oranı korunur. DRM cihazı, bağlı ve yanan bağlayıcısı olan kart olarak
+   bulunur (kart numarası karta göre değişebilir).
    DRM master'ı bırakır, cihazı açık tutar (son kapanış kernel modunu geri
    getirmesin), arayüz düzleme kendi karesini koyunca çıkar.
 3. Arayüzün ilk karesi aynı mod ve renk: **modeset yok**. Logo, sahneler
    hazırlanırken durur, tanıtıma karışır; tanıtım Ana Menü'de biter
    (`src/opening.rs`). Yalnız soğuk açılışta: Kodi/tarayıcı dönüşü
    (`fdstore` devri) veya aynı açılışta yeniden başlama logoyu göstermez.
+4. Arayüz düzleme ilk karesini koyduğunda araç o kareyi (arayüzün logosu, bu
+   modda) dma-buf üzerinden okur ve bu çözünürlük için tutar: aynı ekranla
+   sonraki açılışlar arayüzün karesiyle birebir başlar.
 
 Kernel komut satırına mod yazılmaz (`video=` geçmişteki panik nedeni):
 mod her açılışta bağlı ekranın kendi EDID'sinden seçilir. Kayıt başka bir
@@ -579,6 +586,17 @@ ekrana aitse kullanılmaz.
 
 Logo 144 Hz'te T_k ≈ 8,4 s'de, arayüz devri ≈ 13 s'de, tanıtım ≈ 15 s'de.
 
+Çözünürlük (Plus, aynı monitör, Ayarlar'daki seçim değiştirilerek):
+
+| Mod | Logo kaynağı | Arayüz devri | Not |
+|---|---|---|---|
+| 2560x1440@120 | ürünle gelen kare | modeset yok | tutulan arayüz karesi, ürünle gelenle renk kanallarında birebir (fark yalnız alfa baytı) |
+| 1920x1080@120, 1. açılış | yazıdan oluşturuldu (104 ms) | modeset yok | arayüz karesine göre yazı kutusu en çok 2 px kayık; 2.073.600 pikselin 3.026'sı (kenar yumuşatma) farklı |
+| 1920x1080@120, 2. açılış | tutulan arayüz karesi | modeset yok | kare değişmedi (`unchanged`) |
+
+Oluşturma, tek çekirdekte ölçülen 2 ms (720p) – 16 ms (4K) sürer (geliştirme
+makinesi); araç arayüzden önce, ondan bağımsız çalışır.
+
 ### Kristal ölçümü ve mod değişimi
 
 Arayüz, mod değiştirmeden önce kristal hatasını (`CLOCK_MONOTONIC_RAW` /
@@ -593,9 +611,7 @@ kaydedilmiş değeri kullanılır, beklenmez (`platform.rs` `crystal_ppm`).
 - Kristal hatası büyük bir kartta (ör. −11 ppm) arayüz modu düzeltilmiş
   saatle kurar; logonun nominal saatinden farklıysa devirde bir modeset olur.
   Plus'ta (−0,1 ppm) fark aynı kHz'e yuvarlanıyor. Ultra'da ölçülmedi.
-- Ürünle gelen logo karesi yalnız 2560x1440; başka çözünürlükteki ekranda
-  erken logo yoktur, logo arayüzün ilk karesiyle (o ekranın modeset'iyle)
-  gelir. Diğer çözünürlüklerin kareleri aynı yoldan eklenebilir.
+- Ultra'da doğrulanmadı.
 
 ## 5. Doğrulanamayan hususlar
 
