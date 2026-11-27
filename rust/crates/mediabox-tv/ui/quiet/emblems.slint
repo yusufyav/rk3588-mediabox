@@ -976,6 +976,54 @@ component SystemEmblem inherits EmblemBase {
     }
 }
 
+// Arayüz ve Hareket: the opening's mark (intro.slint) -- a gate far
+// behind, the frame with its corner open, and the corner lifted off toward
+// the eye with the warm square of the world it opened onto.
+component MotionEmblem inherits EmblemBase {
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-far;
+        layer: 0.5;
+        Ink {
+            opacity: root.f-far;
+            stroke: root.ink.with-alpha(0.36);
+            stroke-width: root.fine;
+            commands: "M250 120h150v410h-150ZM262 132h126v386h-126Z";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d;
+        Ink {
+            opacity: root.f-main;
+            stroke: root.glow.with-alpha(0.66);
+            stroke-width: root.line;
+            commands: "M350 175H175V475H475V300";
+        }
+    }
+    Plane {
+        width: 100%;
+        height: 100%;
+        d: root.d-near;
+        layer: 1.7;
+        Ink {
+            opacity: root.f-near;
+            fill: root.tint.with-alpha(0.22);
+            stroke: root.glow.with-alpha(0.5);
+            stroke-width: root.fine;
+            commands: "M361 207h71v72h-71Z";
+        }
+        Ink {
+            opacity: root.f-near;
+            stroke: root.ink.with-alpha(0.62);
+            stroke-width: root.line;
+            commands: "M407 139H511V243";
+        }
+    }
+}
+
 // Depolama: üst üste katmanlar.
 component StorageEmblem inherits EmblemBase {
     Plane {
@@ -1041,6 +1089,7 @@ component DrawnEmblem inherits Rectangle {
     if id == "live": LiveEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
     if id == "device": DeviceEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
     if id == "cooling": CoolingEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
+    if id == "motion": MotionEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
     if id == "system": SystemEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
     if id == "diagnostics": DiagnosticsEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }
     if id == "storage": StorageEmblem { width: 100%; height: 100%; d: root.d; d-far: root.d-far; d-near: root.d-near; tint: root.tint; presence: root.presence; }

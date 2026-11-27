@@ -33,6 +33,9 @@ const MOST: (u32, u32) = (3840, 2160);
 /// The GPU's own scenes among Slint's (src/spatial).
 mod spatial;
 
+/// The opening, stood at a moment and drawn.
+mod intro;
+
 // ------------------------------------------------------- what GL was asked
 
 type Gen = unsafe extern "C" fn(i32, *mut u32);

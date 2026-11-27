@@ -16,6 +16,7 @@ import { QuietSettings } from "quiet/settings.slint";
 import { QuietBar } from "quiet/controls.slint";
 import { QuietMotion, QuietReach, QuietRig, QuietCam, QuietDeck, QuietDeckRig } from "quiet/motion.slint";
 import { QuietMotionLab } from "quiet/lab.slint";
+import { QuietIntro, QuietIntroScreen } from "quiet/intro.slint";
 import { Spatial, SpatialCam, SpatialPlace } from "quiet/spatial.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple, OutScreen } from "output.slint";
@@ -28,7 +29,7 @@ import { Diagnostics } from "diagnostics.slint";
 import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 import { PointerHub, PointerPan, PointerArrow } from "pointer.slint";
-export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietMotion, QuietReach, QuietCam, Spatial, SpatialCam, SpatialPlace }
+export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietIntro, QuietMotion, QuietReach, QuietCam, Spatial, SpatialCam, SpatialPlace }
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup, SocView,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
@@ -1107,6 +1108,10 @@ export component MediaBoxWindow inherits Window {
             connected: root.device-toast-connected;
             shown: root.device-toast-shown;
         }
+
+        // The opening (quiet/intro.slint), over every screen and sheet; the
+        // pointer's arrow alone is above it.
+        if QuietIntro.shown: QuietIntroScreen { }
 
         // The pointer's arrow, over everything.
         if pointer-shown: PointerArrow {

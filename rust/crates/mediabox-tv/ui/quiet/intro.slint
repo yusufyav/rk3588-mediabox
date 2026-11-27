@@ -1,0 +1,130 @@
+import { Metrics } from "../theme.slint";
+import { Quiet } from "core.slint";
+import { QuietMotion } from "motion.slint";
+import { QuietGround } from "materials.slint";
+import { FilmScene } from "scenes.slint";
+
+// Beyond the Frame: the opening (docs/beyond-the-frame.md). Shown from
+// Ayarlar > Arayüz ve Hareket > Açılışı önizle; not yet part of the boot.
+//
+// It is the home screen's own "Filmler ve Diziler" scene -- `FilmScene`,
+// unchanged, with its pinhole (`px`, `py`), its strips wrapped in depth
+// (`zk`, `fz`), its three planes and their fades -- drawn over the whole
+// panel on the home's ground (`QuietGround`), and moved the way the home
+// moves it: by three cameras, far, main and near, each a row offset `d`
+// (home.slint: `d: i - camera.cam`), each eased by the product's camera
+// curve (`QuietCurves.camera`) over its own duration (`t-camera-far`,
+// `t-camera`, `t-camera-near`), so the planes part in depth while they
+// travel and close up at rest. The camera runs down a list whose every row
+// is the film: each comes from ahead, its strips running through the gate,
+// and is passed; the last stops; then the camera goes through it, onto the
+// interface.
+//
+// What is different from the home is only the clock: the home's cameras
+// are animated properties, assigned; here they are functions of one clock,
+// so `QuietIntro.scrub` can stand it at any moment and the real renderer
+// draw it (src/hit/gl/intro.rs).
+
+export global QuietIntro {
+    // On the panel: set by the application, never by the intro itself.
+    in-out property <bool> shown;
+    // When it began, on Slint's own animation clock.
+    in-out property <duration> started;
+    // A moment to stand at, in seconds; below 0 the clock runs.
+    in-out property <float> scrub: -1;
+    // How long it lasts; with reduced motion, the scene standing and a fade.
+    out property <float> seconds: QuietMotion.on ? 4.1 : 1.2;
+
+    public function play() {
+        started = animation-tick();
+        scrub = -1;
+        shown = true;
+    }
+}
+
+export component QuietIntroScreen inherits Rectangle {
+    // The clock, in seconds.
+    property <float> clock: QuietIntro.scrub >= 0 ? QuietIntro.scrub : (animation-tick() - QuietIntro.started) / 1s;
+    property <bool> whole: QuietMotion.on;
+    property <float> t: whole ? min(clock, QuietIntro.seconds) : 1.0;
+
+    // ---- the product's camera curve (QuietCurves.camera), as a function:
+    // the same cubic Bézier, solved for its x by Newton's method.
+    property <float> x1: QuietMotion.profile == 1 ? 0.25 : QuietMotion.profile == 2 ? 0.6 : 0.45;
+    property <float> y1: QuietMotion.profile == 1 ? 0.9 : 0;
+    property <float> x2: QuietMotion.profile == 1 ? 0.3 : QuietMotion.profile == 2 ? 0.3 : 0.2;
+    property <float> y2: 1;
+    pure function bz(a: float, b: float, s: float) -> float {
+        return 3 * (1 - s) * (1 - s) * s * a + 3 * (1 - s) * s * s * b + s * s * s;
+    }
+    pure function slope(a: float, b: float, s: float) -> float {
+        return 3 * (1 - s) * (1 - s) * a + 6 * (1 - s) * s * (b - a) + 3 * s * s * (1 - b);
+    }
+    pure function newton(x: float, s: float) -> float {
+        return clamp(s - (bz(x1, x2, s) - x) / max(0.0001, slope(x1, x2, s)), 0, 1);
+    }
+    pure function camera(x: float) -> float {
+        let p = clamp(x, 0, 1);
+        return bz(y1, y2, newton(p, newton(p, newton(p, newton(p, newton(p, newton(p, p)))))));
+    }
+    // A camera's move from `a` to `b`, begun at `at` and lasting `long` s.
+    pure function move(a: float, b: float, at: float, long: float) -> float {
+        return a + (b - a) * camera((t - at) / long);
+    }
+
+    // ---- the three cameras: the product's durations, in proportion.
+    property <float> main: QuietMotion.t-camera / 1ms;
+    property <float> far-k: QuietMotion.t-camera-far / 1ms / max(1, main);
+    property <float> near-k: QuietMotion.t-camera-near / 1ms / max(1, main);
+    // Down the list: four rows of film, then the one it stops at.
+    property <float> rows: 4;
+    property <float> go: 0.25;
+    property <float> long: 2.0;
+    // Through the last one, onto the interface.
+    property <float> out: 3.3;
+    property <float> out-long: 0.55;
+    property <float> cam: move(-rows, 0, go, long) + move(0, 1, out, out-long);
+    property <float> cam-far: move(-rows, 0, go, long * far-k) + move(0, 1, out, out-long * far-k);
+    property <float> cam-near: move(-rows, 0, go, long * near-k) + move(0, 1, out, out-long * near-k);
+    // The scene coming from ahead as it opens (QuietRig.land's `arrive`).
+    property <float> arrive: 0.6 * (1 - camera((t - go) / long));
+
+    // The whole panel: the scene's 650-unit square, as wide as the panel.
+    property <length> side: max(Metrics.vw, Metrics.vh);
+
+    opacity: whole ? 1 : clamp(clock / 0.3, 0, 1) * (1 - clamp((clock - 0.8) / 0.4, 0, 1));
+
+    // Modal while it plays: nothing under it is pointed at through it.
+    TouchArea { }
+
+    // The home's ground, going as the camera goes through.
+    QuietGround {
+        width: 100%;
+        height: 100%;
+        aura: Quiet.aura("media");
+        light-x: 0.5;
+        light-y: 0.45;
+        opacity: 1 - clamp((root.t - root.out - 0.15) / 0.45, 0, 1);
+    }
+
+    for i in 5: FilmScene {
+        // Row i - 4: the last, row 0, is where it stops.
+        property <float> place: i - root.rows;
+        property <float> extra: i == 4 ? root.arrive : 0;
+        x: (Metrics.vw - root.side) / 2;
+        y: (Metrics.vh - root.side) / 2;
+        width: root.side;
+        height: root.side;
+        d: self.place - root.cam + self.extra;
+        d-far: self.place - root.cam-far + self.extra * 0.6;
+        d-near: self.place - root.cam-near + self.extra * 1.4;
+        tint: Quiet.aura("media");
+        presence: 0.9;
+    }
+
+    // The dark it begins in.
+    Rectangle {
+        background: #05080c;
+        opacity: 1 - clamp((root.t - 0.05) / 0.45, 0, 1);
+    }
+}

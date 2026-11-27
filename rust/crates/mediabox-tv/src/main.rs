@@ -12,6 +12,7 @@
 
 mod textfit;
 mod actions;
+mod appearance;
 mod detail;
 mod fdstore;
 #[cfg(feature = "gl-count")]
@@ -275,6 +276,11 @@ struct App {
     /// The face of the home screen and the settings, and where it is kept.
     layout: layout::Layout,
     interface: std::path::PathBuf,
+    /// The rest of that file: Quiet OS's motion and the opening
+    /// (`appearance.rs`). `layout` above is its face.
+    appearance: appearance::Interface,
+    /// Ends the opening's preview when it has played.
+    intro_timer: slint::Timer,
     account: screens::account::Account,
     wifi: screens::wireless::Wifi,
     bt: screens::wireless::Bluetooth,
@@ -757,6 +763,12 @@ impl App {
             && let Some(window) = self.window.upgrade()
         {
             self.lab.act(&window, intent);
+            // The lab turns the same values the settings do: kept the same way.
+            let turned = appearance::Motion::read(&window.global::<QuietMotion>());
+            if turned != self.appearance.motion {
+                self.appearance.motion = turned;
+                self.keep_appearance();
+            }
             self.paint();
             return;
         }
@@ -6456,9 +6468,63 @@ impl App {
                 // restart after this frame comes back to it.
                 self.layout = layout;
                 self.settings.set_layout(layout);
-                layout::write(self.interface.clone(), layout);
+                self.keep_appearance();
                 self.clear_notice();
                 self.paint();
+            }
+            Action::SetIntroEnabled(on) => {
+                self.appearance.intro.enabled = on;
+                self.keep_appearance();
+            }
+            Action::ChooseIntroPolicy => {
+                if self.settings.open_intro_policy() {
+                    self.paint();
+                }
+            }
+            Action::SetIntroPolicy(policy) => {
+                self.appearance.intro.policy = policy;
+                self.keep_appearance();
+            }
+            Action::ChooseIntroSkip => {
+                if self.settings.open_intro_skip() {
+                    self.paint();
+                }
+            }
+            Action::SetIntroSkip(skip) => {
+                self.appearance.intro.skip = skip;
+                self.keep_appearance();
+            }
+            Action::PreviewIntro => self.play_intro(),
+            Action::SetReduced(on) => {
+                self.appearance.motion.reduced = on;
+                self.keep_appearance();
+            }
+            Action::SetIcons(on) => {
+                self.appearance.motion.icons = on;
+                self.keep_appearance();
+            }
+            Action::ChooseMotion(param) => {
+                if self.settings.open_motion(param) {
+                    self.paint();
+                }
+            }
+            Action::SetMotion(param, hundredths) => {
+                param.set(&mut self.appearance.motion, hundredths);
+                self.keep_appearance();
+            }
+            Action::ChooseCurve => {
+                if self.settings.open_curve() {
+                    self.paint();
+                }
+            }
+            Action::SetCurve(curve) => {
+                self.appearance.motion.curve = curve;
+                self.keep_appearance();
+            }
+            Action::ResetMotion => {
+                self.appearance.motion = appearance::Motion::default();
+                self.keep_appearance();
+                self.say("Hareket ayarları varsayılana döndü".into());
             }
             Action::ChooseCecTarget => {
                 if self.settings.open_cec_choice() {
@@ -6710,6 +6776,9 @@ impl App {
     /// A press or a release of a remote's key or a mouse's button, on the
     /// same road: the dispatcher, and Ok's hold told from its press.
     fn press(&mut self, action: InputAction, pressed: bool, origin: input::Origin) {
+        if self.intro_takes(action, pressed) {
+            return;
+        }
         if action == InputAction::Ok {
             if !pressed {
                 self.ok_up();
@@ -6732,6 +6801,9 @@ impl App {
         if pressed {
             self.hide_pointer();
         }
+        if self.intro_takes(action, pressed) {
+            return;
+        }
         // Only the remote says when a key comes up; a press from anywhere
         // else is acted on as it arrives, as it always was.
         if action == InputAction::Ok && source == mediabox_core::InputSource::Cec {
@@ -6749,6 +6821,58 @@ impl App {
         if let Some(action) = self.dispatcher.accept(action, input::Origin::Bus) {
             self.act(action);
         }
+    }
+
+    // ------------------------------------------------------------ the opening
+
+    /// Whether the opening is on the panel (ui/quiet/intro.slint).
+    fn intro_shown(&self) -> bool {
+        self.window.upgrade().is_some_and(|window| window.global::<QuietIntro>().get_shown())
+    }
+
+    /// The opening, over whatever is on the panel, from its first frame. For
+    /// now only the settings' preview plays it; the boot does not.
+    fn play_intro(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+        let intro = window.global::<QuietIntro>();
+        intro.invoke_play();
+        let seconds = intro.get_seconds().max(0.1);
+        self.intro_timer.start(slint::TimerMode::SingleShot, Duration::from_secs_f32(seconds), || {
+            with_app(|app| app.end_intro())
+        });
+        eprintln!("mediabox-tv.intro playing {seconds:.1}s skip={:?}", self.appearance.intro.skip);
+    }
+
+    fn end_intro(&mut self) {
+        self.intro_timer.stop();
+        if let Some(window) = self.window.upgrade() {
+            window.global::<QuietIntro>().set_shown(false);
+        }
+    }
+
+    /// A key while the opening plays is the opening's: it ends it, or -- as
+    /// the settings say -- does nothing. Never anything underneath.
+    fn intro_takes(&mut self, action: InputAction, pressed: bool) -> bool {
+        if !self.intro_shown() {
+            return false;
+        }
+        if pressed && self.appearance.intro.skip.skips(matches!(action, InputAction::Ok | InputAction::Back)) {
+            eprintln!("mediabox-tv.intro skipped by {action:?}");
+            self.end_intro();
+        }
+        true
+    }
+
+    /// The face, the motion and the opening: applied, drawn on their cards,
+    /// and kept whole -- one file, one writer, off the event loop.
+    fn keep_appearance(&mut self) {
+        self.appearance.layout = self.layout;
+        if let Some(window) = self.window.upgrade() {
+            self.appearance.motion.apply(&window.global::<QuietMotion>());
+        }
+        self.settings.set_appearance(self.appearance);
+        appearance::write(self.interface.clone(), self.appearance);
+        self.paint();
     }
 
     fn open(&mut self, route: Route) {
@@ -8858,9 +8982,12 @@ impl AppFiles {
 impl App {
     /// The interface's state, on `window`, before anything is shown.
     fn new(window: &MediaBoxWindow, started: Instant, trace_input: bool, files: AppFiles) -> Self {
-        let layout = layout::read(&files.interface);
+        let kept = appearance::read(&files.interface);
+        let layout = kept.layout;
+        kept.motion.apply(&window.global::<QuietMotion>());
         let mut settings = screens::settings::Settings::new();
         settings.set_layout(layout);
+        settings.set_appearance(kept);
         App {
             window: window.as_weak(),
             stack: route::Stack::new(),
@@ -8889,6 +9016,8 @@ impl App {
             prefs: prefs::read(&files.prefs),
             layout,
             interface: files.interface.clone(),
+            appearance: kept,
+            intro_timer: slint::Timer::default(),
             account: screens::account::Account::new(),
             wifi: screens::wireless::Wifi::new(),
             bt: screens::wireless::Bluetooth::new(),

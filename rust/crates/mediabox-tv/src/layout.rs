@@ -5,13 +5,14 @@
 //! (`ui/home.slint` and `ui/settings.slint`, or `ui/quiet/`). Every
 //! focus, pointer zone, row and action is the same under both.
 //!
+//! The file is the interface's own preferences (`appearance.rs` keeps the
+//! rest of it: Quiet OS's motion and the opening); this reads the face.
+//!
 //! Kept in a file of its own beside the session file rather than in
 //! `media-preferences.json`, which is "Filmler ve Diziler"'s own: the face of
 //! the system is not that application's business. A box that never chose, a
 //! missing file, a broken one, or a value this build does not know, is the
 //! classic face -- what every box drew before there was a choice.
-
-use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -42,29 +43,18 @@ impl Layout {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Kept {
-    #[serde(default, deserialize_with = "or_default")]
-    layout: Layout,
+/// The face kept, read from the whole file (`appearance::read`).
+#[cfg(test)]
+pub fn read(path: impl AsRef<std::path::Path>) -> Layout {
+    crate::appearance::read(path).layout
 }
 
-fn or_default<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Layout, D::Error> {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(serde_json::from_value(value).unwrap_or_default())
-}
-
-pub fn read(path: impl AsRef<Path>) -> Layout {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Kept>(&text).ok())
-        .map(|kept| kept.layout)
-        .unwrap_or_default()
-}
-
-/// Written whole and atomically, off the event loop, as the media
-/// preferences are (`prefs::write_in_background`).
-pub fn write(path: PathBuf, layout: Layout) {
-    crate::prefs::write_in_background(path, Kept { layout });
+/// Written only as part of the whole file (`appearance::write`): the face
+/// alone would drop the motion and the opening kept beside it.
+#[cfg(test)]
+fn write(path: std::path::PathBuf, layout: Layout) {
+    let kept = crate::appearance::read(&path);
+    crate::appearance::write(path, crate::appearance::Interface { layout, ..kept });
 }
 
 #[cfg(test)]
@@ -89,8 +79,9 @@ mod tests {
         }
         crate::prefs::write_now(
             &path,
-            &Kept {
+            &crate::appearance::Interface {
                 layout: Layout::Quiet,
+                ..Default::default()
             },
         )
         .unwrap();
