@@ -128,8 +128,11 @@ if [ -n "$only" ]; then
   for name in "${names[@]}"; do
     if [ "$name" = mediabox-tv ]; then
       say "mediabox-tv (native, $target_triple)"
-      "$here/scripts/build-mediabox-tv.sh"
-      cp "$(mediabox_cargo_target mediabox-tv)/$target_triple/release/mediabox-tv" "$stage/"
+      # The development profile: a change to the interface is minutes
+      # shorter to the television (Cargo.toml, [profile.device]).
+      tv_profile="${MEDIABOX_TV_PROFILE:-device}"
+      MEDIABOX_TV_PROFILE="$tv_profile" "$here/scripts/build-mediabox-tv.sh"
+      cp "$(mediabox_cargo_target mediabox-tv)/$target_triple/$tv_profile/mediabox-tv" "$stage/"
     else
       say "$name (cross-compile, $target_triple, build image)"
       mediabox_build_run -w /work/rust -- \

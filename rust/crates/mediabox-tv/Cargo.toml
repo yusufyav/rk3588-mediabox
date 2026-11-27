@@ -89,3 +89,16 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Development installs (deploy-mediabox-v3.sh --only): the same optimisation
+# level, but the crate in sixteen pieces, compiled in parallel and kept
+# between builds, and no link-time pass. The release profile's single
+# codegen unit and thin LTO cost 4.5 minutes for any change to this crate --
+# a round trip per edit to the television. Not what ships: a full deploy and
+# a release build use [profile.release]. Frame-time measurements are taken
+# from that one.
+[profile.device]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
