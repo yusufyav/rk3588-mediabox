@@ -1127,7 +1127,7 @@ check "an application's own preparation leaves /boot alone, with no display" "$(
 out="$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)"
 check "a boot with no display still removes a video= an older version left" \
   "$(cat "$hp/armbianEnv.txt")" \
-  $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+  $'verbosity=1\nextraargs=cma=256M vt.global_cursor_default=0\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz\nconsole=serial'
 contains "and says so" "$out" 'boot-video=removed'
 printf '%s\n' "$env_before" >"$hp/armbianEnv.txt"; rm -f "$hp/armbianEnv.txt.mediabox-video"
 printf '%s' "$on" >"$hp/outputs"
@@ -1136,11 +1136,24 @@ check "an application's own preparation leaves /boot alone" "$(cat "$hp/armbianE
 out="$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)"
 check "a settled display removes a video= an older version left, and writes none" \
   "$(cat "$hp/armbianEnv.txt")" \
-  $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+  $'verbosity=1\nextraargs=cma=256M vt.global_cursor_default=0\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz\nconsole=serial'
 contains "and says it removed it" "$out" 'boot-video=removed'
 check "the original is kept once" "$(cat "$hp/armbianEnv.txt.mediabox-video")" "$env_before"
 contains "and a second run finds nothing to remove" \
   "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-video=absent'
+# The console off the television: console=serial, the cursor off -- each
+# line rewritten in place, the rest untouched, the original kept once.
+contains "the boot console is put on the serial line" "$out" 'boot-console=set'
+check "the original is kept once, before the console was moved" \
+  "$(cat "$hp/armbianEnv.txt.mediabox-console")" \
+  $'verbosity=1\nextraargs=cma=256M\nuser_overlays=mediabox-hdmi-any-vp fan-pwm-50hz'
+contains "and a second run finds it already so" \
+  "$(prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1)" 'boot-console=serial'
+printf 'verbosity=1\nconsole=both\nextraargs=cma=256M\n' >"$hp/armbianEnv.txt"
+prepare_real env MEDIABOX_HDMI_BOOT_VIDEO=1 >/dev/null
+check "Armbian's console=both is rewritten where it stands" "$(cat "$hp/armbianEnv.txt")" \
+  $'verbosity=1\nconsole=serial\nextraargs=cma=256M vt.global_cursor_default=0'
+rm -f "$hp/armbianEnv.txt.mediabox-console"
 
 # Kodi's profile: the plan's mode only when the platform says the plan is for
 # this display now; otherwise the mode already on the wire, never the last

@@ -101,6 +101,45 @@ else
   fi
 fi
 
+# No console on the television either. Armbian boots with `console=both`, so
+# the kernel's and systemd's lines go to tty1 -- the framebuffer the kernel
+# has put on the wire -- from the moment the display is probed (T_k 3.9 s on
+# the Plus) until mediabox-console-off takes the console away and puts the
+# switch-on's logo there. Seen on the television: a few lines of boot log
+# before the logo. `console=serial` keeps every line on the serial console,
+# where they were also going, and `vt.global_cursor_default=0` keeps the
+# empty console's cursor off the panel. Neither is the kernel's or U-Boot's
+# code: Armbian's boot script reads both from this file. Kept here, with the
+# video= rule above, so that an Armbian update that rewrites the file is put
+# right at the next boot; the first boot after it shows the lines once.
+boot_console=not-asked
+if [ "${MEDIABOX_HDMI_BOOT_VIDEO:-0}" = 1 ] && [ -f "$boot_env" ] && [ -w "$boot_env" ]; then
+  extra="$(sed -n 's/^extraargs=//p' "$boot_env" | head -1)"
+  case " $extra " in
+    *" vt.global_cursor_default=0 "*) want_extra=$extra ;;
+    *) want_extra="${extra:+$extra }vt.global_cursor_default=0" ;;
+  esac
+  if grep -q '^console=serial$' "$boot_env" && grep -q '^extraargs=' "$boot_env" \
+    && [ "$extra" = "$want_extra" ]; then
+    boot_console=serial
+  else
+    before="$(sha256sum "$boot_env" | cut -c1-12)"
+    [ -f "$boot_env.mediabox-console" ] || cp -a "$boot_env" "$boot_env.mediabox-console"
+    next="$boot_env.mediabox-next"
+    awk -v extra="extraargs=$want_extra" '
+      /^console=/ { if (!c) print "console=serial"; c = 1; next }
+      /^extraargs=/ { if (!e) print extra; e = 1; next }
+      { print }
+      END { if (!c) print "console=serial"; if (!e) print extra }' "$boot_env" >"$next"
+    chmod --reference="$boot_env" "$next" 2>/dev/null || true
+    sync "$next" 2>/dev/null || sync
+    mv -f "$next" "$boot_env"
+    sync
+    boot_console="set $before->$(sha256sum "$boot_env" | cut -c1-12)"
+  fi
+  echo "mediabox-hdmi-prepare: boot-console=$boot_console" >&2
+fi
+
 if [ -z "$connector" ]; then
   # Nothing is plugged in, or discovery could not decide. Neither is this
   # script's to fix, and neither is a reason to fail the unit that runs it:

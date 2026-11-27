@@ -1,0 +1,376 @@
+#!/usr/bin/python3
+#
+# The switch-on's logo, at the display's own rate, before the interface.
+#
+# The kernel lights the display at the mode its EDID calls preferred --
+# 2560x1440 at 60 Hz on the Plus's 144 Hz monitor -- and the interface runs at
+# the sink's fastest at that size. A picture shown at the first and handed to
+# the second is a link training between them: the monitor dark for seconds
+# between the logo and the opening. So the logo is put on the wire here at the
+# mode the interface will commit: the mode chosen for this sink in Settings
+# (/var/lib/mediabox/output.json, its timing key and the sink's EDID SHA-256,
+# mediabox-core output.rs) -- and with none chosen, the sink's own fastest
+# mode at its preferred size, within TMDS (600 MHz; the interface never uses
+# FRL) -- with
+# the colour the interface's first frame writes (RGB, 8 bits, default
+# colorimetry, no HDR metadata). The interface's first commit is then the
+# same state: no modeset, the logo lit into the opening.
+#
+# DRM master is given up once the logo is up and the device kept open: a last
+# close would hand the display back to the kernel's mode. The device is closed
+# when another frame is on the logo's plane -- the interface has it -- or after
+# MEDIABOX_BOOT_LOGO_HOLD seconds.
+#
+# Nothing on the kernel command line, ever (mediabox-hdmi-prepare): the mode
+# comes from the EDID of the display connected now, at every boot.
+import ctypes
+import fcntl
+import gzip
+import hashlib
+import json
+import mmap
+import os
+import socket
+import sys
+import time
+
+DEVICE = os.environ.get("MEDIABOX_BOOT_LOGO_DEVICE", "/dev/dri/card0")
+OUTPUT = os.environ.get("MEDIABOX_OUTPUT_SETTING", "/var/lib/mediabox/output.json")
+SYS_DRM = os.environ.get("MEDIABOX_SYS_DRM", "/sys/class/drm")
+CONNECTOR_NAMES = {10: "DP", 11: "HDMI-A", 12: "HDMI-B", 14: "eDP"}
+LOGO_DIR = os.environ.get("MEDIABOX_BOOT_LOGO_DIR", "/var/lib/mediabox-ui")
+# The frames the product ships (packaging/boot-logo/), compressed.
+SHIPPED_DIR = os.environ.get("MEDIABOX_BOOT_LOGO_SHIPPED", "/opt/rk3588-mediabox/share/boot-logo")
+HOLD = float(os.environ.get("MEDIABOX_BOOT_LOGO_HOLD", "90"))
+
+
+def say(message):
+    print("mediabox-boot-logo: " + message, flush=True)
+
+
+def ioc(direction, nr, size):
+    return (direction << 30) | (size << 16) | (ord("d") << 8) | nr
+
+
+u32, u64, u16 = ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint16
+
+
+class CardRes(ctypes.Structure):
+    _fields_ = [("fb_id_ptr", u64), ("crtc_id_ptr", u64), ("connector_id_ptr", u64), ("encoder_id_ptr", u64),
+                ("count_fbs", u32), ("count_crtcs", u32), ("count_connectors", u32), ("count_encoders", u32),
+                ("min_width", u32), ("max_width", u32), ("min_height", u32), ("max_height", u32)]
+
+
+class GetConnector(ctypes.Structure):
+    _fields_ = [("encoders_ptr", u64), ("modes_ptr", u64), ("props_ptr", u64), ("prop_values_ptr", u64),
+                ("count_modes", u32), ("count_props", u32), ("count_encoders", u32), ("encoder_id", u32),
+                ("connector_id", u32), ("connector_type", u32), ("connector_type_id", u32), ("connection", u32),
+                ("mm_width", u32), ("mm_height", u32), ("subpixel", u32), ("pad", u32)]
+
+
+class GetEncoder(ctypes.Structure):
+    _fields_ = [("encoder_id", u32), ("encoder_type", u32), ("crtc_id", u32), ("possible_crtcs", u32),
+                ("possible_clones", u32)]
+
+
+class PlaneRes(ctypes.Structure):
+    _fields_ = [("plane_id_ptr", u64), ("count_planes", u32)]
+
+
+class SetCap(ctypes.Structure):
+    _fields_ = [("capability", u64), ("value", u64)]
+
+
+class ObjProps(ctypes.Structure):
+    _fields_ = [("props_ptr", u64), ("values_ptr", u64), ("count", u32), ("obj_id", u32), ("obj_type", u32)]
+
+
+class GetProp(ctypes.Structure):
+    _fields_ = [("values_ptr", u64), ("enum_blob_ptr", u64), ("prop_id", u32), ("flags", u32),
+                ("name", ctypes.c_char * 32), ("count_values", u32), ("count_enum_blobs", u32)]
+
+
+class CreateDumb(ctypes.Structure):
+    _fields_ = [("height", u32), ("width", u32), ("bpp", u32), ("flags", u32), ("handle", u32),
+                ("pitch", u32), ("size", u64)]
+
+
+class MapDumb(ctypes.Structure):
+    _fields_ = [("handle", u32), ("pad", u32), ("offset", u64)]
+
+
+class FbCmd2(ctypes.Structure):
+    _fields_ = [("fb_id", u32), ("width", u32), ("height", u32), ("pixel_format", u32), ("flags", u32),
+                ("handles", u32 * 4), ("pitches", u32 * 4), ("offsets", u32 * 4), ("modifier", u64 * 4)]
+
+
+class CreateBlob(ctypes.Structure):
+    _fields_ = [("data", u64), ("length", u32), ("blob_id", u32)]
+
+
+class Atomic(ctypes.Structure):
+    _fields_ = [("flags", u32), ("count_objs", u32), ("objs_ptr", u64), ("count_props_ptr", u64),
+                ("props_ptr", u64), ("prop_values_ptr", u64), ("reserved", u64), ("user_data", u64)]
+
+
+class GetPlane(ctypes.Structure):
+    _fields_ = [("plane_id", u32), ("crtc_id", u32), ("fb_id", u32), ("possible_crtcs", u32),
+                ("gamma_size", u32), ("count_format_types", u32), ("format_type_ptr", u64)]
+
+
+class ModeInfo(ctypes.Structure):
+    _fields_ = [("clock", u32), ("hdisplay", u16), ("hsync_start", u16), ("hsync_end", u16), ("htotal", u16),
+                ("hskew", u16), ("vdisplay", u16), ("vsync_start", u16), ("vsync_end", u16), ("vtotal", u16),
+                ("vscan", u16), ("vrefresh", u32), ("flags", u32), ("type", u32), ("name", ctypes.c_char * 32)]
+
+
+SET_CLIENT_CAP = ioc(1, 0x0D, ctypes.sizeof(SetCap))
+GETRESOURCES = ioc(3, 0xA0, ctypes.sizeof(CardRes))
+GETENCODER = ioc(3, 0xA6, ctypes.sizeof(GetEncoder))
+GETCONNECTOR = ioc(3, 0xA7, ctypes.sizeof(GetConnector))
+GETPLANERESOURCES = ioc(3, 0xB5, ctypes.sizeof(PlaneRes))
+DROP_MASTER = ioc(0, 0x1F, 0)
+GETPROPERTY = ioc(3, 0xAA, ctypes.sizeof(GetProp))
+CREATE_DUMB = ioc(3, 0xB2, ctypes.sizeof(CreateDumb))
+MAP_DUMB = ioc(3, 0xB3, ctypes.sizeof(MapDumb))
+GETPLANE = ioc(3, 0xB6, ctypes.sizeof(GetPlane))
+ADDFB2 = ioc(3, 0xB8, ctypes.sizeof(FbCmd2))
+OBJ_GETPROPERTIES = ioc(3, 0xB9, ctypes.sizeof(ObjProps))
+ATOMIC = ioc(3, 0xBC, ctypes.sizeof(Atomic))
+CREATEPROPBLOB = ioc(3, 0xBD, ctypes.sizeof(CreateBlob))
+
+OBJ = {"connector": 0xC0C0C0C0, "crtc": 0xCCCCCCCC, "plane": 0xEEEEEEEE}
+XRGB8888 = 0x34325258
+ALLOW_MODESET = 0x400
+PREFERRED = 1 << 3
+INTERLACE = 1 << 4
+TMDS_MAX_KHZ = 600000
+
+
+def properties(fd, obj, kind):
+    query = ObjProps(obj_id=obj, obj_type=OBJ[kind])
+    fcntl.ioctl(fd, OBJ_GETPROPERTIES, query, True)
+    ids = (u32 * query.count)()
+    values = (u64 * query.count)()
+    query.props_ptr, query.values_ptr = ctypes.addressof(ids), ctypes.addressof(values)
+    fcntl.ioctl(fd, OBJ_GETPROPERTIES, query, True)
+    named, current = {}, {}
+    for prop, value in zip(ids, values):
+        info = GetProp(prop_id=prop)
+        fcntl.ioctl(fd, GETPROPERTY, info, True)
+        named[info.name.decode()] = prop
+        current[info.name.decode()] = value
+    return named, current
+
+
+def notify_ready():
+    address = os.environ.get("NOTIFY_SOCKET")
+    if not address:
+        return
+    if address.startswith("@"):
+        address = "\0" + address[1:]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.sendto(b"READY=1", address)
+
+
+def ids(fd, request, query, field, count_field, ctype=u32):
+    fcntl.ioctl(fd, request, query, True)
+    array = (ctype * getattr(query, count_field))()
+    setattr(query, field, ctypes.addressof(array))
+    fcntl.ioctl(fd, request, query, True)
+    return array
+
+
+def connected_output(fd):
+    """The connected connector, its CRTC (the one the kernel lit) and its modes."""
+    res = CardRes()
+    fcntl.ioctl(fd, GETRESOURCES, res, True)
+    connectors = (u32 * res.count_connectors)()
+    crtcs = (u32 * res.count_crtcs)()
+    res.connector_id_ptr, res.crtc_id_ptr = ctypes.addressof(connectors), ctypes.addressof(crtcs)
+    res.count_fbs = res.count_encoders = 0
+    fcntl.ioctl(fd, GETRESOURCES, res, True)
+    for connector in connectors:
+        query = GetConnector(connector_id=connector)
+        fcntl.ioctl(fd, GETCONNECTOR, query, True)
+        if query.connection != 1 or query.count_modes == 0 or query.encoder_id == 0:
+            continue
+        modes = (ModeInfo * query.count_modes)()
+        query.modes_ptr = ctypes.addressof(modes)
+        query.count_props = query.count_encoders = 0
+        fcntl.ioctl(fd, GETCONNECTOR, query, True)
+        encoder = GetEncoder(encoder_id=query.encoder_id)
+        fcntl.ioctl(fd, GETENCODER, encoder, True)
+        if encoder.crtc_id == 0:
+            continue
+        index = list(crtcs).index(encoder.crtc_id)
+        name = f"{CONNECTOR_NAMES.get(query.connector_type, '?')}-{query.connector_type_id}"
+        return connector, name, encoder.crtc_id, index, list(modes)
+    return None
+
+
+def key_of(m):
+    """mediabox-core's TimingKey (timing.rs): every field drm_mode_match compares."""
+    return "t1:%d:%d,%d,%d,%d,%d:%d,%d,%d,%d,%d:%04x" % (
+        m.clock, m.hdisplay, m.hsync_start, m.hsync_end, m.htotal, m.hskew,
+        m.vdisplay, m.vsync_start, m.vsync_end, m.vtotal, m.vscan, m.flags & 0x3FFF)
+
+
+def kept_key(connector_name):
+    """The timing chosen in Settings for the sink connected now, if any."""
+    card = os.path.basename(DEVICE)
+    try:
+        edid = open(os.path.join(SYS_DRM, f"{card}-{connector_name}", "edid"), "rb").read()
+        with open(OUTPUT) as f:
+            kept = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if "schema" not in kept or kept.get("edid_sha256") != hashlib.sha256(edid).hexdigest():
+        return None
+    resolution = kept.get("resolution") or {}
+    return resolution.get("key") if resolution.get("kind") == "timing" else None
+
+
+def chosen_mode(modes, kept):
+    """The mode chosen in Settings; with none, the sink's fastest at its
+    preferred size, within TMDS."""
+    for m in modes:
+        if kept and key_of(m) == kept:
+            return m
+    preferred = next((m for m in modes if m.type & PREFERRED), modes[0])
+    same = [m for m in modes if (m.hdisplay, m.vdisplay) == (preferred.hdisplay, preferred.vdisplay)
+            and m.clock <= TMDS_MAX_KHZ and not m.flags & INTERLACE]
+    return max(same, key=lambda m: (m.vrefresh, m.clock)) if same else preferred
+
+
+def primary_plane(fd, crtc_index):
+    res = PlaneRes()
+    planes = ids(fd, GETPLANERESOURCES, res, "plane_id_ptr", "count_planes")
+    for plane in planes:
+        state = GetPlane(plane_id=plane)
+        fcntl.ioctl(fd, GETPLANE, state, True)
+        if not state.possible_crtcs & (1 << crtc_index):
+            continue
+        _, current = properties(fd, plane, "plane")
+        if current.get("type") == 1:  # primary
+            return plane
+    return None
+
+
+def main():
+    fd = os.open(DEVICE, os.O_RDWR | os.O_CLOEXEC)
+    fcntl.ioctl(fd, SET_CLIENT_CAP, SetCap(2, 1))  # universal planes
+    fcntl.ioctl(fd, SET_CLIENT_CAP, SetCap(3, 1))  # atomic
+    output = connected_output(fd)
+    if output is None:
+        say("no lit, connected display; the interface sets it")
+        os.close(fd)
+        return 0
+    connector, name, crtc, crtc_index, modes = output
+    kept = kept_key(name)
+    m = chosen_mode(modes, kept)
+    width, height = m.hdisplay, m.vdisplay
+    name_xrgb = f"boot-logo-{width}x{height}.xrgb"
+    logo_path, logo = None, None
+    for path, opener in [(os.path.join(LOGO_DIR, name_xrgb), open),
+                         (os.path.join(SHIPPED_DIR, name_xrgb + ".gz"), gzip.open)]:
+        try:
+            with opener(path, "rb") as f:
+                logo_path, logo = path, f.read()
+            break
+        except OSError:
+            continue
+    if logo is None:
+        say(f"no logo frame {name_xrgb}; not shown")
+        os.close(fd)
+        return 0
+    if len(logo) != width * height * 4:
+        say(f"{logo_path} is not {width}x{height}; not shown")
+        os.close(fd)
+        return 0
+    plane = primary_plane(fd, crtc_index)
+    if plane is None:
+        say("no primary plane for the lit CRTC; not shown")
+        os.close(fd)
+        return 0
+
+    dumb = CreateDumb(height=height, width=width, bpp=32)
+    fcntl.ioctl(fd, CREATE_DUMB, dumb, True)
+    mapping = MapDumb(handle=dumb.handle)
+    fcntl.ioctl(fd, MAP_DUMB, mapping, True)
+    memory = mmap.mmap(fd, dumb.size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=mapping.offset)
+    row = width * 4
+    if dumb.pitch == row:
+        memory[: len(logo)] = logo
+    else:
+        for y in range(height):
+            memory[y * dumb.pitch: y * dumb.pitch + row] = logo[y * row: (y + 1) * row]
+    fb = FbCmd2(width=width, height=height, pixel_format=XRGB8888)
+    fb.handles[0], fb.pitches[0] = dumb.handle, dumb.pitch
+    fcntl.ioctl(fd, ADDFB2, fb, True)
+
+    info = m
+    blob = CreateBlob(data=ctypes.addressof(info), length=ctypes.sizeof(info))
+    fcntl.ioctl(fd, CREATEPROPBLOB, blob, True)
+
+    cp, kp, pp = (properties(fd, connector, "connector")[0], properties(fd, crtc, "crtc")[0],
+                  properties(fd, plane, "plane")[0])
+    writes = [(connector, cp["CRTC_ID"], crtc), (crtc, kp["MODE_ID"], blob.blob_id), (crtc, kp["ACTIVE"], 1)]
+    # The interface's first frame's colour (platform.rs `atomic_modeset`):
+    # RGB (this driver's rgb=0), 8 bits, default colorimetry, no HDR.
+    for prop, value in [("color_format", 0), ("color_depth", 8), ("Colorspace", 0), ("HDR_OUTPUT_METADATA", 0)]:
+        if prop in cp:
+            writes.append((connector, cp[prop], value))
+    for prop, value in [("FB_ID", fb.fb_id), ("CRTC_ID", crtc), ("SRC_X", 0), ("SRC_Y", 0),
+                        ("SRC_W", width << 16), ("SRC_H", height << 16), ("CRTC_X", 0), ("CRTC_Y", 0),
+                        ("CRTC_W", width), ("CRTC_H", height)]:
+        writes.append((plane, pp[prop], value))
+    objects = []
+    for obj, _, _ in writes:
+        if obj not in objects:
+            objects.append(obj)
+    objs = (u32 * len(objects))(*objects)
+    counts = (u32 * len(objects))(*[sum(1 for o, _, _ in writes if o == obj) for obj in objects])
+    ordered = [w for obj in objects for w in writes if w[0] == obj]
+    props = (u32 * len(ordered))(*[p for _, p, _ in ordered])
+    values = (u64 * len(ordered))(*[v for _, _, v in ordered])
+    request = Atomic(flags=ALLOW_MODESET, count_objs=len(objects), objs_ptr=ctypes.addressof(objs),
+                     count_props_ptr=ctypes.addressof(counts), props_ptr=ctypes.addressof(props),
+                     prop_values_ptr=ctypes.addressof(values))
+    at = time.monotonic()
+    fcntl.ioctl(fd, ATOMIC, request, True)
+    say(f"logo at {width}x{height}@{m.vrefresh} {m.clock} kHz ({'chosen in Settings' if kept and key_of(m) == kept else 'fastest'}), "
+        f"{name} connector {connector} crtc {crtc} from {logo_path} "
+        f"plane {plane} ({(time.monotonic() - at) * 1000:.0f} ms)")
+    try:
+        fcntl.ioctl(fd, DROP_MASTER)
+    except OSError as e:
+        say(f"master not given up ({e})")
+    notify_ready()
+
+    # Kept open until another frame is on the plane, so the kernel never
+    # takes the display back in between.
+    deadline = time.monotonic() + HOLD
+    while time.monotonic() < deadline:
+        state = GetPlane(plane_id=plane)
+        try:
+            fcntl.ioctl(fd, GETPLANE, state, True)
+        except OSError:
+            break
+        if state.fb_id != fb.fb_id:
+            say("another frame is on the plane; the device is let go")
+            break
+        time.sleep(0.05)
+    else:
+        say(f"nothing took the plane in {HOLD:.0f} s; let go")
+    memory.close()
+    os.close(fd)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # the boot goes on black, as it did
+        say(f"not shown: {e!r}")
+        sys.exit(0)

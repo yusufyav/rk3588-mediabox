@@ -89,6 +89,7 @@ packaging/systemd/mediaboxd-rs.service	etc/systemd/system/mediaboxd-rs.service
 packaging/systemd/mediabox-tv-ui.service	etc/systemd/system/mediabox-tv-ui.service
 packaging/systemd/mediabox-media-worker.service	etc/systemd/system/mediabox-media-worker.service
 packaging/systemd/mediabox-console-off.service	etc/systemd/system/mediabox-console-off.service
+packaging/systemd/mediabox-boot-logo.service	etc/systemd/system/mediabox-boot-logo.service
 packaging/systemd/mediabox-display-changed.service	etc/systemd/system/mediabox-display-changed.service
 packaging/systemd/mediabox-display-seed.service	etc/systemd/system/mediabox-display-seed.service
 packaging/systemd/mediabox-display-observer.service	etc/systemd/system/mediabox-display-observer.service

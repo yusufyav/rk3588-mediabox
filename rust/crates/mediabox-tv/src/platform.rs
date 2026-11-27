@@ -1052,6 +1052,13 @@ pub fn snapshot_to(path: std::path::PathBuf) {
     SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(path));
 }
 
+/// The first frame's commit -- the mode on the wire -- has returned.
+static FIRST_COMMIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn first_commit_done() -> bool {
+    FIRST_COMMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Whether to rebuild each frame's framebuffer instead of keeping it with the
 /// buffer. Off in production; the measurement path, and nothing else.
 fn no_fb_cache() -> bool {
@@ -1934,6 +1941,7 @@ impl SplitDisplay {
                 }
             }
             self.presentation.borrow_mut().current = Some(frame);
+            FIRST_COMMIT.store(true, std::sync::atomic::Ordering::Relaxed);
         } else {
             // One interface frame at a time: the one before is on the panel
             // and the one before that back with GBM.
@@ -2953,6 +2961,26 @@ impl GlContext {
     /// Slow and deliberately so — a 4K readback is tens of megabytes — which is
     /// why it happens once, when asked, and never on an ordinary frame.
     fn capture(&self, path: &Path) {
+        let Some((width, height, image)) = self.read_back() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match image::RgbaImage::from_raw(width, height, image) {
+            Some(buffer) => match buffer.save(path) {
+                Ok(()) => eprintln!(
+                    "mediabox-tv.snapshot wrote {} {}x{}",
+                    path.display(),
+                    width,
+                    height
+                ),
+                Err(e) => eprintln!("mediabox-tv.snapshot {} failed: {e}", path.display()),
+            },
+            None => eprintln!("mediabox-tv.snapshot buffer did not fit the frame"),
+        }
+    }
+
+    /// The finished frame, top row first, RGBA with opaque alpha.
+    fn read_back(&self) -> Option<(u32, u32, Vec<u8>)> {
         const GL_RGBA: u32 = 0x1908;
         const GL_UNSIGNED_BYTE: u32 = 0x1401;
         type ReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8);
@@ -2961,7 +2989,7 @@ impl GlContext {
         let address = self.context.display().get_proc_address(&symbol);
         if address.is_null() {
             eprintln!("mediabox-tv.snapshot glReadPixels unavailable");
-            return;
+            return None;
         }
         let read: ReadPixels = unsafe { std::mem::transmute(address) };
 
@@ -2993,22 +3021,7 @@ impl GlContext {
                 pixel[3] = 0xff;
             }
         }
-
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match image::RgbaImage::from_raw(width, height, image) {
-            Some(buffer) => match buffer.save(path) {
-                Ok(()) => eprintln!(
-                    "mediabox-tv.snapshot wrote {} {}x{}",
-                    path.display(),
-                    width,
-                    height
-                ),
-                Err(e) => eprintln!("mediabox-tv.snapshot {} failed: {e}", path.display()),
-            },
-            None => eprintln!("mediabox-tv.snapshot buffer did not fit the frame"),
-        }
+        Some((width, height, image))
     }
 }
 

@@ -542,6 +542,61 @@ B9'da fbdev'den sonra yalnız bir `final tmdsclk` satırı var.
   `/opt/rk3588-mediabox/rollback/only-20261126T080958Z/rollback.sh`
   (mediabox-tv) altında.
 
+## 4c. Açılış logosu → tanıtım → Ana Menü (uygulandı)
+
+### Akış
+
+1. Kernel framebuffer'ı EDID'nin *tercih edilen* moduyla açar (Plus'taki HP
+   monitörde 2560x1440 @ 59,95 Hz). Ekranda log yoktur: `mediabox-hdmi-prepare`
+   `armbianEnv.txt`'de `console=serial` ve `vt.global_cursor_default=0`'ı korur
+   (U-Boot ve kernel değişmez; seri konsol ve SSH aynen kalır).
+2. `mediabox-boot-logo` (`packaging/`, açılışta bir kez çalışan yardımcı)
+   logoyu **arayüzün kullanacağı modda** kurar: Ayarlar'da bu ekran için
+   seçilmiş zamanlama (`/var/lib/mediabox/output.json`, EDID SHA-256 ile
+   eşleşirse), yoksa tercih edilen boyutta TMDS içindeki en hızlı mod; renk
+   arayüzün ilk karesininkiyle aynı (RGB, 8 bit). Görüntü arayüzün kendi logo
+   karesi: `/var/lib/mediabox-ui/boot-logo-<w>x<h>.xrgb`, yoksa ürünle gelen
+   `/opt/rk3588-mediabox/share/boot-logo/boot-logo-<w>x<h>.xrgb.gz`
+   (`packaging/boot-logo/`, 21 KB).
+   DRM master'ı bırakır, cihazı açık tutar (son kapanış kernel modunu geri
+   getirmesin), arayüz düzleme kendi karesini koyunca çıkar.
+3. Arayüzün ilk karesi aynı mod ve renk: **modeset yok**. Logo, sahneler
+   hazırlanırken durur, tanıtıma karışır; tanıtım Ana Menü'de biter
+   (`src/opening.rs`). Yalnız soğuk açılışta: Kodi/tarayıcı dönüşü
+   (`fdstore` devri) veya aynı açılışta yeniden başlama logoyu göstermez.
+
+Kernel komut satırına mod yazılmaz (`video=` geçmişteki panik nedeni):
+mod her açılışta bağlı ekranın kendi EDID'sinden seçilir. Kayıt başka bir
+ekrana aitse kullanılmaz.
+
+### Ölçülen (Plus, 2026-11-27)
+
+| Kayıtlı seçim | Logo modu | Arayüz devri | Kablodaki modesetler |
+|---|---|---|---|
+| 60 Hz | 60 Hz | modeset yok | yalnız kernel |
+| 75 Hz | 75 Hz | modeset yok | kernel + logo |
+| 144 Hz | 144 Hz | modeset yok | kernel + logo |
+
+Logo 144 Hz'te T_k ≈ 8,4 s'de, arayüz devri ≈ 13 s'de, tanıtım ≈ 15 s'de.
+
+### Kristal ölçümü ve mod değişimi
+
+Arayüz, mod değiştirmeden önce kristal hatasını (`CLOCK_MONOTONIC_RAW` /
+`CLOCK_MONOTONIC`) okur. NTP ağ geldikten sonra monotonik saati kaydırınca
+uzun pencerenin oranı ±100 ppm'i aşıyor (ölçülen: 28 dk'da 96 ppm, son 5 s'de
+3 ppm) ve mod değişimi ekranı tutarak 11 s bekliyordu; Ayarlar'daki 15 s'lik
+deneme, görüntü gelmeden geri alınıyordu. Artık bu durumda bu açılışın
+kaydedilmiş değeri kullanılır, beklenmez (`platform.rs` `crystal_ppm`).
+
+### Açık kalanlar
+
+- Kristal hatası büyük bir kartta (ör. −11 ppm) arayüz modu düzeltilmiş
+  saatle kurar; logonun nominal saatinden farklıysa devirde bir modeset olur.
+  Plus'ta (−0,1 ppm) fark aynı kHz'e yuvarlanıyor. Ultra'da ölçülmedi.
+- Ürünle gelen logo karesi yalnız 2560x1440; başka çözünürlükteki ekranda
+  erken logo yoktur, logo arayüzün ilk karesiyle (o ekranın modeset'iyle)
+  gelir. Diğer çözünürlüklerin kareleri aynı yoldan eklenebilir.
+
 ## 5. Doğrulanamayan hususlar
 
 - Güç → ilk fiziksel görüntü süresi, monitörün sinyale kilitlenme süresi ve

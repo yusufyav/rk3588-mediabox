@@ -44,6 +44,14 @@ export {
     LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow,
 }
 
+// The logo of a switch-on (src/opening.rs), over every screen and the
+// opening: on the first frame, the picture the kernel's framebuffer was
+// already showing; then it fades into what has been made under it.
+export global QuietBoot {
+    in-out property <bool> logo;
+    in-out property <bool> leaving;
+}
+
 // What the television shows before there is anything to show.
 //
 // Not a splash screen for its own sake: the home surface is assembled from
@@ -1112,6 +1120,14 @@ export component MediaBoxWindow inherits Window {
         // The opening (quiet/intro.slint), over every screen and sheet; the
         // pointer's arrow alone is above it.
         if QuietIntro.shown: QuietIntroScreen { }
+
+        if QuietBoot.logo: Boot {
+            width: 100%;
+            height: 100%;
+            status: "";
+            opacity: QuietBoot.leaving ? 0 : 1;
+            animate opacity { duration: 320ms; easing: ease-in-out; }
+        }
 
         // The pointer's arrow, over everything.
         if pointer-shown: PointerArrow {

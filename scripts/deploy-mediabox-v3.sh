@@ -230,11 +230,14 @@ say "television shell"
 # mediabox-display-scale stays because the browser application still uses it.
 cp_ "$here/packaging/mediabox-kiosk-smoke" \
     "$here/packaging/mediabox-hdmi-prepare" "$here/packaging/mediabox-display-scale" \
-    "$here/packaging/mediabox-console-off" "$here/packaging/mediabox-tv-drive" \
+    "$here/packaging/mediabox-console-off" "$here/packaging/mediabox-boot-logo" \
+    "$here"/packaging/boot-logo/*.xrgb.gz \
+    "$here/packaging/mediabox-tv-drive" \
     "$here/packaging/mediabox-wireless-up" "$here/packaging/mediabox-bt-agent" \
     "$here/packaging/mediabox-product-verify" "$here/packaging/mediabox-playback-smoke" \
     "$MEDIABOX_TARGET:/var/tmp/"
 cp_ "$here/packaging/systemd/mediabox-console-off.service" \
+    "$here/packaging/systemd/mediabox-boot-logo.service" \
     "$here/packaging/systemd/mediabox-wireless.service" \
     "$here/packaging/systemd/mediabox-bt-agent.service" \
     "$MEDIABOX_TARGET:/etc/systemd/system/"
@@ -244,6 +247,10 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-hdmi-prepare $prefix/bin/mediabox-hdmi-prepare
   install -m 0755 /var/tmp/mediabox-display-scale $prefix/bin/mediabox-display-scale
   install -m 0755 /var/tmp/mediabox-console-off $prefix/bin/mediabox-console-off
+  install -m 0755 /var/tmp/mediabox-boot-logo $prefix/bin/mediabox-boot-logo
+  install -d $prefix/share/boot-logo
+  install -m 0644 /var/tmp/boot-logo-*.xrgb.gz $prefix/share/boot-logo/
+  rm -f /var/tmp/boot-logo-*.xrgb.gz
   install -m 0755 /var/tmp/mediabox-tv-drive $prefix/bin/mediabox-tv-drive
   install -m 0755 /var/tmp/mediabox-wireless-up $prefix/bin/mediabox-wireless-up
   install -m 0755 /var/tmp/mediabox-bt-agent $prefix/bin/mediabox-bt-agent
@@ -253,7 +260,7 @@ sh_ "set -e
   install -m 0755 /var/tmp/mediabox-playback-smoke $prefix/bin/mediabox-playback-smoke
   rm -f /var/tmp/mediabox-product-verify /var/tmp/mediabox-playback-smoke
   rm -f /var/tmp/mediabox-kiosk-smoke /var/tmp/mediabox-hdmi-prepare \
-        /var/tmp/mediabox-display-scale /var/tmp/mediabox-console-off \
+        /var/tmp/mediabox-display-scale /var/tmp/mediabox-console-off /var/tmp/mediabox-boot-logo \
         /var/tmp/mediabox-tv-drive /var/tmp/mediabox-wireless-up \
         /var/tmp/mediabox-bt-agent
   # The radios, in an order this hardware survives; see the script.
@@ -261,7 +268,10 @@ sh_ "set -e
   systemctl enable mediabox-wireless.service >/dev/null 2>&1 || true
   systemctl enable --now mediabox-bt-agent.service >/dev/null 2>&1 || true
   systemctl daemon-reload
-  systemctl enable --now mediabox-console-off.service >/dev/null"
+  systemctl enable --now mediabox-console-off.service >/dev/null
+  # The switch-on's logo at the sink's own mode; enabled, not started: it is
+  # for the next boot, never for a running interface.
+  systemctl enable mediabox-boot-logo.service >/dev/null"
 
 # What the compositor-based shell left behind. Removed rather than left in
 # place: a launcher script that still exists is a launcher script somebody will

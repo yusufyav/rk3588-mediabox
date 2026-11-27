@@ -1,8 +1,9 @@
 # Beyond the Frame — açılış sekansı
 
-Durum: **beşinci sürüm (Ana Menü'nün FilmScene'i), onay bekliyor.** Yalnız Ayarlar > Arayüz ve
-Hareket > *Açılışı önizle* ile oynar. Cihazın açılış akışına bağlanmadı,
-cihaza kurulmadı.
+Durum: **beşinci sürüm (Ana Menü'nün FilmScene'i).** Soğuk açılışta logodan
+sonra oynar (bkz. `docs/mediabox-boot-experience.md` §4c); Ayarlar > Arayüz ve
+Hareket > *Açılışı önizle* ile de oynatılabilir. Animasyonun tasarımı bu
+sürümde değişmedi.
 
 Reddedilen denemeler geri dönülebilir durumda: `beyond-the-frame-v1`
 (`88d2229`, şehir/tren/çöl), `ecfe078` (film şeridi ilk çekimi),
@@ -82,6 +83,4 @@ ffmpeg -framerate 60 -i .../film/frame-%04d.png -c:v libx264 -pix_fmt yuv420p -c
 
 ## Açık kalanlar
 
-- Kullanıcı onayı: sekansın görsel kalitesi.
-- Cihazda gerçek zamanlı ölçüm (onaydan sonra, haber verilerek).
-- Açılış akışına bağlanma — kapsam dışı, onay bekler.
+- Cihazda gerçek zamanlı kare ölçümü (144 Hz'te tanıtım sırasında).

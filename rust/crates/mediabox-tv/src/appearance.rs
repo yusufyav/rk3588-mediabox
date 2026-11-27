@@ -284,10 +284,7 @@ impl Default for Intro {
 }
 
 /// A switch-on the opening may follow: which boot it is, which day, which
-/// build. Not yet asked by the boot -- the opening is a preview until it
-/// is approved -- but the policy is decided here, and tested, so wiring it
-/// is a call and not a design.
-#[cfg_attr(not(test), allow(dead_code))]
+/// build. Recorded by every switch-on (opening.rs).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Switch {
     pub boot: String,
@@ -298,7 +295,6 @@ pub struct Switch {
 impl Intro {
     /// Whether the opening plays at `now`, after it last played at `last`.
     /// A restart of the interface within one boot never plays it again.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn plays(&self, reduced: bool, last: Option<&Switch>, now: &Switch) -> bool {
         if !self.enabled || reduced {
             return false;
