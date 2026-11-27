@@ -398,7 +398,17 @@ fn crystal_ppm() -> Option<f64> {
         return crystal_kept().or_else(|| CRYSTAL_EARLY.get().copied());
     }
     let ppm = (raw as f64 / mono as f64 - 1.0) * 1e6;
-    let ppm = (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)?;
+    if ppm.abs() > CRYSTAL_PPM_MAX {
+        // Not the crystal: CLOCK_MONOTONIC itself was slewed while this
+        // process ran -- NTP correcting the time after the network came back
+        // (measured on the Plus, 2026-11-27: 96 ppm accumulated over 28
+        // minutes, 3 ppm in the last five seconds). Nothing is waited for: the
+        // value this boot already measured stands. Without one, a mode change
+        // waited CRYSTAL_WINDOW + 1 s in `crystal_ppm_settled`, holding the
+        // display, and a trial's fifteen seconds ran out before its picture
+        // was on the panel.
+        return crystal_kept().or_else(|| CRYSTAL_EARLY.get().copied()).or(Some(0.0));
+    }
     crystal_keep(ppm);
     Some(ppm)
 }
