@@ -12,6 +12,7 @@
 
 mod textfit;
 mod actions;
+mod appearance;
 mod detail;
 mod fdstore;
 #[cfg(feature = "gl-count")]
@@ -25,6 +26,7 @@ mod layout;
 mod metrics;
 mod model;
 mod motion_lab;
+mod opening;
 mod monitor;
 mod platform;
 mod pointer;
@@ -140,6 +142,11 @@ fn interface_file() -> std::path::PathBuf {
         Some(path) => path.into(),
         None => std::path::Path::new(&state_file()).with_file_name("interface-preferences.json"),
     }
+}
+
+/// Where the switch-on is recorded, beside the session file.
+fn opening_switch_file() -> std::path::PathBuf {
+    std::path::Path::new(&state_file()).with_file_name("opening-switch.json")
 }
 
 fn snapshot_dir() -> String {
@@ -275,6 +282,18 @@ struct App {
     /// The face of the home screen and the settings, and where it is kept.
     layout: layout::Layout,
     interface: std::path::PathBuf,
+    /// The rest of that file: Quiet OS's motion and the opening
+    /// (`appearance.rs`). `layout` above is its face.
+    appearance: appearance::Interface,
+    /// Ends the opening's preview when it has played.
+    intro_timer: slint::Timer,
+    /// The switch-on's logo (opening.rs): its clock, whether the opening
+    /// follows it, frames drawn, when its mode went on the wire, when it began.
+    opening_timer: slint::Timer,
+    opening_intro: bool,
+    opening_drawn: u32,
+    opening_committed: Option<Instant>,
+    opening_at: Option<Instant>,
     account: screens::account::Account,
     wifi: screens::wireless::Wifi,
     bt: screens::wireless::Bluetooth,
@@ -757,6 +776,12 @@ impl App {
             && let Some(window) = self.window.upgrade()
         {
             self.lab.act(&window, intent);
+            // The lab turns the same values the settings do: kept the same way.
+            let turned = appearance::Motion::read(&window.global::<QuietMotion>());
+            if turned != self.appearance.motion {
+                self.appearance.motion = turned;
+                self.keep_appearance();
+            }
             self.paint();
             return;
         }
@@ -6456,9 +6481,63 @@ impl App {
                 // restart after this frame comes back to it.
                 self.layout = layout;
                 self.settings.set_layout(layout);
-                layout::write(self.interface.clone(), layout);
+                self.keep_appearance();
                 self.clear_notice();
                 self.paint();
+            }
+            Action::SetIntroEnabled(on) => {
+                self.appearance.intro.enabled = on;
+                self.keep_appearance();
+            }
+            Action::ChooseIntroPolicy => {
+                if self.settings.open_intro_policy() {
+                    self.paint();
+                }
+            }
+            Action::SetIntroPolicy(policy) => {
+                self.appearance.intro.policy = policy;
+                self.keep_appearance();
+            }
+            Action::ChooseIntroSkip => {
+                if self.settings.open_intro_skip() {
+                    self.paint();
+                }
+            }
+            Action::SetIntroSkip(skip) => {
+                self.appearance.intro.skip = skip;
+                self.keep_appearance();
+            }
+            Action::PreviewIntro => self.play_intro(),
+            Action::SetReduced(on) => {
+                self.appearance.motion.reduced = on;
+                self.keep_appearance();
+            }
+            Action::SetIcons(on) => {
+                self.appearance.motion.icons = on;
+                self.keep_appearance();
+            }
+            Action::ChooseMotion(param) => {
+                if self.settings.open_motion(param) {
+                    self.paint();
+                }
+            }
+            Action::SetMotion(param, hundredths) => {
+                param.set(&mut self.appearance.motion, hundredths);
+                self.keep_appearance();
+            }
+            Action::ChooseCurve => {
+                if self.settings.open_curve() {
+                    self.paint();
+                }
+            }
+            Action::SetCurve(curve) => {
+                self.appearance.motion.curve = curve;
+                self.keep_appearance();
+            }
+            Action::ResetMotion => {
+                self.appearance.motion = appearance::Motion::default();
+                self.keep_appearance();
+                self.say("Hareket ayarları varsayılana döndü".into());
             }
             Action::ChooseCecTarget => {
                 if self.settings.open_cec_choice() {
@@ -6710,6 +6789,9 @@ impl App {
     /// A press or a release of a remote's key or a mouse's button, on the
     /// same road: the dispatcher, and Ok's hold told from its press.
     fn press(&mut self, action: InputAction, pressed: bool, origin: input::Origin) {
+        if self.intro_takes(action, pressed) {
+            return;
+        }
         if action == InputAction::Ok {
             if !pressed {
                 self.ok_up();
@@ -6732,6 +6814,9 @@ impl App {
         if pressed {
             self.hide_pointer();
         }
+        if self.intro_takes(action, pressed) {
+            return;
+        }
         // Only the remote says when a key comes up; a press from anywhere
         // else is acted on as it arrives, as it always was.
         if action == InputAction::Ok && source == mediabox_core::InputSource::Cec {
@@ -6749,6 +6834,168 @@ impl App {
         if let Some(action) = self.dispatcher.accept(action, input::Origin::Bus) {
             self.act(action);
         }
+    }
+
+    // ------------------------------------------------------------ the opening
+
+    /// Whether the opening is on the panel (ui/quiet/intro.slint).
+    fn intro_shown(&self) -> bool {
+        self.window.upgrade().is_some_and(|window| window.global::<QuietIntro>().get_shown())
+    }
+
+    /// The opening, over whatever is on the panel, from its first frame. For
+    /// now only the settings' preview plays it; the boot does not.
+    fn play_intro(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+        let intro = window.global::<QuietIntro>();
+        intro.invoke_play();
+        let seconds = intro.get_seconds().max(0.1);
+        self.intro_timer.start(slint::TimerMode::SingleShot, Duration::from_secs_f32(seconds), || {
+            with_app(|app| app.end_intro())
+        });
+        eprintln!("mediabox-tv.intro playing {seconds:.1}s skip={:?}", self.appearance.intro.skip);
+    }
+
+    fn end_intro(&mut self) {
+        self.intro_timer.stop();
+        if let Some(window) = self.window.upgrade() {
+            window.global::<QuietIntro>().set_shown(false);
+        }
+    }
+
+    /// The switch-on (opening.rs). The logo is on the first frame, over the
+    /// home screen and -- where it plays -- the opening held at its first
+    /// moment, so that both are drawn, and their scenes made, behind it.
+    fn begin_opening(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+        let path = opening_switch_file();
+        let last = opening::read_last(&path);
+        let now = opening::now();
+        let plan = opening::decide(
+            fdstore::adopted(),
+            last.as_ref(),
+            &now,
+            &self.appearance.intro,
+            self.appearance.motion.reduced,
+            self.layout == layout::Layout::Quiet,
+        );
+        eprintln!(
+            "mediabox-tv.opening logo={} intro={} adopted={}",
+            plan.logo,
+            plan.intro,
+            fdstore::adopted()
+        );
+        if !plan.logo {
+            return;
+        }
+        opening::record(&path, &now);
+        let boot = window.global::<QuietBoot>();
+        boot.set_leaving(false);
+        boot.set_logo(true);
+        if plan.intro {
+            let intro = window.global::<QuietIntro>();
+            intro.set_scrub(0.0);
+            intro.set_shown(true);
+        }
+        self.opening_intro = plan.intro;
+        self.opening_at = Some(Instant::now());
+        self.opening_timer.start(slint::TimerMode::Repeated, Duration::from_millis(8), || {
+            with_app(|app| app.opening_tick())
+        });
+    }
+
+    fn logo_shown(&self) -> bool {
+        self.window.upgrade().is_some_and(|window| window.global::<QuietBoot>().get_logo())
+    }
+
+    /// The logo stays until what is under it is ready -- a frame of it on
+    /// the panel, the scenes made -- and for LOGO_SHOWN after the interface's
+    /// first commit, so that a monitor that had to lock to a new mode has
+    /// shown it. Never longer than OPENING_CAP.
+    fn opening_tick(&mut self) {
+        const OPENING_CAP: Duration = Duration::from_secs(6);
+        const LOGO_SHOWN: Duration = Duration::from_millis(2000);
+        let Some(window) = self.window.upgrade() else { return };
+        let waited = self.opening_at.map(|at| at.elapsed()).unwrap_or_default();
+        let capped = waited >= OPENING_CAP;
+        if self.opening_committed.is_none() && platform::first_commit_done() {
+            self.opening_committed = Some(Instant::now());
+        }
+        let shown = self.opening_committed.is_some_and(|at| at.elapsed() >= LOGO_SHOWN);
+        if (self.opening_drawn < 3 || !spatial::prepared() || !shown) && !capped {
+            window.window().request_redraw();
+            return;
+        }
+        self.opening_timer.stop();
+        eprintln!(
+            "mediabox-tv.opening ready after {} ms frames={} capped={capped}",
+            waited.as_millis(),
+            self.opening_drawn
+        );
+        self.leave_logo();
+    }
+
+    /// The logo goes into what is under it: the opening, from its first
+    /// moment -- dark, as the logo's ground is -- or the interface.
+    fn leave_logo(&mut self) {
+        let Some(window) = self.window.upgrade() else { return };
+        if std::mem::take(&mut self.opening_intro) && self.intro_shown() {
+            self.play_intro();
+        }
+        window.global::<QuietBoot>().set_leaving(true);
+        self.opening_timer.start(slint::TimerMode::SingleShot, Duration::from_millis(360), || {
+            with_app(|app| app.end_logo())
+        });
+    }
+
+    fn end_logo(&mut self) {
+        if let Some(window) = self.window.upgrade() {
+            let boot = window.global::<QuietBoot>();
+            boot.set_logo(false);
+            boot.set_leaving(false);
+        }
+        eprintln!("mediabox-tv.opening logo gone");
+    }
+
+    /// A key while the opening plays is the opening's: it ends it, or -- as
+    /// the settings say -- does nothing. Never anything underneath.
+    fn intro_takes(&mut self, action: InputAction, pressed: bool) -> bool {
+        if self.logo_shown() {
+            let leaving = self.window.upgrade().is_some_and(|w| w.global::<QuietBoot>().get_leaving());
+            if pressed
+                && !leaving
+                && self.appearance.intro.skip.skips(matches!(action, InputAction::Ok | InputAction::Back))
+            {
+                eprintln!("mediabox-tv.opening skipped by {action:?}");
+                self.opening_intro = false;
+                self.end_intro();
+                self.opening_timer.stop();
+                self.leave_logo();
+            }
+            if !leaving || self.intro_shown() {
+                return true;
+            }
+        }
+        if !self.intro_shown() {
+            return false;
+        }
+        if pressed && self.appearance.intro.skip.skips(matches!(action, InputAction::Ok | InputAction::Back)) {
+            eprintln!("mediabox-tv.intro skipped by {action:?}");
+            self.end_intro();
+        }
+        true
+    }
+
+    /// The face, the motion and the opening: applied, drawn on their cards,
+    /// and kept whole -- one file, one writer, off the event loop.
+    fn keep_appearance(&mut self) {
+        self.appearance.layout = self.layout;
+        if let Some(window) = self.window.upgrade() {
+            self.appearance.motion.apply(&window.global::<QuietMotion>());
+        }
+        self.settings.set_appearance(self.appearance);
+        appearance::write(self.interface.clone(), self.appearance);
+        self.paint();
     }
 
     fn open(&mut self, route: Route) {
@@ -8858,9 +9105,12 @@ impl AppFiles {
 impl App {
     /// The interface's state, on `window`, before anything is shown.
     fn new(window: &MediaBoxWindow, started: Instant, trace_input: bool, files: AppFiles) -> Self {
-        let layout = layout::read(&files.interface);
+        let kept = appearance::read(&files.interface);
+        let layout = kept.layout;
+        kept.motion.apply(&window.global::<QuietMotion>());
         let mut settings = screens::settings::Settings::new();
         settings.set_layout(layout);
+        settings.set_appearance(kept);
         App {
             window: window.as_weak(),
             stack: route::Stack::new(),
@@ -8889,6 +9139,13 @@ impl App {
             prefs: prefs::read(&files.prefs),
             layout,
             interface: files.interface.clone(),
+            appearance: kept,
+            intro_timer: slint::Timer::default(),
+            opening_timer: slint::Timer::default(),
+            opening_intro: false,
+            opening_drawn: 0,
+            opening_committed: None,
+            opening_at: None,
             account: screens::account::Account::new(),
             wifi: screens::wireless::Wifi::new(),
             bt: screens::wireless::Bluetooth::new(),
@@ -9074,7 +9331,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let handle = window.as_weak();
         let reported = std::cell::Cell::new(false);
         platform::on_drawn(move || {
-            with_app(|app| app.meter.frame());
+            with_app(|app| {
+                app.meter.frame();
+                app.opening_drawn = app.opening_drawn.saturating_add(1);
+            });
             if !reported.replace(true) {
                 if let Some(window) = handle.upgrade() {
                     report_surface(&window);
@@ -9221,6 +9481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.apply_caption_style();
         app.stack.reset(Route::Home);
         app.restore();
+        app.begin_opening();
     });
     window.run()?;
     Ok(())

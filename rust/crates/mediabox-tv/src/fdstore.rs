@@ -23,6 +23,15 @@ const NAME: &str = "mediabox-tv-drm";
 /// Files systemd handed back at start, held until the first frame is shown.
 static INHERITED: Mutex<Vec<OwnedFd>> = Mutex::new(Vec::new());
 
+/// Whether `adopt` took a device back: this start is a return to a display
+/// that was kept lit (from Kodi, the browser, a restart), not a switch-on.
+static ADOPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process began on a display device the last stop kept.
+pub fn adopted() -> bool {
+    ADOPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Take the stored device back, if systemd passed one. Call once, at start.
 pub fn adopt() {
     let pid_matches = std::env::var("LISTEN_PID")
@@ -57,6 +66,7 @@ pub fn adopt() {
         }
     }
     if !held.is_empty() {
+        ADOPTED.store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("mediabox-tv.handover took back the display device kept across the last stop");
     }
 }

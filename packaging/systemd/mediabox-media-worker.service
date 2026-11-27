@@ -1,6 +1,10 @@
 [Unit]
 Description=RK3588 MediaBox local media worker
-After=network.target stremio-server.service
+# Wants the streaming server but is not ordered after it: that server waits for
+# network-online.target, and an ordering here put the worker -- and through it
+# the control plane and the television -- behind the network. The worker asks
+# the server per request and reports it unreachable until it is up.
+After=network.target
 Wants=network.target stremio-server.service
 Before=mediaboxd-rs.service
 

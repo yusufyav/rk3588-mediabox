@@ -16,6 +16,7 @@ import { QuietSettings } from "quiet/settings.slint";
 import { QuietBar } from "quiet/controls.slint";
 import { QuietMotion, QuietReach, QuietRig, QuietCam, QuietDeck, QuietDeckRig } from "quiet/motion.slint";
 import { QuietMotionLab } from "quiet/lab.slint";
+import { QuietIntro, QuietIntroScreen } from "quiet/intro.slint";
 import { Spatial, SpatialCam, SpatialPlace } from "quiet/spatial.slint";
 import { CoolingView, CoolChip, CoolRow, CoolInfo, CoolPoint, CoolTick, CoolSeg } from "cooling.slint";
 import { OutputView, OutRow, OutCell, OutAction, OutInfo, OutSimple, OutScreen } from "output.slint";
@@ -28,7 +29,7 @@ import { Diagnostics } from "diagnostics.slint";
 import { LiveTv, LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow, LiveMonitorRow } from "live.slint";
 import { AccountChip } from "chrome.slint";
 import { PointerHub, PointerPan, PointerArrow } from "pointer.slint";
-export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietMotion, QuietReach, QuietCam, Spatial, SpatialCam, SpatialPlace }
+export { AccountChip, CaptionStyle, PointerHub, PointerPan, QuietIntro, QuietMotion, QuietReach, QuietCam, Spatial, SpatialCam, SpatialPlace }
 import {
     RailModel, PosterItem, AppTile, VitalsModel, TechRow, SettingRow, DiagGroup, SocView,
     SheetRow, KeyCap, KeyRow, NpControl, TopBar, Sheet,
@@ -41,6 +42,14 @@ export {
     OutSimple, OutScreen, SocView, ChoiceItem, SettingNav, Badge, InfoLine, EthernetView, AudioView, AudioCard, SearchEntry,
     EpisodeRow, DiscoverFilter, CaptionLine, CaptionRun, MsCategory, MsRow, MsNode, MsRate, MsRoute,
     LiveCard, LiveMenuRow, LiveKeypadRow, LiveGuideCell, LiveGuideRow, LiveTime, LivePanelRow,
+}
+
+// The logo of a switch-on (src/opening.rs), over every screen and the
+// opening: on the first frame, the picture the kernel's framebuffer was
+// already showing; then it fades into what has been made under it.
+export global QuietBoot {
+    in-out property <bool> logo;
+    in-out property <bool> leaving;
 }
 
 // What the television shows before there is anything to show.
@@ -1106,6 +1115,18 @@ export component MediaBoxWindow inherits Window {
             title: root.device-toast-title;
             connected: root.device-toast-connected;
             shown: root.device-toast-shown;
+        }
+
+        // The opening (quiet/intro.slint), over every screen and sheet; the
+        // pointer's arrow alone is above it.
+        if QuietIntro.shown: QuietIntroScreen { }
+
+        if QuietBoot.logo: Boot {
+            width: 100%;
+            height: 100%;
+            status: "";
+            opacity: QuietBoot.leaving ? 0 : 1;
+            animate opacity { duration: 320ms; easing: ease-in-out; }
         }
 
         // The pointer's arrow, over everything.

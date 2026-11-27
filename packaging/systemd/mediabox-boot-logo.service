@@ -1,0 +1,18 @@
+[Unit]
+Description=The switch-on's logo at the display's own mode
+Documentation=file:///opt/rk3588-mediabox/bin/mediabox-boot-logo
+DefaultDependencies=no
+# After the console is off the television, before the interface: the logo is
+# on the wire at the interface's mode when it starts (src/opening.rs).
+After=mediabox-console-off.service
+RequiresMountsFor=/var/lib/mediabox-ui /opt/rk3588-mediabox
+Before=mediabox-tv-ui.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=/opt/rk3588-mediabox/bin/mediabox-boot-logo
+TimeoutStartSec=10s
+
+[Install]
+WantedBy=sysinit.target

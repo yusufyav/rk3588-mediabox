@@ -754,6 +754,17 @@ pub fn ready_or(then: fn()) -> bool {
     ready
 }
 
+/// Whether the scenes are made, a frame having been drawn: what the logo of
+/// a switch-on stays for. Not yet, and the next frame makes the rest.
+pub fn prepared() -> bool {
+    stage(|stage| {
+        let ready = stage.frame > 0 && stage.ready();
+        stage.soon |= !ready;
+        ready
+    })
+    .unwrap_or(true)
+}
+
 fn start(ui: &MediaBoxWindow, shown: Shown) {
     STAGE.with(|stage| *stage.borrow_mut() = Some(Stage::new(shown)));
     UI.with(|cell| *cell.borrow_mut() = Some(ui.as_weak()));

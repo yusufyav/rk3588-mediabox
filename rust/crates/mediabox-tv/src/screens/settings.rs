@@ -22,6 +22,7 @@ use mediabox_core::{
 };
 use serde_json::Value;
 
+use crate::appearance::{Curve, Interface, IntroPolicy, IntroSkip, Motion, MotionParam};
 use crate::layout::Layout;
 use crate::model::DisplayStatus;
 use crate::pointer::{Aim, Zone};
@@ -83,6 +84,26 @@ pub enum Action {
     /// Keep this tolerance: what choosing one in that list does. Shown once
     /// the daemon has kept it, not before.
     SetLiveTolerance(LiveSignalTolerance),
+    // ---- Arayüz ve Hareket: the interface's own, kept by the application
+    // (`appearance.rs`) and applied at once.
+    /// The opening on or off, once it is part of the boot.
+    SetIntroEnabled(bool),
+    ChooseIntroPolicy,
+    SetIntroPolicy(IntroPolicy),
+    ChooseIntroSkip,
+    SetIntroSkip(IntroSkip),
+    /// Plays the opening over this screen, now.
+    PreviewIntro,
+    SetReduced(bool),
+    SetIcons(bool),
+    /// One of the Motion Lab's parameters: its steps, and one of them, in
+    /// hundredths.
+    ChooseMotion(MotionParam),
+    SetMotion(MotionParam, i32),
+    ChooseCurve,
+    SetCurve(Curve),
+    /// The product's motion again; the opening's choices are left alone.
+    ResetMotion,
 }
 
 impl Action {
@@ -123,6 +144,10 @@ impl Action {
                 | Action::ChooseCecSourceLost
                 | Action::ChooseLiveStartup
                 | Action::ChooseLiveTolerance
+                | Action::ChooseIntroPolicy
+                | Action::ChooseIntroSkip
+                | Action::ChooseMotion(_)
+                | Action::ChooseCurve
         )
     }
 }
@@ -407,6 +432,10 @@ enum ChoiceKind {
     LiveStartup,
     LiveTolerance,
     Layout,
+    IntroPolicy,
+    IntroSkip,
+    Motion(MotionParam),
+    Curve,
 }
 
 const SOURCE_LOST: [CecSourceLost; 2] = [CecSourceLost::StayOn, CecSourceLost::Standby];
@@ -425,7 +454,12 @@ const LIVE_STARTUP: &str = "Alıcı başlangıç yöntemi";
 
 /// The card, and the list it opens, that choose the face of the home screen
 /// and these settings.
-pub const LAYOUT: &str = "Arayüz düzeni";
+pub const LAYOUT: &str = "Tema";
+
+/// The category of the interface's own looks and motion.
+pub const APPEARANCE: &str = "Arayüz ve Hareket";
+const INTRO_POLICY: &str = "Oynatılma";
+const INTRO_SKIP: &str = "Kumandayla atlama";
 
 /// What each startup method means for the viewer, under its name. Neither
 /// cuts the receiver's power, and neither line says so.
@@ -479,6 +513,8 @@ pub struct Settings {
     live_tolerance: Option<LiveSignalTolerance>,
     /// The face the home screen and these settings wear.
     layout: Layout,
+    /// The motion and the opening, as the application keeps them.
+    appearance: Interface,
     /// The fan curve editor, which is the whole of the "Soğutma" page: a
     /// graph and a list of points rather than rows of readings.
     pub cooling: super::cooling::Cooling,
@@ -510,6 +546,7 @@ impl Settings {
             live_startup: None,
             live_tolerance: None,
             layout: Layout::Classic,
+            appearance: Interface::default(),
             cooling: super::cooling::Cooling::new(),
             output: super::output::Output::new(),
             ethernet: super::ethernet::Ethernet::new(),
@@ -732,6 +769,42 @@ impl Settings {
         }
     }
 
+    /// The motion and the opening in force, drawn on their cards.
+    pub fn set_appearance(&mut self, appearance: Interface) {
+        self.appearance = appearance;
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id == "motion") {
+            group.rows = appearance_rows(&appearance);
+        }
+        self.set_layout(self.layout);
+        if self.pane == Pane::Rows && self.groups.get(self.section).is_some_and(|g| g.id == "motion") {
+            self.settle(1);
+        }
+    }
+
+    pub fn open_intro_policy(&mut self) -> bool {
+        self.choice = Some(IntroPolicy::ALL.iter().position(|p| *p == self.appearance.intro.policy).unwrap_or(0));
+        self.choice_kind = ChoiceKind::IntroPolicy;
+        true
+    }
+
+    pub fn open_intro_skip(&mut self) -> bool {
+        self.choice = Some(IntroSkip::ALL.iter().position(|p| *p == self.appearance.intro.skip).unwrap_or(0));
+        self.choice_kind = ChoiceKind::IntroSkip;
+        true
+    }
+
+    pub fn open_motion(&mut self, param: MotionParam) -> bool {
+        self.choice = Some(param.nearest(&self.appearance.motion));
+        self.choice_kind = ChoiceKind::Motion(param);
+        true
+    }
+
+    pub fn open_curve(&mut self) -> bool {
+        self.choice = Some(Curve::ALL.iter().position(|c| *c == self.appearance.motion.curve).unwrap_or(0));
+        self.choice_kind = ChoiceKind::Curve;
+        true
+    }
+
     /// Opens the two faces on the one in use.
     pub fn open_layout_choice(&mut self) -> bool {
         self.choice = Some(Layout::ALL.iter().position(|l| *l == self.layout).unwrap_or(0));
@@ -742,6 +815,10 @@ impl Settings {
     fn choice_len(&self) -> usize {
         match self.choice_kind {
             ChoiceKind::Layout => Layout::ALL.len(),
+            ChoiceKind::IntroPolicy => IntroPolicy::ALL.len(),
+            ChoiceKind::IntroSkip => IntroSkip::ALL.len(),
+            ChoiceKind::Motion(param) => param.steps().len(),
+            ChoiceKind::Curve => Curve::ALL.len(),
             ChoiceKind::LiveTolerance => LiveSignalTolerance::ALL.len(),
             ChoiceKind::LiveStartup => LiveReceiverStartupPolicy::ALL.len(),
             ChoiceKind::Leds => LedMode::ALL.len(),
@@ -757,6 +834,23 @@ impl Settings {
             ChoiceKind::Layout => {
                 let layout = Layout::ALL.get(at).copied()?;
                 (self.layout != layout).then_some(Action::SetLayout(layout))
+            }
+            ChoiceKind::IntroPolicy => {
+                let policy = IntroPolicy::ALL.get(at).copied()?;
+                (self.appearance.intro.policy != policy).then_some(Action::SetIntroPolicy(policy))
+            }
+            ChoiceKind::IntroSkip => {
+                let skip = IntroSkip::ALL.get(at).copied()?;
+                (self.appearance.intro.skip != skip).then_some(Action::SetIntroSkip(skip))
+            }
+            ChoiceKind::Motion(param) => {
+                let step = param.steps().get(at).copied()?;
+                let now = (param.get(&self.appearance.motion) * 100.0).round() as i32;
+                (now != step).then_some(Action::SetMotion(param, step))
+            }
+            ChoiceKind::Curve => {
+                let curve = Curve::ALL.get(at).copied()?;
+                (self.appearance.motion.curve != curve).then_some(Action::SetCurve(curve))
             }
             ChoiceKind::LiveStartup => {
                 let policy = LiveReceiverStartupPolicy::ALL.get(at).copied()?;
@@ -786,6 +880,60 @@ impl Settings {
 
     pub fn choice_view(&self) -> Option<ChoiceView> {
         let focus = self.choice?;
+        let intro = self.appearance.intro;
+        let motion = self.appearance.motion;
+        match self.choice_kind {
+            ChoiceKind::IntroPolicy => {
+                return Some(ChoiceView {
+                    title: INTRO_POLICY.into(),
+                    note: "Açılış, onaylandıktan sonra cihazın açılışına bağlanacak; şimdilik yalnız önizlenir.".into(),
+                    focus,
+                    items: IntroPolicy::ALL
+                        .iter()
+                        .map(|p| (p.label().to_string(), p.line().to_string(), intro.policy == *p))
+                        .collect(),
+                });
+            }
+            ChoiceKind::IntroSkip => {
+                return Some(ChoiceView {
+                    title: INTRO_SKIP.into(),
+                    note: String::new(),
+                    focus,
+                    items: IntroSkip::ALL
+                        .iter()
+                        .map(|k| (k.label().to_string(), k.line().to_string(), intro.skip == *k))
+                        .collect(),
+                });
+            }
+            ChoiceKind::Motion(param) => {
+                let now = (param.get(&motion) * 100.0).round() as i32;
+                return Some(ChoiceView {
+                    title: param.label().into(),
+                    note: param.line().into(),
+                    focus,
+                    items: param
+                        .steps()
+                        .iter()
+                        .map(|&step| {
+                            let line = if step == 100 { "Ürünün değeri" } else { "" };
+                            (crate::appearance::times(step as f32 / 100.0), line.to_string(), now == step)
+                        })
+                        .collect(),
+                });
+            }
+            ChoiceKind::Curve => {
+                return Some(ChoiceView {
+                    title: "Eğri".into(),
+                    note: String::new(),
+                    focus,
+                    items: Curve::ALL
+                        .iter()
+                        .map(|c| (c.label().to_string(), String::new(), motion.curve == *c))
+                        .collect(),
+                });
+            }
+            _ => {}
+        }
         if self.choice_kind == ChoiceKind::Layout {
             return Some(ChoiceView {
                 title: LAYOUT.into(),
@@ -1112,7 +1260,7 @@ impl Settings {
         }
         // The right-hand side is names and values, as a television's own
         // settings are: no mark on every row, no sentence under it.
-        let groups = compose(status, diagnostics, display);
+        let groups = compose(status, diagnostics, display, &self.appearance);
         let changed = self.groups.len() != groups.len();
         self.groups = groups;
         self.set_layout(self.layout);
@@ -1769,10 +1917,40 @@ fn page_rows(page: Page, status: Option<&Value>, display: Option<&DisplayStatus>
     }
 }
 
+/// "Arayüz ve Hareket": the face, the opening and the motion. Its values are
+/// the application's (`appearance.rs`), drawn here; the face's card is
+/// labelled by `Settings::set_layout`.
+fn appearance_rows(appearance: &Interface) -> Vec<Row> {
+    let intro = appearance.intro;
+    let motion = appearance.motion;
+    let switch = |label: &str, on: bool, action: Action| Row { toggle: Some(on), ..Row::act(label, action) };
+    let mut rows = vec![
+        Row::act(LAYOUT, Action::ChooseLayout),
+        Row::header("Açılış"),
+        switch("Açılış animasyonu", intro.enabled, Action::SetIntroEnabled(!intro.enabled)),
+        Row { value: intro.policy.label().into(), ..Row::act(INTRO_POLICY, Action::ChooseIntroPolicy) }
+            .disabled_if(!intro.enabled),
+        Row { value: intro.skip.label().into(), ..Row::act(INTRO_SKIP, Action::ChooseIntroSkip) },
+        Row::act("Açılışı önizle", Action::PreviewIntro),
+        Row::header("Hareket"),
+        switch("Azaltılmış hareket", motion.reduced, Action::SetReduced(!motion.reduced)),
+        switch("İkon animasyonu", motion.icons, Action::SetIcons(!motion.icons)).disabled_if(motion.reduced),
+        Row::header("Motion Lab"),
+    ];
+    rows.extend(MotionParam::ALL.iter().map(|&param| Row {
+        value: crate::appearance::times(param.get(&motion)),
+        ..Row::act(param.label(), Action::ChooseMotion(param))
+    }));
+    rows.push(Row { value: motion.curve.label().into(), ..Row::act("Eğri", Action::ChooseCurve) });
+    rows.push(Row::act("Varsayılan hareket ayarlarına dön", Action::ResetMotion).disabled_if(motion == Motion::default()));
+    rows
+}
+
 fn compose(
     status: Option<&Value>,
     diagnostics: Option<&Value>,
     _display: Option<&DisplayStatus>,
+    appearance: &Interface,
 ) -> Vec<Group> {
     let dash = || "—".to_string();
 
@@ -1848,13 +2026,18 @@ fn compose(
             rows: device,
         },
         Group {
+            id: "motion",
+            title: APPEARANCE.into(),
+            blurb: "Tema, açılış animasyonu ve hareket",
+            icon: "frame",
+            rows: appearance_rows(appearance),
+        },
+        Group {
             id: "system",
             title: "Sistem".into(),
-            blurb: "Arayüz düzeni, sürüm, yeniden başlatma ve kapatma",
+            blurb: "Sürüm, yeniden başlatma ve kapatma",
             icon: "info",
             rows: vec![
-                // Its value is the face in use (`Settings::set_layout`).
-                Row::act(LAYOUT, Action::ChooseLayout),
                 Row::act("Yeniden başlat", Action::Restart),
                 Row::act("Kapat", Action::Shutdown),
                 Row::header("Sürüm"),
@@ -2154,6 +2337,7 @@ mod tests {
                 "TV ve Kumanda",
                 "Canlı TV",
                 "Cihaz",
+                "Arayüz ve Hareket",
                 "Sistem",
                 "Tanılama"
             ]
@@ -2245,11 +2429,6 @@ mod tests {
         assert!(settings.step(1, 0));
         assert_eq!(
             settings.focused().and_then(|r| r.action),
-            Some(Action::ChooseLayout)
-        );
-        assert!(settings.step(0, 1));
-        assert_eq!(
-            settings.focused().and_then(|r| r.action),
             Some(Action::Restart)
         );
         assert!(settings.step(0, 1));
@@ -2274,7 +2453,7 @@ mod tests {
         settings.step(0, 1);
         settings.step(0, 1);
         settings.step(-1, 0);
-        settings.step(0, -1); // Cihaz
+        settings.step(0, -1); // Arayüz ve Hareket
         settings.step(0, 1); // Sistem again
         settings.step(1, 0);
         assert_eq!(
@@ -2426,7 +2605,7 @@ mod tests {
     fn the_account_card_tells_whether_it_is_connected() {
         for (authenticated, value) in [(true, "Bağlı"), (false, "Bağlı değil")] {
             let status = provider(authenticated);
-            let groups = compose(Some(&status), None, None);
+            let groups = compose(Some(&status), None, None, &Interface::default());
             let card = groups[0]
                 .rows
                 .iter()
@@ -2465,7 +2644,7 @@ mod tests {
         let mut status = provider(true);
         status["media"]["provider"]["password"] = "hunter2".into();
         status["media"]["provider"]["authKey"] = "sekritkey".into();
-        let groups = compose(Some(&status), None, None);
+        let groups = compose(Some(&status), None, None, &Interface::default());
         let rows = account_rows(Some(&status))
             .into_iter()
             .chain(groups.into_iter().flat_map(|g| g.rows));
@@ -2491,7 +2670,7 @@ mod tests {
     }
 
     fn device(status: Option<&Value>) -> Vec<Row> {
-        compose(status, None, None)
+        compose(status, None, None, &Interface::default())
             .into_iter()
             .find(|group| group.title == "Cihaz")
             .expect("device section")
@@ -2687,7 +2866,7 @@ mod tests {
     // ------------------------------------------------------------ the network
 
     fn connections(diagnostics: &Value) -> Vec<Row> {
-        compose(None, Some(diagnostics), None)
+        compose(None, Some(diagnostics), None, &Interface::default())
             .into_iter()
             .find(|group| group.title == "Bağlantılar")
             .expect("connections")
@@ -2752,7 +2931,7 @@ mod tests {
     /// Nothing about the network is claimed before the daemon has answered.
     #[test]
     fn an_unanswered_network_claims_nothing() {
-        let rows = compose(None, None, None)
+        let rows = compose(None, None, None, &Interface::default())
             .into_iter()
             .find(|group| group.title == "Bağlantılar")
             .unwrap()
@@ -2773,7 +2952,7 @@ mod tests {
     /// number them, each saying how it takes its address.
     #[test]
     fn every_wired_port_has_a_card() {
-        let groups = compose(Some(&two_ports()), None, None);
+        let groups = compose(Some(&two_ports()), None, None, &Interface::default());
         let rows = &groups.iter().find(|g| g.title == "Bağlantılar").unwrap().rows;
         let cards: Vec<(&str, &str, Option<&str>)> = rows
             .iter()
@@ -2788,7 +2967,7 @@ mod tests {
             ]
         );
         // A daemon that says nothing about ports: no cards, nothing invented.
-        let groups = compose(None, None, None);
+        let groups = compose(None, None, None, &Interface::default());
         let rows = &groups.iter().find(|g| g.title == "Bağlantılar").unwrap().rows;
         assert!(rows.iter().all(|row| row.page != Some(Page::Ethernet)));
     }
@@ -2841,7 +3020,7 @@ mod tests {
     #[test]
     fn no_display_is_a_reading() {
         let status = serde_json::json!({"output": {"setting": {}, "error": "EDID okunamadı"}});
-        let groups = compose(Some(&status), None, None);
+        let groups = compose(Some(&status), None, None, &Interface::default());
         let row = &groups[1].rows[0];
         assert!(!row.selectable());
         assert_eq!(row.value, "EDID okunamadı");

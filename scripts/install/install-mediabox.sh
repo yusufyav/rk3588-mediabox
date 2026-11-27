@@ -593,6 +593,8 @@ fi
 
 step "services"
 systemctl enable --now mediabox-console-off.service >/dev/null 2>&1 || true
+# The switch-on's logo at the sink's own mode, from the next boot on.
+systemctl enable mediabox-boot-logo.service >/dev/null 2>&1 || true
 # The boot record the hotplug helper compares against; see the unit.
 systemctl enable mediabox-display-seed.service >/dev/null 2>&1 || true
 # The display's hardware state, which the control plane reads and takes from

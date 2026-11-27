@@ -4,8 +4,10 @@
 //! parameters it turns (`QuietMotion` in ui/quiet/motion.slint) are part of
 //! every build, because they are the same properties the product animates
 //! with; what keeps the lab out of the product is that nothing opens it
-//! unless the interface was started with MEDIABOX_TV_MOTION_LAB=1. Nothing
-//! it turns is written anywhere: a restart is the product's motion again.
+//! unless the interface was started with MEDIABOX_TV_MOTION_LAB=1. What it
+//! turns is kept as Ayarlar > Arayüz ve Hareket keeps it (src/appearance.rs):
+//! the two are one set of values, and "Varsayılan hareket ayarlarına dön"
+//! is the product's motion again.
 //!
 //! On Quiet OS's home screen the Menu key opens and closes it. While it is
 //! open it takes the remote: Up and Down choose a parameter, Left and Right

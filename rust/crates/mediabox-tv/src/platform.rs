@@ -398,7 +398,17 @@ fn crystal_ppm() -> Option<f64> {
         return crystal_kept().or_else(|| CRYSTAL_EARLY.get().copied());
     }
     let ppm = (raw as f64 / mono as f64 - 1.0) * 1e6;
-    let ppm = (ppm.abs() <= CRYSTAL_PPM_MAX).then_some(ppm)?;
+    if ppm.abs() > CRYSTAL_PPM_MAX {
+        // Not the crystal: CLOCK_MONOTONIC itself was slewed while this
+        // process ran -- NTP correcting the time after the network came back
+        // (measured on the Plus, 2026-11-27: 96 ppm accumulated over 28
+        // minutes, 3 ppm in the last five seconds). Nothing is waited for: the
+        // value this boot already measured stands. Without one, a mode change
+        // waited CRYSTAL_WINDOW + 1 s in `crystal_ppm_settled`, holding the
+        // display, and a trial's fifteen seconds ran out before its picture
+        // was on the panel.
+        return crystal_kept().or_else(|| CRYSTAL_EARLY.get().copied()).or(Some(0.0));
+    }
     crystal_keep(ppm);
     Some(ppm)
 }
@@ -1040,6 +1050,13 @@ thread_local! {
 /// called on the event loop's thread.
 pub fn snapshot_to(path: std::path::PathBuf) {
     SNAPSHOT.with(|cell| *cell.borrow_mut() = Some(path));
+}
+
+/// The first frame's commit -- the mode on the wire -- has returned.
+static FIRST_COMMIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn first_commit_done() -> bool {
+    FIRST_COMMIT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Whether to rebuild each frame's framebuffer instead of keeping it with the
@@ -1883,20 +1900,48 @@ impl SplitDisplay {
             {
                 // Nothing may be committed while the CRTC is set.
                 let mut s = self.hold();
-                let set = self.kms.set_crtc(
-                    self.crtc,
-                    Some(frame.framebuffer),
-                    (0, 0),
-                    &[self.connector.handle()],
-                    Some(self.wire_mode()),
-                );
-                if set.is_ok() {
+                // The mode and the connector's colour in one atomic commit:
+                // one link training. The kernel boots this connector at
+                // `color_format` ycbcr444 (measured on the Plus), so a first
+                // frame set without it was followed by a second training when
+                // the colour was written -- which is why the preparation used
+                // to write it at boot, and why the television resynchronised
+                // twice before the menu (docs/mediabox-boot-experience.md).
+                // Properties already as wanted are not changed by it; a driver
+                // that refuses it gets the plain SETCRTC below, as before.
+                let colour = self.colour.get();
+                let atomic = colour.is_some()
+                    && match self.atomic_modeset(frame.framebuffer, self.mode.get(), colour) {
+                        Ok(()) => {
+                            self.applied.set(colour);
+                            eprintln!("mediabox-tv.platform first frame: mode and colour in one commit");
+                            true
+                        }
+                        Err(e) => {
+                            eprintln!("mediabox-tv.platform first frame: one commit refused ({e}); SETCRTC");
+                            false
+                        }
+                    };
+                if atomic {
                     s.ui_on_panel = true;
+                    drop(s);
+                } else {
+                    let set = self.kms.set_crtc(
+                        self.crtc,
+                        Some(frame.framebuffer),
+                        (0, 0),
+                        &[self.connector.handle()],
+                        Some(self.wire_mode()),
+                    );
+                    if set.is_ok() {
+                        s.ui_on_panel = true;
+                    }
+                    drop(s);
+                    set.map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
                 }
-                drop(s);
-                set.map_err(|e| format!("DRM_IOCTL_MODE_SETCRTC(first frame): {e}"))?;
             }
             self.presentation.borrow_mut().current = Some(frame);
+            FIRST_COMMIT.store(true, std::sync::atomic::Ordering::Relaxed);
         } else {
             // One interface frame at a time: the one before is on the panel
             // and the one before that back with GBM.
@@ -2305,20 +2350,22 @@ impl SplitDisplay {
             .as_ref()
             .map(|frame| frame.framebuffer);
         // The plane the interface is on: the one on this CRTC showing the
-        // frame on the panel now.
-        let plane = self
-            .kms
-            .plane_handles()
-            .map_err(|e| format!("planes: {e}"))?
-            .into_iter()
-            .find(|handle| {
-                self.kms.get_plane(*handle).is_ok_and(|plane| {
-                    plane.crtc() == Some(self.crtc)
-                        && current.is_some()
-                        && plane.framebuffer() == current
-                })
-            })
-            .ok_or("the interface's plane is not on the panel")?;
+        // frame on the panel now -- or, for the first frame, when nothing of
+        // the interface's is on the panel yet, this CRTC's primary.
+        let plane = match current {
+            Some(_) => self
+                .kms
+                .plane_handles()
+                .map_err(|e| format!("planes: {e}"))?
+                .into_iter()
+                .find(|handle| {
+                    self.kms.get_plane(*handle).is_ok_and(|plane| {
+                        plane.crtc() == Some(self.crtc) && plane.framebuffer() == current
+                    })
+                }),
+            None => crate::video::primary_plane(&self.kms, self.crtc),
+        }
+        .ok_or("the interface's plane is not on the panel")?;
         fn need<H: control::ResourceHandle>(
             kms: &SharedKms,
             object: H,
@@ -2914,6 +2961,26 @@ impl GlContext {
     /// Slow and deliberately so — a 4K readback is tens of megabytes — which is
     /// why it happens once, when asked, and never on an ordinary frame.
     fn capture(&self, path: &Path) {
+        let Some((width, height, image)) = self.read_back() else { return };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match image::RgbaImage::from_raw(width, height, image) {
+            Some(buffer) => match buffer.save(path) {
+                Ok(()) => eprintln!(
+                    "mediabox-tv.snapshot wrote {} {}x{}",
+                    path.display(),
+                    width,
+                    height
+                ),
+                Err(e) => eprintln!("mediabox-tv.snapshot {} failed: {e}", path.display()),
+            },
+            None => eprintln!("mediabox-tv.snapshot buffer did not fit the frame"),
+        }
+    }
+
+    /// The finished frame, top row first, RGBA with opaque alpha.
+    fn read_back(&self) -> Option<(u32, u32, Vec<u8>)> {
         const GL_RGBA: u32 = 0x1908;
         const GL_UNSIGNED_BYTE: u32 = 0x1401;
         type ReadPixels = unsafe extern "C" fn(i32, i32, i32, i32, u32, u32, *mut u8);
@@ -2922,7 +2989,7 @@ impl GlContext {
         let address = self.context.display().get_proc_address(&symbol);
         if address.is_null() {
             eprintln!("mediabox-tv.snapshot glReadPixels unavailable");
-            return;
+            return None;
         }
         let read: ReadPixels = unsafe { std::mem::transmute(address) };
 
@@ -2954,22 +3021,7 @@ impl GlContext {
                 pixel[3] = 0xff;
             }
         }
-
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        match image::RgbaImage::from_raw(width, height, image) {
-            Some(buffer) => match buffer.save(path) {
-                Ok(()) => eprintln!(
-                    "mediabox-tv.snapshot wrote {} {}x{}",
-                    path.display(),
-                    width,
-                    height
-                ),
-                Err(e) => eprintln!("mediabox-tv.snapshot {} failed: {e}", path.display()),
-            },
-            None => eprintln!("mediabox-tv.snapshot buffer did not fit the frame"),
-        }
+        Some((width, height, image))
     }
 }
 

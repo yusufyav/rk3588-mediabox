@@ -1785,8 +1785,8 @@ fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
         app.settings
             .groups
             .iter()
-            .position(|g| g.title == "Sistem")
-            .expect("Sistem")
+            .position(|g| g.title == "Arayüz ve Hareket")
+            .expect("Arayüz ve Hareket")
     });
     app(|app| {
         app.settings.point_section(system);
@@ -1794,7 +1794,7 @@ fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
     });
     key(InputAction::Right);
     let card = app(|app| app.settings.focused().map(|r| (r.label.clone(), r.value.clone())));
-    assert_eq!(card, Some(("Arayüz düzeni".into(), "Klasik MediaBox".into())));
+    assert_eq!(card, Some(("Tema".into(), "Klasik MediaBox".into())));
     key(InputAction::Ok);
     assert!(ui.get_settings_choice_open(), "the two faces, as a list");
     key(InputAction::Down);
@@ -1829,7 +1829,7 @@ fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
     assert_eq!(app(|app| app.home.column()), first);
     // Back the other way, from the Quiet face's own settings.
     app(|app| app.open(crate::route::Route::Settings));
-    assert_eq!(app(|app| app.settings.focused().map(|r| r.label.clone())), Some("Arayüz düzeni".into()));
+    assert_eq!(app(|app| app.settings.focused().map(|r| r.label.clone())), Some("Tema".into()));
     key(InputAction::Ok);
     key(InputAction::Up);
     key(InputAction::Ok);
@@ -1841,12 +1841,132 @@ fn the_layout_is_chosen_in_the_settings_applied_in_place_and_kept() {
     }
 }
 
+/// Ayarlar > Arayüz ve Hareket, with the remote: a switch, a Motion Lab
+/// parameter and the opening's skip are applied at once and kept whole in
+/// the one interface file; the preview plays over the settings and a key
+/// ends it -- or does not, as chosen -- without reaching the screen under
+/// it; the product's motion comes back without touching the opening's
+/// choices; and a new start of the interface reads all of it back.
+#[test]
+fn the_interface_and_motion_category_keeps_one_file_and_previews_the_opening() {
+    use crate::{QuietIntro, QuietMotion};
+    use mediabox_core::InputAction;
+    let (ui, scratch) = driven();
+    let key = |action| {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        app(|app| {
+            app.remote_key(action, true, crate::input::Origin::Keyboard);
+            app.remote_key(action, false, crate::input::Origin::Keyboard);
+        });
+    };
+    let focused = || app(|app| app.settings.focused().map(|r| r.label.clone()).unwrap_or_default());
+    let walk_to = |label: &str| {
+        for way in [InputAction::Down, InputAction::Up] {
+            for _ in 0..24 {
+                if focused() == label {
+                    return;
+                }
+                key(way);
+            }
+        }
+        panic!("no card {label}");
+    };
+    let motion = ui.global::<QuietMotion>();
+    let intro = ui.global::<QuietIntro>();
+    let kept = scratch.0.join("interface-preferences.json");
+    let until = |what: &str, done: &dyn Fn(&crate::appearance::Interface) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done(&crate::appearance::read(&kept)) {
+            assert!(std::time::Instant::now() < deadline, "never kept: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+
+    wear(crate::layout::Layout::Quiet);
+    app(|app| {
+        app.open(crate::route::Route::Settings);
+        let at = app.settings.groups.iter().position(|g| g.title == "Arayüz ve Hareket").expect("the category");
+        app.settings.point_section(at);
+        app.paint();
+    });
+    key(InputAction::Right);
+    assert_eq!(focused(), "Tema");
+
+    walk_to("İkon animasyonu");
+    key(InputAction::Ok);
+    assert!(!motion.get_icons(), "applied at once");
+    walk_to("Derinlik");
+    key(InputAction::Ok);
+    assert!(ui.get_settings_choice_open(), "its steps, as a list");
+    key(InputAction::Down);
+    key(InputAction::Ok);
+    assert_eq!(motion.get_depth(), 1.25, "the step after × 1");
+    assert_eq!(
+        app(|app| app.settings.focused().map(|r| r.value.clone())),
+        Some("× 1.25".into()),
+        "and its card says so"
+    );
+    until("icons and depth", &|i| !i.motion.icons && i.motion.depth == 1.25 && i.layout == crate::layout::Layout::Quiet);
+
+    // The preview, over the settings; any key ends it and nothing else.
+    walk_to("Açılışı önizle");
+    key(InputAction::Ok);
+    assert!(intro.get_shown(), "the opening is on the panel");
+    assert_eq!(ui.get_screen(), "settings", "over the settings");
+    key(InputAction::Down);
+    assert!(!intro.get_shown(), "a key ended it");
+    assert_eq!(focused(), "Açılışı önizle", "and did not move the focus under it");
+
+    // Atlanamaz: no key ends it; its own time does.
+    walk_to("Kumandayla atlama");
+    key(InputAction::Ok);
+    key(InputAction::Down);
+    key(InputAction::Down);
+    key(InputAction::Ok);
+    until("the skip", &|i| i.intro.skip == crate::appearance::IntroSkip::Never);
+    walk_to("Açılışı önizle");
+    key(InputAction::Ok);
+    key(InputAction::Back);
+    key(InputAction::Ok);
+    assert!(intro.get_shown(), "neither Back nor Ok ends it");
+    assert_eq!(ui.get_screen(), "settings");
+    assert!(app(|app| app.intro_timer.running()), "its own length ends it");
+    app(|app| app.end_intro());
+    assert!(!intro.get_shown());
+
+    // The product's motion again; the opening's choices stay.
+    walk_to("Varsayılan hareket ayarlarına dön");
+    key(InputAction::Ok);
+    assert!(motion.get_icons() && motion.get_depth() == 1.0);
+    until("the reset", &|i| i.motion == crate::appearance::Motion::default() && i.intro.skip == crate::appearance::IntroSkip::Never);
+
+    // Read back by a new start of the interface.
+    motion.set_parallax(0.5);
+    app(|app| {
+        app.appearance.motion.parallax = 0.5;
+        app.keep_appearance();
+    });
+    until("the parallax", &|i| i.motion.parallax == 0.5);
+    motion.set_parallax(1.0);
+    let files = crate::AppFiles {
+        cache: scratch.0.join("cache").display().to_string(),
+        state: scratch.0.join("state.json").display().to_string(),
+        prefs: scratch.0.join("media-preferences.json"),
+        interface: kept.clone(),
+        live_kept: crate::LiveKept::default(),
+    };
+    let again = crate::App::new(&ui, std::time::Instant::now(), false, files);
+    assert_eq!(again.layout, crate::layout::Layout::Quiet);
+    assert_eq!(again.appearance.intro.skip, crate::appearance::IntroSkip::Never);
+    assert_eq!(motion.get_parallax(), 0.5, "applied as it starts");
+}
+
 /// Quiet OS's Motion Lab is a development tool: without
 /// MEDIABOX_TV_MOTION_LAB the Menu key on the home screen does what it did
 /// (nothing), and the launcher keeps the remote. With it, Menu opens the
 /// panel, which then takes the remote -- the launcher's focus stays where it
 /// was -- turns its parameters within their bounds, replays, and closes on
-/// Back. Nothing it turns outlives the process.
+/// Back.
 #[test]
 fn the_motion_lab_is_inert_unless_asked_for_and_owns_the_remote_while_open() {
     use crate::QuietMotion;

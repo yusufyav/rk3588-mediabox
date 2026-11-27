@@ -1,12 +1,19 @@
 [Unit]
 Description=MediaBox native Slint appliance shell (Mali GBM + Rockchip KMS)
-# The daemon, the media worker and the network. The catalogue is a fan-out over
-# third-party hosts through the worker, and on a cold boot this unit used to ask
-# for it sixteen milliseconds after starting — before the network was up — take
-# the refusal as the answer, and show an empty television until something
-# restarted it. The interface retries now; this is so it rarely has to.
-After=mediaboxd-rs.service mediabox-media-worker.service network-online.target
-Wants=mediaboxd-rs.service network-online.target
+# The daemon and the media worker, both local -- and not the network.
+#
+# This unit used to wait for network-online.target too, so that the first ask
+# for the catalogue (a fan-out over third-party hosts) would find the network
+# up. That put the whole television behind the network: measured on the Plus
+# with the Wi-Fi not joining, systemd-networkd-wait-online ran out its twenty
+# seconds and the menu came up 33 s after the kernel's clock started; with the
+# Wi-Fi joining the wait still cost nine (docs/mediabox-boot-experience.md). The home screen,
+# settings and local files need no network at all, and the catalogue loader
+# asks again until one row of it arrives (1, 2, 4, 8, then every 15 s;
+# spawn_loader in main.rs), so a network that comes later fills it in without
+# a restart.
+After=mediaboxd-rs.service mediabox-media-worker.service
+Wants=mediaboxd-rs.service
 Conflicts=kodi.service mediabox-browser.service
 # Hardware this box does not own alone.
 #
@@ -55,7 +62,19 @@ Environment=HOME=/var/lib/mediabox-ui
 # GL stack; it does not link the media runtime at all, which is the player's
 # and Kodi's business and reached through their own RPATHs.
 Environment=LD_LIBRARY_PATH=/opt/rk3588-mediabox/mali-g24p0-runtime/lib
-ExecStartPre=-/opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
+# Without waiting for the display plan. The plan is the control plane's, made
+# from the observer's offer, and the observer reads the display only while
+# someone holds DRM master -- which, at this unit's start, is about to be this
+# interface. So on a cold boot there cannot be one yet, and the three seconds
+# the script waited for it by default were on the way to the first picture
+# both times it was measured (plan=stale). The plan is for Kodi's profile; Kodi
+# waits for it in its own ExecStartPre. A current plan is still read and used.
+#
+# And without the connector reset when the sink has an EDID: the interface
+# commits the connector's colour with its mode in its first frame, and the
+# reset written here was a second link training on every cold boot (see the
+# script; `owner`).
+ExecStartPre=-/usr/bin/env MEDIABOX_PLAN_WAIT=0 MEDIABOX_HDMI_CONNECTOR_RESET=owner /opt/rk3588-mediabox/bin/mediabox-hdmi-prepare
 ExecStart=/opt/rk3588-mediabox/bin/mediabox-tv
 Restart=on-failure
 RestartSec=3s

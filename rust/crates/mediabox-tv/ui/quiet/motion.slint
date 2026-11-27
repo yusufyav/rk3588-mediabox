@@ -2,8 +2,9 @@ import { Theme } from "../theme.slint";
 
 // Quiet OS's motion: every duration and curve its screens animate with, and
 // the few parameters the Motion Lab (lab.slint, src/motion_lab.rs) may turn
-// on a television. The defaults are the product's values; nothing but the
-// lab ever writes them.
+// on a television. The defaults are the product's values; the lab and
+// Ayarlar > Arayüz ve Hareket turn them, and the application keeps them
+// (src/appearance.rs).
 //
 // One technique throughout, and it is easing, not physics: a Slint property
 // animation that is retargeted whenever its binding changes. A new target
@@ -38,6 +39,9 @@ export global QuietMotion {
     in-out property <int> replay: 0;
     // Reduced motion, from the lab: Quiet OS's durations only.
     in-out property <bool> reduced: false;
+    // The launcher's marks move as their row is taken (marks.slint); off,
+    // a mark is simply there. From Ayarlar > Arayüz ve Hareket.
+    in-out property <bool> icons: true;
     // The lab panel's own state, drawn by lab.slint.
     in-out property <bool> lab-open: false;
     in-out property <int> lab-row: 0;
@@ -58,7 +62,7 @@ export global QuietMotion {
     // ---- the type that names what is chosen
     out property <duration> t-type: 300ms * k;
     // ---- an application's mark, as its row is taken (marks.slint)
-    out property <duration> t-mark: 520ms * k;
+    out property <duration> t-mark: icons ? 520ms * k : 0ms;
     // ---- the camera while it is already moving, or has far to go: a held key
     // and a reversal keep the scene and the words close behind the focus
     out property <duration> t-brisk: 300ms * k;

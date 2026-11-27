@@ -3,10 +3,10 @@ Description=Stremio streaming server (torrent and stream resolution for MediaBox
 Documentation=https://github.com/Stremio/stremio-linux-shell
 After=network-online.target
 Wants=network-online.target
-# The control plane proxies this service; it is useful on its own, so the
-# dependency is declared one way only and the daemon degrades gracefully when
-# this is down.
-Before=mediaboxd-rs.service
+# The control plane proxies this service and degrades gracefully when it is
+# down, so it is not ordered against it at all. It used to be
+# `Before=mediaboxd-rs.service`, which, with the network wait above, held the
+# control plane and the television until the network was online.
 
 [Service]
 Type=simple
